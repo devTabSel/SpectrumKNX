@@ -14,7 +14,78 @@ import { anchorKey } from '../utils/anchorKey';
 
 export type { SortKey, SortLevel, SortConfig };
 
+export interface TelegramTableFeatures {
+  quickInfo?: boolean;
+  quickFilter?: boolean;
+  columnResize?: boolean;
+  rowMarks?: boolean;
+  rowFlags?: boolean;
+}
+
+export interface TelegramTableQuickFilterConfig {
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  enabled?: boolean;
+  onEnabledChange?: (enabled: boolean) => void;
+  patterns?: Partial<Record<ColId, QuickCellValue>>;
+  onPatternsChange?: (patterns: Partial<Record<ColId, QuickCellValue>>) => void;
+}
+
+export interface TelegramTableRowMarksConfig {
+  markedKeys?: string[];
+  onMarkedKeysChange?: (keys: string[]) => void;
+  lastMarkedKey?: string | null;
+  onLastMarkedKeyChange?: (key: string | null) => void;
+}
+
+export interface TelegramTableRowFlagsConfig {
+  flaggedKeys?: string[];
+  onFlaggedKeysChange?: (keys: string[]) => void;
+}
+
+export interface TelegramTableGroupingLevel {
+  key: string;
+  direction: 'asc' | 'desc';
+}
+
+export interface TelegramTableColumnCellContent {
+  top?: (row: Telegram) => React.ReactNode;
+  bottom?: (row: Telegram) => React.ReactNode;
+}
+
+export interface TelegramTableColumnLineStyles {
+  top?: React.CSSProperties;
+  bottom?: React.CSSProperties;
+}
+
+export interface TelegramTableColumnConfig {
+  order?: number;
+  visible?: boolean;
+  width?: number;
+  content?: TelegramTableColumnCellContent;
+  lineStyles?: TelegramTableColumnLineStyles;
+}
+
+export interface TelegramTableConfig {
+  sortConfig: SortConfig;
+  onSort: (key: SortKey, opts?: { additive?: boolean }) => void;
+  visibleColumns: { [key: string]: boolean };
+  columnOrder?: ColId[];
+  grouping?: TelegramTableGroupingLevel[];
+  columns?: Partial<Record<ColId, TelegramTableColumnConfig>>;
+  features?: TelegramTableFeatures;
+  quickFilter?: TelegramTableQuickFilterConfig;
+  rowMarks?: TelegramTableRowMarksConfig;
+  rowFlags?: TelegramTableRowFlagsConfig;
+  infoBarOpen?: boolean;
+  onInfoBarOpenChange?: (open: boolean) => void;
+}
+
 interface TelegramTableProps {
+  /** Unique table instance ID used to scope persisted local preferences. */
+  instanceId?: string;
+  /** Reusable instance configuration for table/sort/columns/features/state. */
+  tableConfig?: TelegramTableConfig;
   telegrams: Telegram[];
   visibleColumns: { [key: string]: boolean };
   sortConfig: SortConfig;
@@ -101,7 +172,7 @@ const COLUMNS: ColumnDef[] = [
   { id: 'value', label: 'VALUE', sortKey: 'value_numeric', defaultWidth: 220, minWidth: 120 },
 ];
 
-const COLUMN_WIDTHS_PREF = 'columnWidths';
+const columnWidthsPrefKey = (instanceId: string) => `columnWidths:${instanceId}`;
 
 const getTypeColor = (type?: string | null) => {
   switch (type) {
@@ -127,16 +198,53 @@ const getDPTLabel = (dpt_main: number | null) => {
   return 'Unknown DPT';
 };
 
+const dptKeyLabel = (dptMain: number | null, dptSub: number | null): string | null => {
+  if (dptMain == null) return null;
+  if (dptSub == null) return `${dptMain}.x`;
+  return `${dptMain}.${String(dptSub).padStart(3, '0')}`;
+};
+
+const dptDescriptionLabel = (dptName: string | null, unit: string | null | undefined): string | null => {
+  if (!dptName) return unit ? `(${unit})` : null;
+  const cleaned = dptName.trim();
+  // Stored names often look like "1.001 - Switch"; keep only the description row.
+  const withoutCode = cleaned
+    .replace(/^\d+(?:\.\d+)?\s*[-–:]\s*/u, '')
+    .trim();
+  const base = withoutCode.length > 0 ? withoutCode : cleaned;
+  return unit ? `${base} (${unit})` : base;
+};
+
 type TelegramRow = Telegram & { deltaStr: string | null; deltaMs: number | null };
 
-const formatDeltaMs = (diffMs: number): string => {
+const formatDeltaMs = (diffMs: number, sign: '+' | '-'): string => {
   const mm = String(Math.floor(diffMs / 60000)).padStart(2, '0');
   const ss = String(Math.floor((diffMs % 60000) / 1000)).padStart(2, '0');
   const ms = String(diffMs % 1000).padStart(3, '0');
-  return `+ ${mm}:${ss}.${ms}`;
+  return `${sign} ${mm}:${ss}.${ms}`;
 };
 
 const cellPadding = '0.75rem 1rem'; // Unified padding for all cells
+
+// Default two-line styles per column. These are the built-in render defaults
+// and can be overridden per column via tableConfig.columns[col].lineStyles.
+const DEFAULT_COLUMN_LINE_STYLES: Partial<Record<ColId, TelegramTableColumnLineStyles>> = {
+  time: {
+    top: { color: 'var(--text-main)', fontVariantNumeric: 'tabular-nums', fontWeight: 500 },
+    bottom: { fontSize: '0.65rem', color: 'var(--text-dim)', marginTop: '0.15rem', fontVariantNumeric: 'tabular-nums' },
+  },
+  source: {
+    // Device name style aligned to GA name style by default.
+    bottom: { fontSize: '0.7rem', color: 'var(--text-main)', fontWeight: 500, marginTop: '0.15rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  },
+  target: {
+    bottom: { fontSize: '0.7rem', color: 'var(--text-main)', fontWeight: 500, marginTop: '0.15rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  },
+  dpt: {
+    top: { fontSize: '0.75rem', color: 'var(--text-main)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 },
+    bottom: { fontSize: '0.68rem', color: 'var(--text-dim)', marginTop: '0.12rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  },
+};
 
 const ROW_ESTIMATE = 85; // matches the virtualizer's estimateSize
 
@@ -228,6 +336,8 @@ const compileQuickFilters = (patterns: Partial<Record<ColId, QuickCellValue>>): 
 };
 
 export const TelegramTable: React.FC<TelegramTableProps> = ({
+  instanceId = 'default',
+  tableConfig,
   telegrams, visibleColumns, sortConfig, onSort, activeFilters, onQuickFilter, onQuickVisualize, onQuickLastSeen, canSend,
   quickFilterOpen, onQuickFilterOpenChange, quickFilterEnabled, onQuickFilterEnabledChange, quickPatterns, onQuickPatternsChange,
   onDeltaContextChange, onDeltaContextEnabledChange,
@@ -239,18 +349,60 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 }) => {
   const parentRef = useRef<HTMLDivElement>(null);
 
-  // ── Column widths (persisted, shared across live & history views) ──
-  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
+  const effectiveSortConfig = tableConfig?.sortConfig ?? sortConfig;
+  const effectiveOnSort = tableConfig?.onSort ?? onSort;
+  const effectiveVisibleColumns = tableConfig?.visibleColumns ?? visibleColumns;
+  const features = tableConfig?.features;
+  const quickInfoEnabled = features?.quickInfo !== false;
+  const quickFilterFeatureEnabled = features?.quickFilter !== false;
+  const columnResizeEnabled = features?.columnResize !== false;
+  const rowMarksEnabled = features?.rowMarks !== false;
+  const rowFlagsEnabled = features?.rowFlags !== false;
+
+  const effectiveQuickFilterOpen = tableConfig?.quickFilter?.open ?? quickFilterOpen;
+  const effectiveOnQuickFilterOpenChange = tableConfig?.quickFilter?.onOpenChange ?? onQuickFilterOpenChange;
+  const effectiveQuickFilterEnabled = tableConfig?.quickFilter?.enabled ?? quickFilterEnabled;
+  const effectiveOnQuickFilterEnabledChange = tableConfig?.quickFilter?.onEnabledChange ?? onQuickFilterEnabledChange;
+  const effectiveQuickPatterns = tableConfig?.quickFilter?.patterns ?? quickPatterns;
+  const effectiveOnQuickPatternsChange = tableConfig?.quickFilter?.onPatternsChange ?? onQuickPatternsChange;
+
+  const effectiveMarkedKeys = tableConfig?.rowMarks?.markedKeys ?? markedKeys;
+  const effectiveOnMarkedKeysChange = tableConfig?.rowMarks?.onMarkedKeysChange ?? onMarkedKeysChange;
+  const effectiveLastMarkedKey = tableConfig?.rowMarks?.lastMarkedKey ?? lastMarkedKey;
+  const effectiveOnLastMarkedKeyChange = tableConfig?.rowMarks?.onLastMarkedKeyChange ?? onLastMarkedKeyChange;
+
+  const effectiveFlaggedKeys = tableConfig?.rowFlags?.flaggedKeys ?? flaggedKeys;
+  const effectiveOnFlaggedKeysChange = tableConfig?.rowFlags?.onFlaggedKeysChange ?? onFlaggedKeysChange;
+
+  const effectiveInfoBarOpen = tableConfig?.infoBarOpen ?? infoBarOpen;
+  const effectiveOnInfoBarOpenChange = tableConfig?.onInfoBarOpenChange ?? onInfoBarOpenChange;
+
+  const lineStyle = useCallback((colId: ColId, line: 'top' | 'bottom'): React.CSSProperties | undefined => {
+    const base = DEFAULT_COLUMN_LINE_STYLES[colId]?.[line];
+    const override = tableConfig?.columns?.[colId]?.lineStyles?.[line];
+    if (!base && !override) return undefined;
+    return { ...(base ?? {}), ...(override ?? {}) };
+  }, [tableConfig?.columns]);
+
+  const loadColumnWidths = useCallback((): Record<string, number> => {
     const defaults: Record<string, number> = {};
     for (const c of COLUMNS) defaults[c.id] = c.defaultWidth;
     try {
-      const saved = getPref(COLUMN_WIDTHS_PREF);
-      if (saved) return { ...defaults, ...JSON.parse(saved) };
+      const scoped = getPref(columnWidthsPrefKey(instanceId));
+      const raw = scoped ?? getPref('columnWidths');
+      if (raw) return { ...defaults, ...JSON.parse(raw) };
     } catch {
       // Ignore malformed stored value
     }
     return defaults;
-  });
+  }, [instanceId]);
+
+  // ── Column widths (persisted per table instance) ──
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>(loadColumnWidths);
+
+  useEffect(() => {
+    setColumnWidths(loadColumnWidths());
+  }, [loadColumnWidths]);
 
   const widthFor = useCallback(
     (id: ColId) => columnWidths[id] ?? COLUMNS.find(c => c.id === id)!.defaultWidth,
@@ -258,8 +410,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   );
 
   const persistWidths = useCallback((widths: Record<string, number>) => {
-    setPref(COLUMN_WIDTHS_PREF, JSON.stringify(widths));
-  }, []);
+    setPref(columnWidthsPrefKey(instanceId), JSON.stringify(widths));
+  }, [instanceId]);
 
   const handleResizeStart = useCallback((e: React.MouseEvent, col: ColumnDef) => {
     e.preventDefault();
@@ -299,26 +451,26 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const [internalQuickEnabled, setInternalQuickEnabled] = useState(false);
   const [internalQuickPatterns, setInternalQuickPatterns] = useState<Partial<Record<ColId, QuickCellValue>>>({});
 
-  const quickOpen = quickFilterOpen ?? internalQuickOpen;
+  const quickOpen = effectiveQuickFilterOpen ?? internalQuickOpen;
   const setQuickOpen = useCallback((val: boolean | ((prev: boolean) => boolean)) => {
     const next = typeof val === 'function' ? val(quickOpen) : val;
     setInternalQuickOpen(next);
-    onQuickFilterOpenChange?.(next);
-  }, [quickOpen, onQuickFilterOpenChange]);
+    effectiveOnQuickFilterOpenChange?.(next);
+  }, [quickOpen, effectiveOnQuickFilterOpenChange]);
 
-  const quickEnabled = quickFilterEnabled ?? internalQuickEnabled;
+  const quickEnabled = effectiveQuickFilterEnabled ?? internalQuickEnabled;
   const setQuickEnabled = useCallback((val: boolean | ((prev: boolean) => boolean)) => {
     const next = typeof val === 'function' ? val(quickEnabled) : val;
     setInternalQuickEnabled(next);
-    onQuickFilterEnabledChange?.(next);
-  }, [quickEnabled, onQuickFilterEnabledChange]);
+    effectiveOnQuickFilterEnabledChange?.(next);
+  }, [quickEnabled, effectiveOnQuickFilterEnabledChange]);
 
-  const currentPatterns = quickPatterns ?? internalQuickPatterns;
+  const currentPatterns = effectiveQuickPatterns ?? internalQuickPatterns;
   const setQuickPatterns = useCallback((val: Partial<Record<ColId, QuickCellValue>> | ((prev: Partial<Record<ColId, QuickCellValue>>) => Partial<Record<ColId, QuickCellValue>>)) => {
     const next = typeof val === 'function' ? val(currentPatterns) : val;
     setInternalQuickPatterns(next);
-    onQuickPatternsChange?.(next);
-  }, [currentPatterns, onQuickPatternsChange]);
+    effectiveOnQuickPatternsChange?.(next);
+  }, [currentPatterns, effectiveOnQuickPatternsChange]);
 
   /** Updates one row (top/bottom) of a quick-filter cell, preserving the other row. */
   const setQuickCell = useCallback((id: ColId, row: 'top' | 'bottom', text: string) => {
@@ -333,12 +485,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   // ── Quick info bar (#311): collapsible summary row above the header. ──────
   const [internalInfoBarOpen, setInternalInfoBarOpen] = useState(false);
-  const infoOpen = infoBarOpen ?? internalInfoBarOpen;
+  const infoOpen = effectiveInfoBarOpen ?? internalInfoBarOpen;
   const toggleInfoOpen = useCallback(() => {
     const next = !infoOpen;
     setInternalInfoBarOpen(next);
-    onInfoBarOpenChange?.(next);
-  }, [infoOpen, onInfoBarOpenChange]);
+    effectiveOnInfoBarOpenChange?.(next);
+  }, [infoOpen, effectiveOnInfoBarOpenChange]);
 
   // ── Row marks (#310) ─────────────────────────────────────────────────────
   // Controlled when App lifts them (so marks survive navigation), otherwise a
@@ -347,17 +499,17 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const [internalMarkedKeys, setInternalMarkedKeys] = useState<string[]>([]);
   const [internalLastMarkedKey, setInternalLastMarkedKey] = useState<string | null>(null);
 
-  const markedKeysList = markedKeys ?? internalMarkedKeys;
+  const markedKeysList = effectiveMarkedKeys ?? internalMarkedKeys;
   const setMarkedKeysList = useCallback((val: string[]) => {
     setInternalMarkedKeys(val);
-    onMarkedKeysChange?.(val);
-  }, [onMarkedKeysChange]);
+    effectiveOnMarkedKeysChange?.(val);
+  }, [effectiveOnMarkedKeysChange]);
 
-  const lastMarked = lastMarkedKey !== undefined ? lastMarkedKey : internalLastMarkedKey;
+  const lastMarked = effectiveLastMarkedKey !== undefined ? effectiveLastMarkedKey : internalLastMarkedKey;
   const setLastMarked = useCallback((val: string | null) => {
     setInternalLastMarkedKey(val);
-    onLastMarkedKeyChange?.(val);
-  }, [onLastMarkedKeyChange]);
+    effectiveOnLastMarkedKeyChange?.(val);
+  }, [effectiveOnLastMarkedKeyChange]);
 
   const markedSet = useMemo(() => new Set(markedKeysList), [markedKeysList]);
 
@@ -368,16 +520,17 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   // ── Per-message Time-Delta-Context flags (#319) ─────────────────────────
   const [internalFlaggedKeys, setInternalFlaggedKeys] = useState<string[]>([]);
-  const flaggedKeysList = flaggedKeys ?? internalFlaggedKeys;
+  const flaggedKeysList = effectiveFlaggedKeys ?? internalFlaggedKeys;
   const setFlaggedKeysList = useCallback((val: string[]) => {
     setInternalFlaggedKeys(val);
-    onFlaggedKeysChange?.(val);
-  }, [onFlaggedKeysChange]);
+    effectiveOnFlaggedKeysChange?.(val);
+  }, [effectiveOnFlaggedKeysChange]);
   const flaggedSet = useMemo(() => new Set(flaggedKeysList), [flaggedKeysList]);
 
   // Toggles one row's flag; ctrl/cmd-click applies the new state to every
   // currently marked row too (#310's marks, reused as a multi-select basis).
   const handleFlagClick = useCallback((e: React.MouseEvent, key: string) => {
+    if (!rowFlagsEnabled) return;
     e.stopPropagation();
     const nextOn = !flaggedSet.has(key);
     const targets = (e.ctrlKey || e.metaKey) ? new Set([...markedKeysList, key]) : new Set([key]);
@@ -386,13 +539,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         ? [...new Set([...flaggedKeysList, ...targets])]
         : flaggedKeysList.filter(k => !targets.has(k))
     );
-  }, [flaggedSet, flaggedKeysList, markedKeysList, setFlaggedKeysList]);
+  }, [flaggedSet, flaggedKeysList, markedKeysList, setFlaggedKeysList, rowFlagsEnabled]);
 
   const quickFiltered = useMemo(() => {
-    if (!quickOpen || !quickEnabled) return telegrams;
+    if (!quickFilterFeatureEnabled || !quickOpen || !quickEnabled) return telegrams;
     const matches = compileQuickFilters(currentPatterns);
     return telegrams.filter(matches);
-  }, [telegrams, quickOpen, quickEnabled, currentPatterns]);
+  }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, currentPatterns]);
+
+  const timeSortDirection: 'asc' | 'desc' | null =
+    effectiveSortConfig[0]?.key === 'timestamp' ? effectiveSortConfig[0].direction : null;
 
   // Time deltas between consecutive rows, by visual (sorted) order — always
   // computed regardless of sort column, respecting whatever hierarchy is
@@ -404,12 +560,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       if (idx > 0) {
         const curr = new Date(t.timestamp).getTime();
         const prev = new Date(quickFiltered[idx - 1].timestamp).getTime();
-        deltaMs = Math.abs(curr - prev);
-        deltaStr = formatDeltaMs(deltaMs);
+        const rawDiff = curr - prev;
+        deltaMs = Math.abs(rawDiff);
+        const sign: '+' | '-' = timeSortDirection
+          ? (timeSortDirection === 'asc' ? '+' : '-')
+          : (rawDiff >= 0 ? '+' : '-');
+        deltaStr = formatDeltaMs(deltaMs, sign);
       }
       return { ...t, deltaStr, deltaMs };
     });
-  }, [quickFiltered]);
+  }, [quickFiltered, timeSortDirection]);
 
   // ── Delta-sort exclusive mode (#311) ────────────────────────────────────────
   // Sorting by the Δt column is a self-referential operation (deltas are
@@ -459,8 +619,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // A real column header click always exits delta-sort before applying its own sort.
   const handleColumnSort = useCallback((key: SortKey, opts?: { additive?: boolean }) => {
     exitDeltaSort();
-    onSort(key, opts);
-  }, [exitDeltaSort, onSort]);
+    effectiveOnSort(key, opts);
+  }, [exitDeltaSort, effectiveOnSort]);
 
   const telegramRows = deltaSortActive && deltaFrozenRows ? deltaFrozenRows : naturalTelegramRows;
 
@@ -547,7 +707,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // async re-measure of prepended rows is absorbed too.
   // Only the *primary* level's key matters for the live edge — a secondary
   // TIME tiebreaker doesn't make the list time-ordered top-to-bottom (#311).
-  const primarySort = sortConfig[0];
+  const primarySort = effectiveSortConfig[0];
   const isTimeSort = primarySort?.key === 'timestamp' && !deltaSortActive;
   const liveEdge = primarySort?.direction === 'asc' ? 'bottom' : 'top';
   const atEdgeRef = useRef(listFollow ?? true);
@@ -643,6 +803,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // scrolling away (#266) — the row being read must not move. The jump-to-live
   // pill is the way back.
   const handleRowClick = (e: React.MouseEvent, key: string, index: number) => {
+    if (rowMarksEnabled) {
     // ── Marks (#310) ──
     const additive = e.ctrlKey || e.metaKey;
     const range = e.shiftKey;
@@ -674,6 +835,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
     setMarkedKeysList(nextKeys);
     setLastMarked(key);
+    }
 
     // ── Pause live-following on an edge click (#266), unchanged ──
     if (!isTimeSort || !atEdgeRef.current) return;
@@ -777,7 +939,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       onListFollowChange?.(atEdge);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sortConfig]);
+  }, [effectiveSortConfig]);
 
   // Restore scroll position/anchor on mount (#203, #341)
   const restoredRef = useRef(false);
@@ -865,10 +1027,32 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // Visible columns in order, and the matching CSS grid template.
   // The delta column is always shown when enabled, regardless of sort (#311) —
   // it's computed from the visible row order under any sort hierarchy.
-  const visibleCols = useMemo(
-    () => COLUMNS.filter(c => !c.visibleKey || visibleColumns[c.visibleKey]),
-    [visibleColumns],
-  );
+  const visibleCols = useMemo(() => {
+    const filtered = COLUMNS.filter(c => {
+      const explicitVisible = tableConfig?.columns?.[c.id]?.visible;
+      if (explicitVisible !== undefined) return explicitVisible;
+      return !c.visibleKey || effectiveVisibleColumns[c.visibleKey];
+    });
+    const order = tableConfig?.columnOrder;
+    const rank = new Map<ColId, number>();
+    if (order && order.length > 0) {
+      order.forEach((id, idx) => rank.set(id, idx));
+    } else {
+      for (const c of filtered) {
+        const configuredOrder = tableConfig?.columns?.[c.id]?.order;
+        if (configuredOrder !== undefined) rank.set(c.id, configuredOrder);
+      }
+      if (rank.size === 0) return filtered;
+    }
+    return [...filtered].sort((a, b) => {
+      const ar = rank.get(a.id);
+      const br = rank.get(b.id);
+      if (ar == null && br == null) return 0;
+      if (ar == null) return 1;
+      if (br == null) return -1;
+      return ar - br;
+    });
+  }, [effectiveVisibleColumns, tableConfig?.columnOrder, tableConfig?.columns]);
 
   const gridTemplate = useMemo(
     () => visibleCols
@@ -885,15 +1069,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // direction; a small numbered badge additionally marks its position in the
   // hierarchy once more than one level is active (ctrl/cmd-click adds levels).
   const renderSortArrow = (key: SortKey) => {
-    const idx = sortConfig.findIndex(l => l.key === key);
+    const idx = effectiveSortConfig.findIndex(l => l.key === key);
     if (idx === -1) return null;
-    const icon = sortConfig[idx].direction === 'asc' ? <ChevronUp size={14} /> : <ChevronDown size={14} />;
-    if (sortConfig.length <= 1) return icon;
+    const icon = effectiveSortConfig[idx].direction === 'asc' ? <ChevronUp size={14} /> : <ChevronDown size={14} />;
+    if (effectiveSortConfig.length <= 1) return icon;
     return (
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.15rem' }}>
         {icon}
         <span
-          title={`Sort level ${idx + 1} of ${sortConfig.length}`}
+          title={`Sort level ${idx + 1} of ${effectiveSortConfig.length}`}
           style={{
             fontSize: '0.6rem', fontWeight: 700, minWidth: '1rem', textAlign: 'center',
             padding: '0 0.2rem', borderRadius: '3px', background: 'var(--bg-tag)', color: 'var(--text-dim)',
@@ -907,14 +1091,30 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   // ── Per-cell body content (keyed switch keeps body aligned with header order) ──
   const renderCell = (id: ColId, t: TelegramRow): React.ReactNode => {
+    const customContent = tableConfig?.columns?.[id]?.content;
+    if (customContent) {
+      return (
+        <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }}>
+          <div style={lineStyle(id, 'top')}>
+            {customContent.top?.(t)}
+          </div>
+          {customContent.bottom && (
+            <div style={{ ...lineStyle(id, 'bottom'), marginTop: lineStyle(id, 'bottom')?.marginTop ?? '0.2rem' }}>
+              {customContent.bottom(t)}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     switch (id) {
       case 'time':
         return (
           <div style={{ padding: cellPadding }}>
-            <div className="mono-addr" style={{ color: 'var(--text-main)', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>
+            <div className="mono-addr" style={lineStyle('time', 'top')}>
               {format(new Date(t.timestamp), 'HH:mm:ss.SS')}
             </div>
-            <div className="subtitle-name" style={{ fontSize: '0.65rem', color: 'var(--text-dim)', marginTop: '0.15rem', fontVariantNumeric: 'tabular-nums' }}>
+            <div className="subtitle-name" style={lineStyle('time', 'bottom')}>
               {format(new Date(t.timestamp), 'yyyy-MM-dd')}
             </div>
           </div>
@@ -924,25 +1124,25 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         const key = anchorKey(t);
         const flagged = flaggedSet.has(key);
         return (
-          <div style={{ padding: cellPadding, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-            <button
-              style={{
-                background: 'transparent', border: 'none', cursor: 'pointer', padding: '0.15rem',
-                borderRadius: '4px', display: 'flex', alignItems: 'center', flexShrink: 0,
-                color: flagged ? 'var(--accent-primary)' : 'var(--text-dim)',
-                opacity: activeFilters.deltaContextEnabled ? (flagged ? 1 : 0.35) : 0.25,
-              }}
-              title={flagged
-                ? 'Always show context around this message — click to unflag (ctrl/cmd-click to apply to all marked rows)'
-                : 'Always show context around this message, regardless of the active filters (ctrl/cmd-click to apply to all marked rows)'}
-              onClick={e => handleFlagClick(e, key)}
-            >
-              {flagged ? <CircleDot size={12} /> : <Circle size={12} />}
-            </button>
-            {t.deltaStr && (
-              <div className="mono-addr" style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
-                {t.deltaStr}
-              </div>
+          <div style={{ padding: cellPadding, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '0.16rem' }}>
+            <div className="mono-addr" style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums', minHeight: '1em' }}>
+              {t.deltaStr ?? ''}
+            </div>
+            {rowFlagsEnabled && (
+              <button
+                style={{
+                  background: 'transparent', border: 'none', cursor: 'pointer', padding: '0.15rem',
+                  borderRadius: '4px', display: 'flex', alignItems: 'center', flexShrink: 0,
+                  color: flagged ? 'var(--accent-primary)' : 'var(--text-dim)',
+                  opacity: activeFilters.deltaContextEnabled ? (flagged ? 1 : 0.35) : 0.25,
+                }}
+                title={flagged
+                  ? 'Always show context around this message — click to unflag (ctrl/cmd-click to apply to all marked rows)'
+                  : 'Always show context around this message, regardless of the active filters (ctrl/cmd-click to apply to all marked rows)'}
+                onClick={e => handleFlagClick(e, key)}
+              >
+                {flagged ? <CircleDot size={12} /> : <Circle size={12} />}
+              </button>
             )}
           </div>
         );
@@ -973,8 +1173,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 </button>
               )}
             </div>
-            {visibleColumns.sourceName && (
-              <div className="subtitle-name" title={t.source_name || undefined} style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginTop: '0.15rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {effectiveVisibleColumns.sourceName && (
+              <div className="subtitle-name" title={t.source_name || undefined} style={lineStyle('source', 'bottom')}>
                 {t.source_name || '-'}
               </div>
             )}
@@ -1015,8 +1215,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 />
               )}
             </div>
-            {visibleColumns.targetName && (
-              <div className="subtitle-name" title={t.target_name || undefined} style={{ fontSize: '0.7rem', color: 'var(--text-main)', fontWeight: 500, marginTop: '0.15rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {effectiveVisibleColumns.targetName && (
+              <div className="subtitle-name" title={t.target_name || undefined} style={lineStyle('target', 'bottom')}>
                 {t.target_name || '-'}
               </div>
             )}
@@ -1046,10 +1246,19 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       case 'dpt':
         return (
           <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }} className="filterable-cell">
-            {t.dpt_name && t.dpt_main != null ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', minWidth: 0 }}>
-                <div title={getDPTLabel(t.dpt_main)} style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: getDPTColor(t.dpt_main), flexShrink: 0 }} />
-                <span title={t.dpt_name ?? undefined} style={{ fontSize: '0.75rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{t.dpt_name}</span>
+            {t.dpt_main != null ? (
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', minWidth: 0 }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
+                    <div title={getDPTLabel(t.dpt_main)} style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: getDPTColor(t.dpt_main), flexShrink: 0 }} />
+                    <div title={dptKeyLabel(t.dpt_main, t.dpt_sub) ?? undefined} style={lineStyle('dpt', 'top')}>
+                      {dptKeyLabel(t.dpt_main, t.dpt_sub) ?? '-'}
+                    </div>
+                  </div>
+                  <div title={dptDescriptionLabel(t.dpt_name, t.unit) ?? undefined} style={lineStyle('dpt', 'bottom')}>
+                    {dptDescriptionLabel(t.dpt_name, t.unit) ?? '-'}
+                  </div>
+                </div>
                 <button
                   className={`quick-filter-btn ${activeFilters.dpts.includes(dptKey(t.dpt_main, t.dpt_sub)) ? 'active' : ''}`}
                   onClick={(e) => { e.stopPropagation(); if (t.dpt_main != null) onQuickFilter('dpts', dptKey(t.dpt_main, t.dpt_sub)); }}
@@ -1080,8 +1289,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 <LineChart size={14} />
               </button>
             </div>
-            {visibleColumns.data && t.raw_hex && (
-              <div className="raw-badge" style={{ marginTop: '0.4rem', background: 'var(--bg-tag)', padding: '0.1rem 0.3rem', borderRadius: '3px', fontSize: '0.65rem', color: 'var(--text-dim)', display: 'inline-block', fontFamily: 'var(--font-mono)' }}>
+            {effectiveVisibleColumns.data && t.raw_hex && (
+              <div style={{ marginTop: '0.18rem', fontSize: '0.65rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
                 {t.raw_hex}
               </div>
             )}
@@ -1102,7 +1311,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Quick info bar (#311): collapsible summary directly above the header. */}
-      {infoOpen && infoMetrics && (
+      {quickInfoEnabled && infoOpen && infoMetrics && (
         <div style={{
           display: 'flex', flexDirection: 'column', gap: '0.3rem',
           padding: '0.4rem 0.75rem', borderBottom: '1px solid var(--border-color)',
@@ -1176,7 +1385,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       >
         {visibleCols.map((c, i) => (
           <div key={c.id} style={{ padding: cellPadding, position: 'relative', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            {c.id === 'time' && (
+            {c.id === 'time' && quickFilterFeatureEnabled && (
               <button
                 className={`quick-filter-bar-toggle ${quickOpen ? 'open' : ''}`}
                 onClick={toggleQuickOpen}
@@ -1185,7 +1394,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 <ListFilter size={13} />
               </button>
             )}
-            {c.id === 'time' && (
+            {c.id === 'time' && quickInfoEnabled && (
               <button
                 className={`quick-filter-bar-toggle ${infoOpen ? 'open' : ''}`}
                 onClick={toggleInfoOpen}
@@ -1218,7 +1427,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             ) : (
               <span>{c.label}</span>
             )}
-            {i < visibleCols.length - 1 && (
+            {columnResizeEnabled && i < visibleCols.length - 1 && (
               <div
                 className="col-resize-handle"
                 onMouseDown={(e) => handleResizeStart(e, c)}
@@ -1233,7 +1442,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       {/* Quick filter bar (#271, #309) — two rows per column: a pattern/from row
           and a text/to row, except TYPE (one row) and DELTA (Time-Delta-Context
           before/after, #371) which don't go through the pattern pipeline. */}
-      {quickOpen && (
+      {quickFilterFeatureEnabled && quickOpen && (
         <div
           style={{
             display: 'grid',
@@ -1257,7 +1466,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   <Filter size={12} />
                 </button>
               )}
-              {c.id === 'delta' && (
+              {c.id === 'delta' && rowFlagsEnabled && (
                 <button
                   className={`quick-filter-bar-toggle ${deltaFlagState !== 'none' ? 'open' : ''}`}
                   onClick={handleDeltaToggleClick}
@@ -1392,7 +1601,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       )}
 
       {/* Clear-marks pill — shown only while rows are marked (#310) */}
-      {markedKeysList.length > 0 && (
+      {rowMarksEnabled && markedKeysList.length > 0 && (
         <button
           onClick={clearMarks}
           className="clear-marks-pill"

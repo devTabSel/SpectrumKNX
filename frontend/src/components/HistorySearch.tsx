@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { TelegramTable, type SortConfig, type SortKey } from './TelegramTable';
-import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from '../utils/sortConfig';
+import { TelegramTable, type SortConfig, type SortKey, type TelegramTableConfig } from './TelegramTable';
+import { readSortConfigPref, writeScopedSortConfigPref, toggleSortLevel, sortTelegrams } from '../utils/sortConfig';
+import { readVisibleColumnsPref } from '../utils/tablePrefs';
 import { expandWithDeltaContext } from '../utils/deltaContextExpansion';
 import { anchorKey } from '../utils/anchorKey';
 import type { Telegram } from '../hooks/useWebSocket';
@@ -10,6 +11,7 @@ import { Visualizer } from './Visualizer';
 import { FilterPanel } from './FilterPanel';
 import { loadHistoryTelegrams, type LoadedRange } from '../utils/historyLoad';
 import { buildViewUrl, type VizViewState } from '../utils/viewUrl';
+import { getPref, setPref } from '../utils/prefs';
 import {
   effectiveDeltaContext,
   hasActiveFilters,
@@ -20,6 +22,18 @@ import {
 
 // Stable identity so passing "no flags" doesn't churn memo deps (#319).
 const EMPTY_FLAG_SET: ReadonlySet<string> = new Set();
+const HISTORY_TABLE_INSTANCE_ID = 'history';
+
+const readStringArrayPref = (key: string): string[] => {
+  try {
+    const raw = getPref(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+};
 
 export type LoaderTimeRange = {
   relValue: number;
@@ -29,7 +43,6 @@ export type LoaderTimeRange = {
 };
 
 interface HistorySearchProps {
-  visibleColumns: { [key: string]: boolean };
   loadLimit: number;
   filterOptions: FilterOptions;
   activeFilters: ActiveFilters;
@@ -43,15 +56,18 @@ interface HistorySearchProps {
 }
 
 export const HistorySearch: React.FC<HistorySearchProps> = ({
-  visibleColumns, loadLimit, filterOptions, activeFilters, onFiltersChange, onOpenSettings,
+  loadLimit, filterOptions, activeFilters, onFiltersChange, onOpenSettings,
   projectLoaded, selectedVisualizationTargets, onVisualizationTargetsChange, initialView
 }) => {
+  const [visibleColumns] = useState<{ [key: string]: boolean }>(() => readVisibleColumnsPref(HISTORY_TABLE_INSTANCE_ID));
   const [telegrams, setTelegrams] = useState<Telegram[]>([]);
   const [isLoaderOpen, setIsLoaderOpen] = useState(false);
   const [metadata, setMetadata] = useState<{ total_count: number; limit_reached: boolean } | null>(null);
-  const [sortConfig, setSortConfig] = useState<SortConfig>(readSortConfigPref);
+  const [sortConfig, setSortConfig] = useState<SortConfig>(() => readSortConfigPref(HISTORY_TABLE_INSTANCE_ID));
   // Per-message Time-Delta-Context flags (#319) — local to this view, like marks.
-  const [flaggedKeys, setFlaggedKeys] = useState<string[]>([]);
+  const [flaggedKeys, setFlaggedKeys] = useState<string[]>(() =>
+    readStringArrayPref(`flaggedKeys:${HISTORY_TABLE_INSTANCE_ID}`)
+  );
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [isVisualizerOpen, setIsVisualizerOpen] = useState(false);
 
@@ -65,6 +81,10 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
 
   // The time window of the last load — basis for shareable links (#150)
   const [loadedRange, setLoadedRange] = useState<LoadedRange | null>(null);
+
+  useEffect(() => {
+    setPref(`flaggedKeys:${HISTORY_TABLE_INSTANCE_ID}`, JSON.stringify(flaggedKeys));
+  }, [flaggedKeys]);
 
   // Auto-load a view shared via URL exactly once on mount (#150)
   const initialViewLoaded = useRef(false);
@@ -86,7 +106,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   const handleSort = (key: SortKey, opts?: { additive?: boolean }) => {
     setSortConfig(prev => {
       const next = toggleSortLevel(prev, key, !!opts?.additive);
-      writeSortConfigPref(next);
+      writeScopedSortConfigPref(HISTORY_TABLE_INSTANCE_ID, next);
       return next;
     });
   };
@@ -119,6 +139,25 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   const handleDeltaContextEnabledChange = (deltaContextEnabled: boolean) => {
     onFiltersChange({ ...activeFilters, deltaContextEnabled });
   };
+
+  const historyTableConfig = useMemo<TelegramTableConfig>(() => ({
+    sortConfig,
+    onSort: handleSort,
+    visibleColumns,
+    columnOrder: ['time', 'delta', 'source', 'target', 'type', 'dpt', 'value'],
+    grouping: [],
+    features: {
+      quickInfo: false,
+      quickFilter: true,
+      columnResize: true,
+      rowMarks: true,
+      rowFlags: true,
+    },
+    rowFlags: {
+      flaggedKeys,
+      onFlaggedKeysChange: setFlaggedKeys,
+    },
+  }), [sortConfig, handleSort, visibleColumns, flaggedKeys]);
 
   const sortedTelegrams = useMemo(
     () => sortTelegrams(telegrams, sortConfig),
@@ -341,6 +380,8 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
             </div>
           ) : (
             <TelegramTable
+              instanceId={HISTORY_TABLE_INSTANCE_ID}
+              tableConfig={historyTableConfig}
               telegrams={filteredSortedTelegrams}
               visibleColumns={visibleColumns}
               sortConfig={sortConfig}

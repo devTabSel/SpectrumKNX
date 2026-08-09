@@ -16,10 +16,11 @@ import {
   DEFAULT_UI_STATE,
 } from './utils/uiState';
 import { DeviceStatusOverlay } from './components/DeviceStatusOverlay';
-import { TelegramTable, type SortConfig, type SortKey } from './components/TelegramTable';
+import { TelegramTable, type SortConfig, type SortKey, type TelegramTableConfig } from './components/TelegramTable';
 import { expandWithDeltaContext } from './utils/deltaContextExpansion';
 import { anchorKey } from './utils/anchorKey';
-import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
+import { readSortConfigPref, writeScopedSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
+import { readVisibleColumnsPref, writeVisibleColumnsPref } from './utils/tablePrefs';
 import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
@@ -59,6 +60,18 @@ declare const __APP_VERSION__: string;
 const DISMISSED_UPDATE_PREF = 'dismissed_update_version';
 
 const EMPTY_FILTER_OPTIONS: FilterOptions = { sources: [], targets: [], types: [], dpts: [], ga_group_names: {}, pa_line_names: {} };
+const LIVE_TABLE_INSTANCE_ID = 'live';
+
+const readStringArrayPref = (key: string): string[] => {
+  try {
+    const raw = getPref(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+};
 
 const NavDropdown = ({ activeTab, isSettingsOpen, isDatabaseOpen, onChange }: { activeTab: string, isSettingsOpen: boolean, isDatabaseOpen: boolean, onChange: (id: string) => void }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -271,18 +284,9 @@ function App() {
 
   // ── Settings & Persistence ──────────────────────────────────────────────────
   const [loadLimit, setLoadLimit] = useState(Number(getPref('loadLimit') || 100000));
-  const [visibleColumns, setVisibleColumns] = useState<{ [key: string]: boolean }>(() => {
-    try {
-      const cookie = getPref('visibleColumns');
-      if (cookie) return JSON.parse(cookie);
-    } catch {
-      // Ignore cookie parsing errors
-    }
-    return {
-      time: true, delta: true, source: true, sourceName: true,
-      target: true, targetName: true, type: true, dpt: true, data: true, value: true,
-    };
-  });
+  const [visibleColumns, setVisibleColumns] = useState<{ [key: string]: boolean }>(() =>
+    readVisibleColumnsPref(LIVE_TABLE_INSTANCE_ID)
+  );
   const [rateMode, setRateMode] = useState<'s' | 'm' | 'h'>((getPref('rateMode') as 's' | 'm' | 'h') || 's');
   // Restore the browser telegram cache (and fill the gap from the backend) on
   // startup. On by default; when off the view starts empty and shows only live
@@ -437,7 +441,7 @@ function App() {
   // ── Persist settings ────────────────────────────────────────────────────────
   useEffect(() => {
     setPref('loadLimit', loadLimit.toString());
-    setPref('visibleColumns', JSON.stringify(visibleColumns));
+    writeVisibleColumnsPref(LIVE_TABLE_INSTANCE_ID, visibleColumns);
     setPref('rateMode', rateMode);
     setPref('restoreOnStartup', String(restoreOnStartup));
   }, [loadLimit, visibleColumns, rateMode, restoreOnStartup]);
@@ -534,20 +538,43 @@ function App() {
   // ── Telegram list marks (#310) ──────────────────────────────────────────────
   // Lifted above the conditionally-rendered panels so marked rows survive
   // main-panel navigation. Keyed by the table's anchorKey identity.
-  const [markedTelegramKeys, setMarkedTelegramKeys] = useState<string[]>([]);
-  const [lastMarkedTelegramKey, setLastMarkedTelegramKey] = useState<string | null>(null);
+  const [markedTelegramKeys, setMarkedTelegramKeys] = useState<string[]>(() =>
+    readStringArrayPref(`markedKeys:${LIVE_TABLE_INSTANCE_ID}`)
+  );
+  const [lastMarkedTelegramKey, setLastMarkedTelegramKey] = useState<string | null>(() => {
+    const saved = getPref(`lastMarkedKey:${LIVE_TABLE_INSTANCE_ID}`);
+    return saved ? saved : null;
+  });
 
   // ── Per-message Time-Delta-Context flags (#319) ─────────────────────────────
   // Same lifting rationale as marks; each flagged telegram always anchors a
   // context window around itself regardless of the active filters.
-  const [flaggedTelegramKeys, setFlaggedTelegramKeys] = useState<string[]>([]);
+  const [flaggedTelegramKeys, setFlaggedTelegramKeys] = useState<string[]>(() =>
+    readStringArrayPref(`flaggedKeys:${LIVE_TABLE_INSTANCE_ID}`)
+  );
+
+  useEffect(() => {
+    setPref(`markedKeys:${LIVE_TABLE_INSTANCE_ID}`, JSON.stringify(markedTelegramKeys));
+  }, [markedTelegramKeys]);
+
+  useEffect(() => {
+    if (lastMarkedTelegramKey == null) {
+      setPref(`lastMarkedKey:${LIVE_TABLE_INSTANCE_ID}`, '');
+      return;
+    }
+    setPref(`lastMarkedKey:${LIVE_TABLE_INSTANCE_ID}`, lastMarkedTelegramKey);
+  }, [lastMarkedTelegramKey]);
+
+  useEffect(() => {
+    setPref(`flaggedKeys:${LIVE_TABLE_INSTANCE_ID}`, JSON.stringify(flaggedTelegramKeys));
+  }, [flaggedTelegramKeys]);
 
   // ── Sorting (#311: multi-level, ctrl/cmd-click adds a level) ─────────────────
-  const [sortConfig, setSortConfig] = useState<SortConfig>(readSortConfigPref);
+  const [sortConfig, setSortConfig] = useState<SortConfig>(() => readSortConfigPref(LIVE_TABLE_INSTANCE_ID));
   const handleSort = (key: SortKey, opts?: { additive?: boolean }) => {
     setSortConfig(prev => {
       const next = toggleSortLevel(prev, key, !!opts?.additive);
-      writeSortConfigPref(next);
+      writeScopedSortConfigPref(LIVE_TABLE_INSTANCE_ID, next);
       return next;
     });
   };
@@ -624,6 +651,52 @@ function App() {
   const handleDeltaContextEnabledChange = useCallback((deltaContextEnabled: boolean) => {
     handleFiltersChange(prev => ({ ...prev, deltaContextEnabled }));
   }, [handleFiltersChange]);
+
+  const liveTableConfig = useMemo<TelegramTableConfig>(() => ({
+    sortConfig,
+    onSort: handleSort,
+    visibleColumns,
+    columnOrder: ['time', 'delta', 'source', 'target', 'type', 'dpt', 'value'],
+    grouping: [],
+    features: {
+      quickInfo: true,
+      quickFilter: true,
+      columnResize: true,
+      rowMarks: true,
+      rowFlags: true,
+    },
+    quickFilter: {
+      open: quickFilterOpen,
+      onOpenChange: setQuickFilterOpen,
+      enabled: quickFilterEnabled,
+      onEnabledChange: setQuickFilterEnabled,
+      patterns: quickPatterns,
+      onPatternsChange: setQuickPatterns,
+    },
+    rowMarks: {
+      markedKeys: markedTelegramKeys,
+      onMarkedKeysChange: setMarkedTelegramKeys,
+      lastMarkedKey: lastMarkedTelegramKey,
+      onLastMarkedKeyChange: setLastMarkedTelegramKey,
+    },
+    rowFlags: {
+      flaggedKeys: flaggedTelegramKeys,
+      onFlaggedKeysChange: setFlaggedTelegramKeys,
+    },
+    infoBarOpen,
+    onInfoBarOpenChange: setInfoBarOpen,
+  }), [
+    handleSort,
+    sortConfig,
+    visibleColumns,
+    quickFilterOpen,
+    quickFilterEnabled,
+    quickPatterns,
+    markedTelegramKeys,
+    lastMarkedTelegramKey,
+    flaggedTelegramKeys,
+    infoBarOpen,
+  ]);
 
   const sortedLiveTelegrams = useMemo(
     () => sortTelegrams(liveTelegrams, sortConfig),
@@ -1224,6 +1297,8 @@ function App() {
                       </button>
                     </div>
                     <TelegramTable
+                    instanceId={LIVE_TABLE_INSTANCE_ID}
+                    tableConfig={liveTableConfig}
                     telegrams={filteredLiveTelegrams}
                     visibleColumns={visibleColumns}
                     sortConfig={sortConfig}
@@ -1264,7 +1339,6 @@ function App() {
           <ImportExportView />
         ) : (
           <HistorySearch
-            visibleColumns={visibleColumns}
             loadLimit={loadLimit}
             filterOptions={filterOptions}
             activeFilters={activeFilters}

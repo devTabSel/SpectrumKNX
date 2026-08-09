@@ -16,6 +16,7 @@ export interface SortLevel {
 export type SortConfig = SortLevel[];
 
 const SORT_PREF = 'sortConfig';
+const sortPrefKey = (instanceId?: string) => (instanceId ? `${SORT_PREF}:${instanceId}` : SORT_PREF);
 const SORT_KEYS: SortKey[] = ['timestamp', 'source_address', 'target_address', 'simplified_type', 'dpt_name', 'value_numeric'];
 const DEFAULT_SORT: SortConfig = [{ key: 'timestamp', direction: 'desc' }];
 
@@ -29,9 +30,9 @@ const isValidLevel = (l: unknown): l is SortLevel =>
  * upgrades the pre-#311 single-level object shape (`{key, direction}`) to the
  * one-element array shape.
  */
-export function readSortConfigPref(): SortConfig {
+export function readSortConfigPref(instanceId?: string): SortConfig {
   try {
-    const raw = getPref(SORT_PREF);
+    const raw = getPref(sortPrefKey(instanceId)) ?? (instanceId ? getPref(SORT_PREF) : null);
     if (raw) {
       const parsed: unknown = JSON.parse(raw);
       if (Array.isArray(parsed)) {
@@ -50,6 +51,11 @@ export function readSortConfigPref(): SortConfig {
 /** Persists the sort config so it survives reloads and is shared across views. */
 export function writeSortConfigPref(config: SortConfig): void {
   setPref(SORT_PREF, JSON.stringify(config));
+}
+
+/** Persists a scoped sort config for one table instance. */
+export function writeScopedSortConfigPref(instanceId: string, config: SortConfig): void {
+  setPref(sortPrefKey(instanceId), JSON.stringify(config));
 }
 
 /**
