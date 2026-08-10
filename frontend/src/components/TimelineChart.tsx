@@ -13,6 +13,7 @@ interface TimelineChartProps {
   bucket: ChartBucket;
   minTime: number | null;
   maxTime: number | null;
+  rightLabelTime?: number | null;
   /** Draw a tick at each telegram timestamp so cyclic repeats are visible (#195). */
   showDots: boolean;
   /** When true (no active zoom), let the chart re-fit to new data so a telegram
@@ -30,7 +31,7 @@ interface TimelineChartProps {
 
 const syncCursor = uPlot.sync('knx-time-axis');
 
-export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, maxTime, showDots, autoFollow = false, onZoomRangeChange, onTimeClick, leftGutter: sharedLeftGutter }) => {
+export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, maxTime, showDots, autoFollow = false, onZoomRangeChange, onTimeClick, leftGutter: sharedLeftGutter, rightLabelTime }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const [width, setWidth] = useState(800);
@@ -613,6 +614,25 @@ export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, m
             title="Newest telegram in buffer"
           >
             {formatFullTime(newestBufferMs, multiDay)}
+          </div>
+        )}
+        {rightLabelTime != null && (
+          <div
+            style={{
+              position: 'absolute',
+              right: '8px',
+              bottom: '24px',
+              fontSize: '0.68rem',
+              lineHeight: 1,
+              color: 'var(--accent-primary)',
+              fontVariantNumeric: 'tabular-nums',
+              pointerEvents: 'none',
+              zIndex: 6,
+              whiteSpace: 'nowrap',
+            }}
+            title="Current NOW time"
+          >
+            {formatFullTime(rightLabelTime, multiDay)}
           </div>
         )}
       </div>

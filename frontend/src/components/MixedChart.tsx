@@ -16,6 +16,7 @@ interface MixedChartProps {
   minTime: number | null;
   maxTime: number | null;
   stepped: boolean;
+  rightLabelTime?: number | null;
   /** Draw a dot at each telegram timestamp so cyclic repeats are visible (#195). */
   showDots: boolean;
   /** When true (no active zoom), let the chart re-fit to new data so a telegram
@@ -41,7 +42,7 @@ const syncCursor = uPlot.sync('knx-time-axis');
 
 export const MixedChart: React.FC<MixedChartProps> = ({
   bucket, minTime, maxTime, stepped, showDots, autoFollow = false, onZoomRangeChange,
-  groupLabel, locked, onToggleLock, onTimeClick, leftGutter: sharedLeftGutter,
+  groupLabel, locked, onToggleLock, onTimeClick, leftGutter: sharedLeftGutter, rightLabelTime,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
@@ -675,6 +676,25 @@ export const MixedChart: React.FC<MixedChartProps> = ({
             title="Newest telegram in buffer"
           >
             {formatFullTime(newestBufferMs, multiDay)}
+          </div>
+        )}
+        {rightLabelTime != null && (
+          <div
+            style={{
+              position: 'absolute',
+              right: '8px',
+              bottom: '24px',
+              fontSize: '0.68rem',
+              lineHeight: 1,
+              color: 'var(--accent-primary)',
+              fontVariantNumeric: 'tabular-nums',
+              pointerEvents: 'none',
+              zIndex: 6,
+              whiteSpace: 'nowrap',
+            }}
+            title="Current NOW time"
+          >
+            {formatFullTime(rightLabelTime, multiDay)}
           </div>
         )}
       </div>

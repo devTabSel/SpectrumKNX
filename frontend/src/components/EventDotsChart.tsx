@@ -14,6 +14,7 @@ interface EventDotsChartProps {
   bucket: ChartBucket;
   minTime: number | null;
   maxTime: number | null;
+  rightLabelTime?: number | null;
   autoFollow?: boolean;
   onZoomRangeChange?: (value: [number, number] | null) => void;
   /** Click (not drag-select) on the chart: navigate to the telegram list around
@@ -33,7 +34,7 @@ const syncCursor = uPlot.sync('knx-time-axis');
  * (no forward-fill/held state); its tooltip/legend shows the telegram's
  * formatted value.
  */
-export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime, maxTime, autoFollow = false, onZoomRangeChange, onTimeClick, leftGutter: sharedLeftGutter }) => {
+export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime, maxTime, autoFollow = false, onZoomRangeChange, onTimeClick, leftGutter: sharedLeftGutter, rightLabelTime }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const [width, setWidth] = useState(800);
@@ -592,6 +593,25 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
             title="Newest telegram in buffer"
           >
             {formatFullTime(newestBufferMs, multiDay)}
+          </div>
+        )}
+        {rightLabelTime != null && (
+          <div
+            style={{
+              position: 'absolute',
+              right: '8px',
+              bottom: '24px',
+              fontSize: '0.68rem',
+              lineHeight: 1,
+              color: 'var(--accent-primary)',
+              fontVariantNumeric: 'tabular-nums',
+              pointerEvents: 'none',
+              zIndex: 6,
+              whiteSpace: 'nowrap',
+            }}
+            title="Current NOW time"
+          >
+            {formatFullTime(rightLabelTime, multiDay)}
           </div>
         )}
       </div>

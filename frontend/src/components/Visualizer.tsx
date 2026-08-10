@@ -233,13 +233,15 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   // instead of dropping off a frozen scale (#340). A user zoom freezes it (#281).
   const autoFollow = currentZoomRange === null;
 
+  const rightLabelTime = edgePinned.right ? liveNowMs : null;
+
   const charts = (
     <div ref={chartWrapperRef} style={{ flex: 1, overflowY: 'auto', padding: embed ? '0.75rem' : '1.5rem' }}>
       {displayBuckets.map(g => (
         g.bucket.isBinary ? (
-          <TimelineChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime} showDots={showDots} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))} leftGutter={sharedLeftGutter} />
+          <TimelineChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime} showDots={showDots} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))} leftGutter={sharedLeftGutter} rightLabelTime={rightLabelTime} />
         ) : g.bucket.isEvents ? (
-          <EventDotsChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))} leftGutter={sharedLeftGutter} />
+          <EventDotsChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))} leftGutter={sharedLeftGutter} rightLabelTime={rightLabelTime} />
         ) : (
           <MixedChart
             key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime}
@@ -250,6 +252,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
             onToggleLock={g.isLatest ? () => toggleLock(g.bucket.unit, g.bucket.series.length) : undefined}
             onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))}
             leftGutter={sharedLeftGutter}
+            rightLabelTime={rightLabelTime}
           />
         )
       ))}
