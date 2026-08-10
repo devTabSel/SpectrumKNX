@@ -59,6 +59,7 @@ const renderTable = () =>
       activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
       onQuickFilter={vi.fn()}
       onQuickVisualize={vi.fn()}
+      quickFilterFiltersOutAny
     />,
   );
 
@@ -712,6 +713,27 @@ test('row message-context controls are hidden when DELTA quick-filter column is 
   expect(container.querySelector('button[title*="click to unflag"]')).toBeFalsy();
 });
 
+test('row message-context controls are hidden when quick filter excludes no message', () => {
+  const { container } = render(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{}}
+      quickFilterFiltersOutAny={false}
+    />,
+  );
+
+  expect(container.querySelector('button[title*="Always show context"]')).toBeFalsy();
+  expect(container.querySelector('button[title*="click to unflag"]')).toBeFalsy();
+});
+
 test('plain click on a message-context flag keeps only that row flagged', () => {
   const { container } = renderTable();
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
@@ -776,6 +798,7 @@ test('flagging a row pauses live-follow and anchors that row before list changes
       activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
       onQuickFilter={vi.fn()}
       onQuickVisualize={vi.fn()}
+      quickFilterFiltersOutAny
       listFollow={true}
       onListFollowChange={onListFollowChange}
       onListAnchorKeyChange={onListAnchorKeyChange}

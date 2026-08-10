@@ -529,6 +529,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     rowFlagsEnabled &&
     quickEnabled &&
     isQuickColumnEnabled('delta') &&
+    quickFilterFiltersOutAnyMessage &&
     hasNonInitialDeltaWindow;
 
   const timeSortDirection: 'asc' | 'desc' | null =
