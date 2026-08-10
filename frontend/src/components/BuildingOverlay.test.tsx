@@ -80,6 +80,13 @@ afterEach(() => {
 
 const noop = () => {};
 
+const openDeviceSubtree = (label: string) => {
+  if (!screen.queryByText(label)) return;
+  if (label === 'Group Addresses' && screen.queryByText('Switch GA')) return;
+  if (label === 'Comm Objects' && screen.queryByText('Switching')) return;
+  fireEvent.click(screen.getByText(label));
+};
+
 test('resolves and shows the ETS function-type name next to the function (#307)', async () => {
   vi.stubGlobal('fetch', mockFetch({ '/api/building': BUILDING_DATA, '/api/telegrams/last': { telegrams: [] } }));
 
@@ -123,7 +130,8 @@ test('visualizing a device adds all its group addresses (#307)', async () => {
 
   await waitFor(() => expect(screen.getByText('Push Button')).toBeInTheDocument());
   fireEvent.click(screen.getByText('Push Button')); // expand the device
-  fireEvent.click(screen.getByTitle('Visualize all 2 group addresses of this device'));
+  openDeviceSubtree('Group Addresses');
+  fireEvent.click(screen.getAllByTitle('Visualize all 2 group addresses of this device')[0]);
   expect(onVisualizeGAs).toHaveBeenCalledWith(['1/1/1', '1/1/2']);
 });
 
@@ -139,6 +147,7 @@ test('comm object filter action uses the multi-GA icon, not the single-GA one (#
 
   await waitFor(() => expect(screen.getByText('Push Button')).toBeInTheDocument());
   fireEvent.click(screen.getByText('Push Button'));
+  openDeviceSubtree('Comm Objects');
   expect(screen.getByTitle('Filter by connected group addresses')).toBeInTheDocument();
 });
 
@@ -167,6 +176,7 @@ test('comm object header shows the DPT-family mismatch and the newest value, fra
 
   await waitFor(() => expect(screen.getByText('Push Button')).toBeInTheDocument());
   fireEvent.click(screen.getByText('Push Button'));
+  openDeviceSubtree('Comm Objects');
 
   // The KO's own DPT is main category 1; one connected GA (1/1/2) is main category 5.
   await waitFor(() => expect(screen.getByText('5.*')).toBeInTheDocument());
@@ -188,9 +198,70 @@ test('visualizing a single GA row inside the expanded comm-object table propagat
 
   await waitFor(() => expect(screen.getByText('Push Button')).toBeInTheDocument());
   fireEvent.click(screen.getByText('Push Button')); // expand device
+  openDeviceSubtree('Comm Objects');
   fireEvent.click(screen.getByText('Switching')); // expand the KO's GA table
 
   const row = (await screen.findByText('Status GA')).closest('tr')!;
   fireEvent.click(within(row).getByTitle('Visualize this group address'));
   expect(onVisualizeGAs).toHaveBeenCalledWith(['1/1/2']);
+});
+
+test('only group addresses sent by a communication object are framed in the device GA subtree', async () => {
+  vi.stubGlobal('fetch', mockFetch({ '/api/building': BUILDING_DATA, '/api/telegrams/last': { telegrams: [] } }));
+
+  render(
+    <BuildingOverlay
+      onClose={noop} onFilterDevice={noop} onFilterGAs={noop} onLastSeen={noop}
+      onVisualizeGAs={noop} onDeviceStatus={noop}
+    />
+  );
+
+  await waitFor(() => expect(screen.getByText('Push Button')).toBeInTheDocument());
+  fireEvent.click(screen.getByText('Push Button'));
+  openDeviceSubtree('Group Addresses');
+
+  expect(screen.getByLabelText('sending')).toHaveTextContent('1/1/1');
+  expect(screen.queryByLabelText('sending')?.textContent).not.toContain('1/1/2');
+});
+
+test('clicking the location arrow shows the available location properties', async () => {
+  vi.stubGlobal('fetch', mockFetch({ '/api/building': BUILDING_DATA, '/api/telegrams/last': { telegrams: [] } }));
+
+  render(
+    <BuildingOverlay
+      onClose={noop} onFilterDevice={noop} onFilterGAs={noop} onLastSeen={noop}
+      onVisualizeGAs={noop} onDeviceStatus={noop}
+    />
+  );
+
+  await waitFor(() => expect(screen.getByText('Main House')).toBeInTheDocument());
+  fireEvent.click(screen.getByTitle('Show location properties'));
+
+  expect(screen.getByText('PATH')).toBeInTheDocument();
+  expect(screen.getAllByText('Main House').length).toBeGreaterThan(0);
+  expect(screen.getByText('Name')).toBeInTheDocument();
+  expect(screen.getAllByText('Main House').length).toBeGreaterThan(0);
+  expect(screen.getByText('Type')).toBeInTheDocument();
+  expect(screen.getAllByText('Building').length).toBeGreaterThan(0);
+});
+
+test('clicking the device arrow shows the available device properties', async () => {
+  vi.stubGlobal('fetch', mockFetch({ '/api/building': BUILDING_DATA, '/api/telegrams/last': { telegrams: [] } }));
+
+  render(
+    <BuildingOverlay
+      onClose={noop} onFilterDevice={noop} onFilterGAs={noop} onLastSeen={noop}
+      onVisualizeGAs={noop} onDeviceStatus={noop}
+    />
+  );
+
+  await waitFor(() => expect(screen.getByText('Push Button')).toBeInTheDocument());
+  fireEvent.click(screen.getByTitle('Show device properties'));
+
+  expect(screen.getByText('Address')).toBeInTheDocument();
+  expect(screen.getAllByText('1.1.1').length).toBeGreaterThan(0);
+  expect(screen.getByText('Manufacturer')).toBeInTheDocument();
+  expect(screen.getByText('MDT')).toBeInTheDocument();
+  expect(screen.getByText('Hardware')).toBeInTheDocument();
+  expect(screen.getByText('BE-GTM1TS.01')).toBeInTheDocument();
 });

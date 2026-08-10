@@ -9,7 +9,7 @@ import { useExpanded } from '../utils/buildingExpansion';
 import { GaNameWidthContext } from '../utils/gaNameWidth';
 import { useLastSeenValues } from '../hooks/useLastSeenValues';
 import { SendToGaPopover } from './SendToGaPopover';
-import { GaValuesTable } from './GaValuesTable';
+import { GaValuesTable, type GaTableEntry } from './GaValuesTable';
 import type { Telegram } from '../hooks/useWebSocket';
 
 // GA name column width is clamped to keep a single very long name from blowing
@@ -111,6 +111,31 @@ const channelGAs = (ch: Channel): string[] => [...new Set(ch.kos.flatMap(koGAs))
 
 const deviceGAs = (d: DeviceNode): string[] =>
   [...new Set([...d.channels.flatMap(channelGAs), ...d.kos.flatMap(koGAs)])];
+
+const deviceKos = (d: DeviceNode): Ko[] => [...d.channels.flatMap(ch => ch.kos), ...d.kos];
+
+const deviceGaEntries = (d: DeviceNode): GaTableEntry[] => {
+  const entries = new Map<string, GaTableEntry>();
+  for (const ko of deviceKos(d)) {
+    const sendingGA = ko.flags?.transmit && ko.group_addresses.length > 0 ? ko.group_addresses[0].address : null;
+    for (const ga of ko.group_addresses) {
+      const existing = entries.get(ga.address);
+      if (existing) {
+        if (!existing.name && ga.name) existing.name = ga.name;
+        if (!existing.dpt && (ga.dpt ?? ko.dpts?.[0])) existing.dpt = ga.dpt ?? ko.dpts?.[0];
+        if (ga.address === sendingGA) existing.sending = true;
+        continue;
+      }
+      entries.set(ga.address, {
+        address: ga.address,
+        name: ga.name || '',
+        dpt: ga.dpt ?? ko.dpts?.[0],
+        sending: ga.address === sendingGA,
+      });
+    }
+  }
+  return [...entries.values()];
+};
 
 const sortKos = (kos: Ko[]): Ko[] =>
   [...kos].sort((a, b) => {
@@ -219,6 +244,79 @@ const Caret: React.FC<{ open: boolean; hasChildren: boolean }> = ({ open, hasChi
     {hasChildren ? (open ? <ChevronDown size={12} /> : <ChevronRight size={12} />) : null}
   </span>
 );
+
+const DeviceSubtreeRow: React.FC<{
+  storageKey: string;
+  depth: number;
+  label: string;
+  countLabel?: string;
+  query: string;
+  icon: React.ReactNode;
+  hasChildren: boolean;
+  defaultOpen?: boolean;
+  actions?: React.ReactNode;
+  children?: React.ReactNode;
+}> = ({ storageKey, depth, label, countLabel, query, icon, hasChildren, defaultOpen = true, actions, children }) => {
+  const [open, toggle] = useExpanded(storageKey, defaultOpen);
+  const effectiveOpen = open || !!query;
+
+  return (
+    <div>
+      <div
+        style={{ ...rowStyle(depth), cursor: hasChildren ? 'pointer' : 'default' }}
+        onClick={() => hasChildren && toggle()}
+        onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
+        onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+      >
+        <Caret open={effectiveOpen} hasChildren={hasChildren} />
+        {icon}
+        <span style={{ flex: 1, minWidth: 0, fontSize: '0.76rem', fontWeight: 600, color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {label}
+        </span>
+        {countLabel && (
+          <span style={{ fontSize: '0.65rem', color: 'var(--text-dim)', flexShrink: 0 }}>
+            {countLabel}
+          </span>
+        )}
+        {actions}
+      </div>
+      {effectiveOpen && hasChildren && children}
+    </div>
+  );
+};
+
+const PropertyList: React.FC<{
+  depth: number;
+  items: Array<{ label: string; value: string }>;
+}> = ({ depth, items }) => {
+  const visibleItems = items.filter(item => item.value.trim().length > 0);
+  if (visibleItems.length === 0) return null;
+
+  return (
+    <div style={{ padding: `0.1rem 0.75rem 0.35rem ${2.4 + depth * 1.1}rem` }}>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'max-content minmax(0, 1fr)',
+        gap: '0.2rem 0.6rem',
+        padding: '0.45rem 0.6rem',
+        border: '1px solid var(--border-subtle)',
+        borderRadius: 6,
+        background: 'rgba(255,255,255,0.02)',
+      }}>
+        {visibleItems.map(item => (
+          <React.Fragment key={item.label}>
+            <span style={{ fontSize: '0.66rem', fontWeight: 400, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+              {item.label}
+            </span>
+            <span style={{ fontSize: '0.74rem', fontWeight: 400, color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.value}>
+              {item.value}
+            </span>
+          </React.Fragment>
+        ))}
+      </div>
+    </div>
+  );
+};
 
 // ── KO row ──────────────────────────────────────────────────────────────────────
 
@@ -436,10 +534,19 @@ const DeviceRow: React.FC<{
   latestTelegram?: Telegram | null;
 }> = ({ device, depth, query, onFilterDevice, onFilterGAs, onLastSeen, onVisualizeGAs, onDeviceStatus, writeEnabled, latestTelegram }) => {
   const [open, toggle] = useExpanded(`dev:${device.address}`, false);
+  const [propsOpen, toggleProps] = useExpanded(`dev-props:${device.address}`, false);
   const koCount = device.channels.reduce((s, c) => s + c.kos.length, 0) + device.kos.length;
   const hasChildren = koCount > 0;
   const effectiveOpen = open || !!query;
   const allGAs = useMemo(() => deviceGAs(device), [device]);
+  const gaEntries = useMemo(() => deviceGaEntries(device), [device]);
+  const hasGroupAddresses = gaEntries.length > 0;
+  const deviceProperties = useMemo(() => [
+    { label: 'Address', value: device.address },
+    { label: 'Name', value: device.name || '' },
+    { label: 'Manufacturer', value: device.manufacturer || '' },
+    { label: 'Hardware', value: device.hardware || '' },
+  ], [device.address, device.name, device.manufacturer, device.hardware]);
 
   return (
     <div>
@@ -455,10 +562,21 @@ const DeviceRow: React.FC<{
           fontFamily: "'JetBrains Mono', monospace", fontSize: '0.78rem', fontWeight: 600,
           color: 'var(--text-main)', flexShrink: 0,
         }}>{device.address}</span>
-        <span title={device.name} style={{
-          flex: 1, minWidth: 0, fontSize: '0.78rem', color: 'var(--text-dim)',
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>{device.name}</span>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '0.15rem' }}>
+          <span title={device.name} style={{
+            minWidth: 0, fontSize: '0.78rem', color: 'var(--text-dim)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{device.name}</span>
+          <button
+            style={iconBtnStyle}
+            title={propsOpen ? 'Hide device properties' : 'Show device properties'}
+            onClick={e => { e.stopPropagation(); toggleProps(); }}
+            onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
+            onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+          >
+            <ChevronDown size={12} style={{ transform: propsOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.15s ease' }} />
+          </button>
+        </div>
         {hasChildren && (
           <span style={{ fontSize: '0.65rem', color: 'var(--text-dim)', flexShrink: 0 }}>
             {koCount} KO{koCount !== 1 ? 's' : ''}
@@ -516,26 +634,92 @@ const DeviceRow: React.FC<{
           </button>
         )}
       </div>
+      {propsOpen && <PropertyList depth={depth + 1} items={deviceProperties} />}
       {effectiveOpen && hasChildren && (
         <div>
-          {device.channels.map(ch => {
-            const visibleKos = sortKos(query ? ch.kos.filter(k => koMatches(k, query)) : ch.kos);
-            if (visibleKos.length === 0) return null;
-            return (
-              <ChannelRow
-                key={ch.id} channel={ch} deviceAddress={device.address} visibleKos={visibleKos} depth={depth + 1}
-                query={query} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
-                writeEnabled={writeEnabled} latestTelegram={latestTelegram}
-              />
-            );
-          })}
-          {sortKos(query ? device.kos.filter(k => koMatches(k, query)) : device.kos).map((ko, i) => (
-            <KoRow
-              key={`${ko.number}-${i}`} ko={ko} koKey={`${device.address}:${ko.number}-${i}`}
-              depth={depth + 1} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
-              writeEnabled={writeEnabled} latestTelegram={latestTelegram}
+          <DeviceSubtreeRow
+            storageKey={`dev:${device.address}:gas`}
+            depth={depth + 1}
+            label="Group Addresses"
+            countLabel={`${gaEntries.length} GA${gaEntries.length !== 1 ? 's' : ''}`}
+            query={query}
+            hasChildren={hasGroupAddresses}
+            defaultOpen={false}
+            icon={<Sparkles size={12} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} />}
+            actions={hasGroupAddresses ? (
+              <>
+                <button
+                  style={iconBtnStyle}
+                  title={`Visualize all ${gaEntries.length} group address${gaEntries.length > 1 ? 'es' : ''} of this device`}
+                  onClick={e => { e.stopPropagation(); onVisualizeGAs(gaEntries.map(entry => entry.address)); }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+                >
+                  <LineChart size={12} />
+                </button>
+                <button
+                  style={iconBtnStyle}
+                  title={`Filter all ${gaEntries.length} group address${gaEntries.length > 1 ? 'es' : ''} of this device (targets)`}
+                  onClick={e => { e.stopPropagation(); onFilterGAs(gaEntries.map(entry => entry.address)); }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+                >
+                  <ListFilter size={12} />
+                </button>
+                <button
+                  style={iconBtnStyle}
+                  title={`Show last seen values (${gaEntries.length} GAs)`}
+                  onClick={e => { e.stopPropagation(); onLastSeen(gaEntries.map(entry => entry.address), 'ga'); }}
+                  onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
+                  onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+                >
+                  <Clock size={12} />
+                </button>
+              </>
+            ) : undefined}
+          >
+            <GaValuesTable
+              entries={gaEntries}
+              depth={depth + 2}
+              latestTelegram={latestTelegram}
+              writeEnabled={writeEnabled}
+              onFilterGAs={onFilterGAs}
+              onLastSeen={onLastSeen}
+              onVisualizeGAs={onVisualizeGAs}
             />
-          ))}
+          </DeviceSubtreeRow>
+
+          <DeviceSubtreeRow
+            storageKey={`dev:${device.address}:comm-objects`}
+            depth={depth + 1}
+            label="Comm Objects"
+            countLabel={`${koCount} KO${koCount !== 1 ? 's' : ''}`}
+            query={query}
+            hasChildren={hasChildren}
+            defaultOpen={false}
+            icon={<Layers size={12} style={{ color: 'var(--text-dim)', flexShrink: 0 }} />}
+          >
+            <div>
+              {device.channels.map(ch => {
+                const visibleKos = sortKos(query ? ch.kos.filter(k => koMatches(k, query)) : ch.kos);
+                if (visibleKos.length === 0) return null;
+                return (
+                  <ChannelRow
+                    key={ch.id} channel={ch} deviceAddress={device.address} visibleKos={visibleKos} depth={depth + 2}
+                    query={query} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
+                    writeEnabled={writeEnabled} latestTelegram={latestTelegram}
+                  />
+                );
+              })}
+              {sortKos(query ? device.kos.filter(k => koMatches(k, query)) : device.kos).map((ko, i) => (
+                <KoRow
+                  key={`${ko.number}-${i}`} ko={ko} koKey={`${device.address}:${ko.number}-${i}`}
+                  depth={depth + 2} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
+                  writeEnabled={writeEnabled} latestTelegram={latestTelegram}
+                />
+              ))}
+            </div>
+          </DeviceSubtreeRow>
         </div>
       )}
     </div>
@@ -704,6 +888,7 @@ const FunctionRow: React.FC<{
 const SpaceRow: React.FC<{
   space: SpaceNode;
   path: string;
+  parentLabel?: string;
   depth: number;
   query: string;
   onFilterDevice: (pa: string) => void;
@@ -713,13 +898,20 @@ const SpaceRow: React.FC<{
   onDeviceStatus: (device: DeviceNode) => void;
   writeEnabled?: boolean;
   latestTelegram?: Telegram | null;
-}> = ({ space, path, depth, query, onFilterDevice, onFilterGAs, onLastSeen, onVisualizeGAs, onDeviceStatus, writeEnabled, latestTelegram }) => {
+}> = ({ space, path, parentLabel, depth, query, onFilterDevice, onFilterGAs, onLastSeen, onVisualizeGAs, onDeviceStatus, writeEnabled, latestTelegram }) => {
   const [open, toggle] = useExpanded(`space:${path}`, depth < 2);
+  const [propsOpen, toggleProps] = useExpanded(`space-props:${path}`, false);
   if (query && !spaceMatches(space, query)) return null;
   const effectiveOpen = open || !!query;
   const hasChildren = space.spaces.length > 0 || space.devices.length > 0 || !!(space.functions && space.functions.length > 0);
   const visibleDevices = query ? space.devices.filter(d => deviceMatches(d, query)) : space.devices;
   const visibleFunctions = space.functions ? (query ? space.functions.filter(f => functionMatches(f, query)) : space.functions) : [];
+  const qualifiedName = [parentLabel, space.name].filter(Boolean).join(' ') || space.name || space.type;
+  const spaceProperties = useMemo(() => [
+    { label: 'PATH', value: qualifiedName },
+    { label: 'Name', value: space.name || '' },
+    { label: 'Type', value: space.type || '' },
+  ], [qualifiedName, space.name, space.type]);
 
   return (
     <div>
@@ -735,16 +927,28 @@ const SpaceRow: React.FC<{
           {space.name || space.type}
         </span>
         {space.type && (
-          <span style={{ fontSize: '0.65rem', color: 'var(--text-dim)', flexShrink: 0 }}>
-            {space.type}
-          </span>
+          <>
+            <span style={{ fontSize: '0.65rem', color: 'var(--text-dim)', flexShrink: 0 }}>
+              {space.type}
+            </span>
+            <button
+              style={iconBtnStyle}
+              title={propsOpen ? 'Hide location properties' : 'Show location properties'}
+              onClick={e => { e.stopPropagation(); toggleProps(); }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+            >
+              <ChevronDown size={12} style={{ transform: propsOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.15s ease' }} />
+            </button>
+          </>
         )}
       </div>
+      {propsOpen && <PropertyList depth={depth + 1} items={spaceProperties} />}
       {effectiveOpen && (
         <div>
           {sortSpaces(space.spaces).map((sub, i) => (
             <SpaceRow
-              key={`${sub.name}-${i}`} space={sub} path={`${path}/${sub.type}:${sub.name}#${i}`} depth={depth + 1} query={query}
+              key={`${sub.name}-${i}`} space={sub} path={`${path}/${sub.type}:${sub.name}#${i}`} parentLabel={space.name || space.type} depth={depth + 1} query={query}
               onFilterDevice={onFilterDevice} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
               onDeviceStatus={onDeviceStatus} writeEnabled={writeEnabled} latestTelegram={latestTelegram}
             />

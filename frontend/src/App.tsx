@@ -51,6 +51,14 @@ import { UpdateNotification } from './components/UpdateNotification';
 import { useUpdateCheck } from './hooks/useUpdateCheck';
 import type { ColId } from './utils/quickFilter';
 import {
+  buildSourceDeviceMetadataMap,
+  readSourceColumnConfigPref,
+  SOURCE_COLUMN_FIELD_OPTIONS,
+  writeSourceColumnConfigPref,
+  type SourceColumnLineConfig,
+  type SourceDeviceMetadata,
+} from './utils/sourceColumnConfig';
+import {
   DEFAULT_FILTERS,
   dptKey,
   effectiveDeltaContext,
@@ -300,6 +308,10 @@ function App() {
   const [columnOrder, setColumnOrder] = useState<ColId[]>(() =>
     readColumnOrderPref(LIVE_TABLE_INSTANCE_ID)
   );
+  const [sourceColumnLines, setSourceColumnLines] = useState<SourceColumnLineConfig>(() =>
+    readSourceColumnConfigPref()
+  );
+  const [sourceDeviceMetadata, setSourceDeviceMetadata] = useState<Record<string, SourceDeviceMetadata>>({});
   const [rateMode, setRateMode] = useState<'s' | 'm' | 'h'>((getPref('rateMode') as 's' | 'm' | 'h') || 's');
   // Restore the browser telegram cache (and fill the gap from the backend) on
   // startup. On by default; when off the view starts empty and shows only live
@@ -456,9 +468,21 @@ function App() {
     setPref('loadLimit', loadLimit.toString());
     writeVisibleColumnsPref(LIVE_TABLE_INSTANCE_ID, visibleColumns);
     writeColumnOrderPref(LIVE_TABLE_INSTANCE_ID, columnOrder);
+    writeSourceColumnConfigPref(sourceColumnLines);
     setPref('rateMode', rateMode);
     setPref('restoreOnStartup', String(restoreOnStartup));
-  }, [loadLimit, visibleColumns, columnOrder, rateMode, restoreOnStartup]);
+  }, [loadLimit, visibleColumns, columnOrder, sourceColumnLines, rateMode, restoreOnStartup]);
+
+  useEffect(() => {
+    if (!projectStatus?.project_loaded) {
+      setSourceDeviceMetadata({});
+      return;
+    }
+    fetch(apiUrl('/api/building'))
+      .then(r => r.json())
+      .then(data => setSourceDeviceMetadata(buildSourceDeviceMetadataMap(data.tree || [], data.unassigned_devices || [])))
+      .catch(() => setSourceDeviceMetadata({}));
+  }, [projectStatus?.project_loaded]);
 
   // ── Persist workspace (#211) ────────────────────────────────────────────────
   const workspaceView: WorkspaceView = isDatabaseOpen
@@ -704,6 +728,10 @@ function App() {
     () => sortTelegrams(liveTelegrams, sortConfig),
     [liveTelegrams, sortConfig]
   );
+
+  const setSourceColumnLine = useCallback((line: 'top' | 'bottom', value: string) => {
+    setSourceColumnLines(prev => ({ ...prev, [line]: value as SourceColumnLineConfig[typeof line] }));
+  }, []);
   const liveAllBufferSourceCount = useMemo(
     () => new Set(sortedLiveTelegrams.map(t => t.source_address)).size,
     [sortedLiveTelegrams],
@@ -1070,6 +1098,28 @@ function App() {
               </div>
 
               <h3 style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: '0.75rem', letterSpacing: '0.05em' }}>
+                Source Column Content
+              </h3>
+              <div style={{ display: 'grid', gap: '0.75rem', marginBottom: '2rem' }}>
+                <label style={{ display: 'grid', gap: '0.3rem' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>Top line</span>
+                  <select className="glass-input" value={sourceColumnLines.top} onChange={e => setSourceColumnLine('top', e.target.value)}>
+                    {SOURCE_COLUMN_FIELD_OPTIONS.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={{ display: 'grid', gap: '0.3rem' }}>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--text-dim)' }}>Bottom line</span>
+                  <select className="glass-input" value={sourceColumnLines.bottom} onChange={e => setSourceColumnLine('bottom', e.target.value)}>
+                    {SOURCE_COLUMN_FIELD_OPTIONS.map(option => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <h3 style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: '0.75rem', letterSpacing: '0.05em' }}>
                 Loading Limit
               </h3>
               <div className="input-group">
@@ -1418,6 +1468,8 @@ function App() {
                     projectTargetCount={projectStatus?.project_loaded ? filterOptions.targets.length : null}
                     infoBarOpen={infoBarOpen}
                     onInfoBarOpenChange={setInfoBarOpen}
+                    sourceColumnLines={sourceColumnLines}
+                    sourceDeviceMetadata={sourceDeviceMetadata}
                   />
                   </>
                 )}
@@ -1436,6 +1488,8 @@ function App() {
             projectLoaded={projectStatus?.project_loaded}
             selectedVisualizationTargets={selectedVisualizationTargets}
             onVisualizationTargetsChange={setSelectedVisualizationTargets}
+            sourceColumnLines={sourceColumnLines}
+            sourceDeviceMetadata={sourceDeviceMetadata}
             initialView={initialView}
           />
         )}

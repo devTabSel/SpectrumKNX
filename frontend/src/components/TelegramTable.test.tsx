@@ -169,6 +169,38 @@ test('without a click the table keeps following the live edge', () => {
   expect(screen.queryByText(/new telegram/)).not.toBeInTheDocument();
 });
 
+test('source column can render configured device and location fields in two lines', () => {
+  const telegrams = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', source_address: '1.1.1', source_name: 'Kitchen Button', raw_hex: '0x31' }),
+  ];
+
+  render(
+    <TelegramTable
+      telegrams={telegrams}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      sourceColumnLines={{ top: 'manufacturer', bottom: 'locationPath' }}
+      sourceDeviceMetadata={{
+        '1.1.1': {
+          deviceName: 'Kitchen Button',
+          manufacturer: 'MDT',
+          hardware: 'BE-GT2',
+          locationName: 'Kitchen',
+          locationType: 'Room',
+          locationPath: 'Main House Kitchen',
+        },
+      }}
+    />,
+  );
+
+  expect(screen.getByText('MDT')).toBeInTheDocument();
+  expect(screen.getByText('Main House Kitchen')).toBeInTheDocument();
+});
+
 test('multi-level sort (#311): plain click replaces, ctrl-click adds a level', () => {
   const onSort = vi.fn();
   render(

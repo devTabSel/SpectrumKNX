@@ -19,6 +19,7 @@ import { loadHistoryTelegrams, type LoadedRange } from '../utils/historyLoad';
 import { buildViewUrl, type VizViewState } from '../utils/viewUrl';
 import { getPref, setPref } from '../utils/prefs';
 import { findNearestVisibleVisualizationTelegram } from '../utils/visualizationNavigation';
+import type { SourceColumnLineConfig, SourceDeviceMetadata } from '../utils/sourceColumnConfig';
 import {
   effectiveDeltaContext,
   hasActiveFilters,
@@ -58,13 +59,15 @@ interface HistorySearchProps {
   projectLoaded?: boolean;
   selectedVisualizationTargets: string[];
   onVisualizationTargetsChange: (targets: string[] | ((prev: string[]) => string[])) => void;
+  sourceColumnLines: SourceColumnLineConfig;
+  sourceDeviceMetadata: Record<string, SourceDeviceMetadata>;
   /** Shared-view state parsed from the URL — triggers an auto-load on mount (#150). */
   initialView?: VizViewState | null;
 }
 
 export const HistorySearch: React.FC<HistorySearchProps> = ({
   loadLimit, filterOptions, activeFilters, onFiltersChange, onOpenSettings,
-  projectLoaded, selectedVisualizationTargets, onVisualizationTargetsChange, initialView
+  projectLoaded, selectedVisualizationTargets, onVisualizationTargetsChange, sourceColumnLines, sourceDeviceMetadata, initialView
 }) => {
   const [visibleColumns] = useState<{ [key: string]: boolean }>(() => readVisibleColumnsPref(HISTORY_TABLE_INSTANCE_ID));
   const [columnOrder, setColumnOrder] = useState<ColId[]>(() => readColumnOrderPref(HISTORY_TABLE_INSTANCE_ID));
@@ -527,6 +530,8 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               allBufferDptMainSubs={allBufferDptMainSubs}
               projectSourceCount={projectLoaded ? filterOptions.sources.length : null}
               projectTargetCount={projectLoaded ? filterOptions.targets.length : null}
+              sourceColumnLines={sourceColumnLines}
+              sourceDeviceMetadata={sourceDeviceMetadata}
             />
           )}
         </div>

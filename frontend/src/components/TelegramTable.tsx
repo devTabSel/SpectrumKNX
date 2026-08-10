@@ -17,6 +17,12 @@ import {
   type QuickCellValue,
   type QuickFilterColumnEnabled,
 } from '../utils/quickFilter';
+import {
+  DEFAULT_SOURCE_COLUMN_LINE_CONFIG,
+  resolveSourceColumnField,
+  type SourceColumnLineConfig,
+  type SourceDeviceMetadata,
+} from '../utils/sourceColumnConfig';
 
 export type { SortKey, SortLevel, SortConfig };
 
@@ -187,6 +193,10 @@ interface TelegramTableProps {
   projectSourceCount?: number | null;
   /** Total target-device count from the loaded xknxproj catalog. */
   projectTargetCount?: number | null;
+  /** Optional device/location metadata keyed by source individual address. */
+  sourceDeviceMetadata?: Record<string, SourceDeviceMetadata>;
+  /** Configurable top/bottom fields rendered in the SOURCE column. */
+  sourceColumnLines?: SourceColumnLineConfig;
 }
 
 const EMPTY_CELL: QuickCellValue = { top: '', bottom: '' };
@@ -388,6 +398,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   allBufferDptMainSubs,
   projectSourceCount,
   projectTargetCount,
+  sourceDeviceMetadata,
+  sourceColumnLines = DEFAULT_SOURCE_COLUMN_LINE_CONFIG,
 }) => {
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -1672,11 +1684,33 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       }
 
       case 'source':
+        {
+          const topField = sourceColumnLines.top;
+          const bottomField = sourceColumnLines.bottom;
+          const topText = resolveSourceColumnField(t, sourceDeviceMetadata, topField) || '-';
+          const bottomText = resolveSourceColumnField(t, sourceDeviceMetadata, bottomField) || '-';
+          const topIsAddress = topField === 'address';
+          const bottomIsAddress = bottomField === 'address';
         return (
           <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }} className="filterable-cell">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
-              <div className="mono-addr highlight" style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
-                {t.source_address}
+              <div
+                className={topIsAddress ? 'mono-addr highlight' : undefined}
+                title={topText}
+                style={topIsAddress
+                  ? { color: 'var(--text-dim)', fontWeight: 400 }
+                  : {
+                    color: 'var(--text-main)',
+                    fontSize: '0.75rem',
+                    fontWeight: 500,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    minWidth: 0,
+                    ...lineStyle('source', 'top', topText),
+                  }}
+              >
+                {topText}
               </div>
               <button
                 className={`quick-filter-btn ${activeFilters.sources.includes(t.source_address) ? 'active' : ''}`}
@@ -1704,12 +1738,25 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               )}
             </div>
             {effectiveVisibleColumns.sourceName && (
-              <div className="subtitle-name" title={t.source_name || undefined} style={lineStyle('source', 'bottom')}>
-                {t.source_name || '-'}
+              <div
+                className={bottomIsAddress ? 'mono-addr' : 'subtitle-name'}
+                title={bottomText}
+                style={bottomIsAddress
+                  ? {
+                    fontSize: '0.7rem',
+                    color: 'var(--text-dim)',
+                    marginTop: '0.15rem',
+                    fontWeight: 400,
+                    ...lineStyle('source', 'bottom', bottomText),
+                  }
+                  : lineStyle('source', 'bottom', bottomText)}
+              >
+                {bottomText}
               </div>
             )}
           </div>
         );
+      }
 
       case 'target':
         return (
