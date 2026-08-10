@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useEffect, useLayoutEffect, useState, useCallba
 import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
-import { ChevronUp, ChevronDown, Filter, LineChart, ListFilter, X, Clock, Info, Power, Circle, CircleDot } from 'lucide-react';
+import { ChevronUp, ChevronDown, Filter, LineChart, X, Clock, Power, Circle, CircleDot } from 'lucide-react';
 import { dptKey, type ActiveFilters } from '../types/filters';
 import { SendToGaPopover } from './SendToGaPopover';
 import { GotoTimeControl } from './GotoTimeControl';
@@ -225,6 +225,7 @@ const formatDeltaMs = (diffMs: number, sign: '+' | '-'): string => {
 };
 
 const cellPadding = '0.75rem 1rem'; // Unified padding for all cells
+const RAIL_WIDTH = '1.75rem'; // Fixed width of the left-edge icon rail, shared by quickinfo/header/quickfilter/rows
 
 // Default two-line styles per column. These are the built-in render defaults
 // and can be overridden per column via tableConfig.columns[col].lineStyles.
@@ -268,11 +269,14 @@ const makeTextMatcher = (pattern: string): ((s: string) => boolean) => {
 
 /** Builds one combined predicate from all active quick-filter cells, so
  * patterns are compiled once per change rather than per telegram. */
-const compileQuickFilters = (patterns: Partial<Record<ColId, QuickCellValue>>): ((t: Telegram) => boolean) => {
+const compileQuickFilters = (
+  patterns: Partial<Record<ColId, QuickCellValue>>,
+  enabledColumns: Record<ColId, boolean>,
+): ((t: Telegram) => boolean) => {
   const checks: ((t: Telegram) => boolean)[] = [];
 
   const time = patterns.time;
-  if (time?.top || time?.bottom) {
+  if (enabledColumns.time !== false && (time?.top || time?.bottom)) {
     const from = time.top ? new Date(time.top).getTime() : null;
     const to = time.bottom ? new Date(time.bottom).getTime() : null;
     checks.push(t => {
@@ -284,27 +288,27 @@ const compileQuickFilters = (patterns: Partial<Record<ColId, QuickCellValue>>): 
   }
 
   const source = patterns.source;
-  if (source?.top) {
+  if (enabledColumns.source !== false && source?.top) {
     const m = makeAddressPatternMatcher(source.top);
     checks.push(t => m(t.source_address));
   }
-  if (source?.bottom) {
+  if (enabledColumns.source !== false && source?.bottom) {
     const m = makeTextMatcher(source.bottom);
     checks.push(t => m(t.source_name ?? ''));
   }
 
   const target = patterns.target;
-  if (target?.top) {
+  if (enabledColumns.target !== false && target?.top) {
     const m = makeAddressPatternMatcher(target.top);
     checks.push(t => m(t.target_address));
   }
-  if (target?.bottom) {
+  if (enabledColumns.target !== false && target?.bottom) {
     const m = makeTextMatcher(target.bottom);
     checks.push(t => m(t.target_name ?? ''));
   }
 
   const type = patterns.type;
-  if (type?.top) {
+  if (enabledColumns.type !== false && type?.top) {
     const values = type.top.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
     if (values.length > 0) {
       checks.push(t => {
@@ -316,17 +320,17 @@ const compileQuickFilters = (patterns: Partial<Record<ColId, QuickCellValue>>): 
   }
 
   const dpt = patterns.dpt;
-  if (dpt?.top) {
+  if (enabledColumns.dpt !== false && dpt?.top) {
     const m = makeAddressPatternMatcher(dpt.top);
     checks.push(t => t.dpt_main != null && m(dptKey(t.dpt_main, t.dpt_sub)));
   }
-  if (dpt?.bottom) {
+  if (enabledColumns.dpt !== false && dpt?.bottom) {
     const m = makeTextMatcher(dpt.bottom);
     checks.push(t => m(t.dpt_name ?? ''));
   }
 
   const value = patterns.value;
-  if (value?.top || value?.bottom) {
+  if (enabledColumns.value !== false && (value?.top || value?.bottom)) {
     const m = makeValueMatcher(value.top ?? '', value.bottom ?? '');
     checks.push(m);
   }
@@ -450,6 +454,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const [internalQuickOpen, setInternalQuickOpen] = useState(false);
   const [internalQuickEnabled, setInternalQuickEnabled] = useState(false);
   const [internalQuickPatterns, setInternalQuickPatterns] = useState<Partial<Record<ColId, QuickCellValue>>>({});
+  const [quickColumnEnabled, setQuickColumnEnabled] = useState<Record<ColId, boolean>>({
+    time: true,
+    delta: true,
+    source: true,
+    target: true,
+    type: true,
+    dpt: true,
+    value: true,
+  });
 
   const quickOpen = effectiveQuickFilterOpen ?? internalQuickOpen;
   const setQuickOpen = useCallback((val: boolean | ((prev: boolean) => boolean)) => {
@@ -476,6 +489,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const setQuickCell = useCallback((id: ColId, row: 'top' | 'bottom', text: string) => {
     setQuickPatterns(prev => ({ ...prev, [id]: { ...(prev[id] ?? EMPTY_CELL), [row]: text } }));
   }, [setQuickPatterns]);
+
+  const isQuickColumnEnabled = useCallback((id: ColId) => quickColumnEnabled[id] !== false, [quickColumnEnabled]);
+  const toggleQuickColumnEnabled = useCallback((id: ColId) => {
+    setQuickColumnEnabled(prev => ({ ...prev, [id]: prev[id] === false }));
+  }, []);
 
   const toggleQuickOpen = () => {
     const nextOpen = !quickOpen;
@@ -543,9 +561,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   const quickFiltered = useMemo(() => {
     if (!quickFilterFeatureEnabled || !quickOpen || !quickEnabled) return telegrams;
-    const matches = compileQuickFilters(currentPatterns);
+    const matches = compileQuickFilters(currentPatterns, quickColumnEnabled);
     return telegrams.filter(matches);
-  }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, currentPatterns]);
+  }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, currentPatterns, quickColumnEnabled]);
 
   const timeSortDirection: 'asc' | 'desc' | null =
     effectiveSortConfig[0]?.key === 'timestamp' ? effectiveSortConfig[0].direction : null;
@@ -1121,29 +1139,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         );
 
       case 'delta': {
-        const key = anchorKey(t);
-        const flagged = flaggedSet.has(key);
         return (
           <div style={{ padding: cellPadding, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '0.16rem' }}>
             <div className="mono-addr" style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums', minHeight: '1em' }}>
               {t.deltaStr ?? ''}
             </div>
-            {rowFlagsEnabled && (
-              <button
-                style={{
-                  background: 'transparent', border: 'none', cursor: 'pointer', padding: '0.15rem',
-                  borderRadius: '4px', display: 'flex', alignItems: 'center', flexShrink: 0,
-                  color: flagged ? 'var(--accent-primary)' : 'var(--text-dim)',
-                  opacity: activeFilters.deltaContextEnabled ? (flagged ? 1 : 0.35) : 0.25,
-                }}
-                title={flagged
-                  ? 'Always show context around this message — click to unflag (ctrl/cmd-click to apply to all marked rows)'
-                  : 'Always show context around this message, regardless of the active filters (ctrl/cmd-click to apply to all marked rows)'}
-                onClick={e => handleFlagClick(e, key)}
-              >
-                {flagged ? <CircleDot size={12} /> : <Circle size={12} />}
-              </button>
-            )}
           </div>
         );
       }
@@ -1312,11 +1312,27 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Quick info bar (#311): collapsible summary directly above the header. */}
       {quickInfoEnabled && infoOpen && infoMetrics && (
-        <div style={{
-          display: 'flex', flexDirection: 'column', gap: '0.3rem',
-          padding: '0.4rem 0.75rem', borderBottom: '1px solid var(--border-color)',
-          background: 'var(--bg-subtle)', flexShrink: 0,
-        }}>
+        <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', background: 'var(--bg-subtle)', flexShrink: 0 }}>
+          {/* Left icon rail (#341): flush with the outermost edge, two rows
+              matching the two chip rows — top row top-aligned, bottom row centered. */}
+          <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }}>
+              {quickInfoEnabled && (
+                <button
+                  className="quick-filter-bar-toggle open"
+                  onClick={toggleInfoOpen}
+                  title="Hide info bar"
+                >
+                  <ChevronDown size={13} />
+                </button>
+              )}
+            </div>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }} />
+          </div>
+          <div style={{
+            flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.3rem',
+            padding: '0.4rem 0.75rem',
+          }}>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
             <button
               style={infoChipBtnStyle} title="Jump to the oldest telegram in the current view"
@@ -1361,72 +1377,118 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               </span>
             )}
           </div>
+          </div>
         </div>
       )}
 
       {/* Header */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: gridTemplate,
-          background: 'var(--bg-panel)',
-          zIndex: 10,
-          backdropFilter: 'blur(12px)',
-          borderBottom: '1px solid var(--border-color)',
-          flexShrink: 0,
-          color: 'var(--text-dim)',
-          fontSize: '0.65rem',
-          textTransform: 'uppercase',
-          letterSpacing: '0.05em',
-          fontWeight: 700,
-          // Account for scrollbar width to keep columns aligned with body
-          paddingRight: '8px'
-        }}
-      >
-        {visibleCols.map((c, i) => (
-          <div key={c.id} style={{ padding: cellPadding, position: 'relative', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-            {c.id === 'time' && quickFilterFeatureEnabled && (
+      <div style={{
+        display: 'flex',
+        background: 'linear-gradient(180deg, color-mix(in srgb, var(--bg-panel) 82%, var(--accent-primary) 18%) 0%, color-mix(in srgb, var(--bg-panel) 92%, black 8%) 100%)',
+        zIndex: 10,
+        backdropFilter: 'blur(12px)',
+        borderTop: '1px solid color-mix(in srgb, var(--accent-primary) 18%, var(--border-color))',
+        borderBottom: '1px solid color-mix(in srgb, var(--accent-primary) 22%, var(--border-color))',
+        boxShadow: 'inset 0 1px 0 color-mix(in srgb, white 6%, transparent), inset 0 -1px 0 color-mix(in srgb, black 18%, transparent)',
+        flexShrink: 0,
+      }}>
+        {/* Left icon rail (#341): three rows matching the header's three internal
+            rows — top row top-aligned, middle row centered, bottom row bottom-aligned. */}
+        <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', gap: '0.15rem' }}>
+            {quickInfoEnabled && !infoOpen && (
               <button
-                className={`quick-filter-bar-toggle ${quickOpen ? 'open' : ''}`}
-                onClick={toggleQuickOpen}
-                title={quickOpen ? 'Hide quick filter bar' : 'Show quick filter bar'}
-              >
-                <ListFilter size={13} />
-              </button>
-            )}
-            {c.id === 'time' && quickInfoEnabled && (
-              <button
-                className={`quick-filter-bar-toggle ${infoOpen ? 'open' : ''}`}
+                className="quick-filter-bar-toggle"
                 onClick={toggleInfoOpen}
-                title={infoOpen ? 'Hide info bar' : 'Show info bar'}
+                title="Show info bar"
               >
-                <Info size={13} />
+                <ChevronUp size={13} />
               </button>
             )}
-            {c.id === 'time' && isTimeSort && (
+          </div>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {isTimeSort && (
               <GotoTimeControl seedMs={newestMs} onGoto={gotoTime} />
             )}
-            {c.id === 'delta' ? (
-              <button
-                className="sort-header"
-                onClick={handleDeltaHeaderClick}
-                title={deltaSortActive
-                  ? 'Sorted by time delta — click to flip direction; click any other column to return to live order'
-                  : 'Sort by time delta (exclusive — pauses live scrolling and freezes the current order)'}
-              >
-                {c.label} {deltaSortActive && (deltaSortDirection === 'asc' ? <ChevronUp size={14} /> : <ChevronDown size={14} />)}
-              </button>
-            ) : c.sortKey ? (
-              <button
-                className="sort-header"
-                onClick={(e) => handleColumnSort(c.sortKey!, { additive: e.ctrlKey || e.metaKey })}
-                title="Click to sort · ctrl/cmd-click to add as a further sort level (TIME is always the deepest tiebreaker)"
-              >
-                {c.label} {renderSortArrow(c.sortKey)}
-              </button>
-            ) : (
-              <span>{c.label}</span>
+          </div>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+            {quickFilterFeatureEnabled && (
+              quickOpen ? (
+                <button
+                  className={`quick-filter-bar-toggle ${quickEnabled ? 'open' : ''}`}
+                  onClick={() => setQuickEnabled(e => !e)}
+                  title={quickEnabled ? 'Disable quick filter (keeps patterns)' : 'Enable quick filter'}
+                >
+                  <Filter size={13} />
+                </button>
+              ) : (
+                <button
+                  className="quick-filter-bar-toggle"
+                  onClick={toggleQuickOpen}
+                  title="Show quick filter bar"
+                >
+                  <ChevronDown size={13} />
+                </button>
+              )
             )}
+          </div>
+        </div>
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: 'grid',
+            gridTemplateColumns: gridTemplate,
+            color: 'var(--text-dim)',
+            fontSize: '0.65rem',
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+            fontWeight: 700,
+            // Account for scrollbar width to keep columns aligned with body
+            paddingRight: '8px'
+          }}
+        >
+        {visibleCols.map((c, i) => (
+          // Three stacked rows with no visible divider between them — only the
+          // middle row carries the column label.
+          <div key={c.id} className="header-col" style={{ position: 'relative', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }} />
+            <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+              {c.id === 'delta' ? (
+                <button
+                  className="sort-header"
+                  onClick={handleDeltaHeaderClick}
+                  title={deltaSortActive
+                    ? 'Sorted by time delta — click to flip direction; click any other column to return to live order'
+                    : 'Sort by time delta (exclusive — pauses live scrolling and freezes the current order)'}
+                >
+                  {c.label} {deltaSortActive && (deltaSortDirection === 'asc' ? <ChevronUp size={14} /> : <ChevronDown size={14} />)}
+                </button>
+              ) : c.sortKey ? (
+                <button
+                  className="sort-header"
+                  onClick={(e) => handleColumnSort(c.sortKey!, { additive: e.ctrlKey || e.metaKey })}
+                  title="Click to sort · ctrl/cmd-click to add as a further sort level (TIME is always the deepest tiebreaker)"
+                >
+                  {c.label} {renderSortArrow(c.sortKey)}
+                </button>
+              ) : (
+                <span>{c.label}</span>
+              )}
+            </div>
+            <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '0.4rem' }}>
+              {quickOpen && quickEnabled && (
+                <button
+                  className={`quick-filter-bar-toggle ${quickEnabled && isQuickColumnEnabled(c.id) ? 'open' : ''}`}
+                  onClick={() => toggleQuickColumnEnabled(c.id)}
+                  title={isQuickColumnEnabled(c.id)
+                    ? `Disable quick filter for ${c.label}`
+                    : `Enable quick filter for ${c.label}`}
+                >
+                  <Filter size={12} />
+                </button>
+              )}
+            </div>
             {columnResizeEnabled && i < visibleCols.length - 1 && (
               <div
                 className="col-resize-handle"
@@ -1437,65 +1499,78 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             )}
           </div>
         ))}
+        </div>
       </div>
 
       {/* Quick filter bar (#271, #309) — two rows per column: a pattern/from row
           and a text/to row, except TYPE (one row) and DELTA (Time-Delta-Context
           before/after, #371) which don't go through the pattern pipeline. */}
       {quickFilterFeatureEnabled && quickOpen && (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: gridTemplate,
-            background: 'var(--bg-subtle)',
-            borderBottom: '1px solid var(--border-color)',
-            flexShrink: 0,
-            paddingRight: '8px', // align with the header's scrollbar compensation
-            opacity: quickEnabled ? 1 : 0.5,
-          }}
-        >
+        <div style={{ display: 'flex', background: 'var(--bg-subtle)', borderBottom: '1px solid var(--border-color)', flexShrink: 0, opacity: quickEnabled ? 1 : 0.5 }}>
+          {/* Left icon rail (#341): two rows — first row empty, hide-arrow on
+              the second row. */}
+          <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }} />
+            <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+              <button
+                className="quick-filter-bar-toggle open"
+                onClick={toggleQuickOpen}
+                title="Hide quick filter bar"
+              >
+                <ChevronUp size={12} />
+              </button>
+            </div>
+          </div>
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+              display: 'grid',
+              gridTemplateColumns: gridTemplate,
+              paddingRight: '8px', // align with the header's scrollbar compensation
+            }}
+          >
           {visibleCols.map(c => (
-            <div key={c.id} style={{ padding: '0.35rem 0.5rem', display: 'flex', alignItems: 'flex-start', gap: '0.35rem', minWidth: 0 }}>
-              {c.id === 'time' && (
-                <button
-                  className={`quick-filter-bar-toggle ${quickEnabled ? 'open' : ''}`}
-                  onClick={() => setQuickEnabled(e => !e)}
-                  title={quickEnabled ? 'Disable quick filter (keeps patterns)' : 'Enable quick filter'}
-                  style={{ marginTop: '0.2rem' }}
-                >
-                  <Filter size={12} />
-                </button>
-              )}
-              {c.id === 'delta' && rowFlagsEnabled && (
-                <button
-                  className={`quick-filter-bar-toggle ${deltaFlagState !== 'none' ? 'open' : ''}`}
-                  onClick={handleDeltaToggleClick}
-                  title={[
-                    `Time-Delta-Context: ${deltaFlagState} messages flagged.`,
-                    deltaFlagState === 'some' ? 'Click to clear all flags.' : deltaFlagState === 'all' ? 'Click to clear all flags.' : 'Click to flag every visible message.',
-                    activeFilters.deltaContextEnabled
-                      ? 'Ctrl/cmd-click to disable the window (keeps flags and values).'
-                      : 'Ctrl/cmd-click to re-enable the window.',
-                  ].join(' ')}
-                  style={{
-                    marginTop: '0.2rem',
-                    opacity: activeFilters.deltaContextEnabled ? 1 : 0.5,
-                    color: deltaFlagState === 'all' ? 'var(--accent-primary)' : undefined,
-                  }}
-                >
-                  <Power size={12} />
-                </button>
-              )}
+            <div key={c.id} style={{
+              padding: '0.35rem 0.5rem',
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '0.35rem',
+              minWidth: 0,
+              opacity: isQuickColumnEnabled(c.id) ? 1 : 0.45,
+            }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', minWidth: 0, flex: 1 }}>
                 {c.id === 'delta' ? (
                   <>
+                    {rowFlagsEnabled && (
+                      <button
+                        className={`quick-filter-bar-toggle ${deltaFlagState !== 'none' ? 'open' : ''}`}
+                        onClick={handleDeltaToggleClick}
+                        title={[
+                          `Time-Delta-Context: ${deltaFlagState} messages flagged.`,
+                          deltaFlagState === 'some' ? 'Click to clear all flags.' : deltaFlagState === 'all' ? 'Click to clear all flags.' : 'Click to flag every visible message.',
+                          activeFilters.deltaContextEnabled
+                            ? 'Ctrl/cmd-click to disable the window (keeps flags and values).'
+                            : 'Ctrl/cmd-click to re-enable the window.',
+                        ].join(' ')}
+                        style={{
+                          width: 'fit-content',
+                          opacity: isQuickColumnEnabled(c.id) ? (activeFilters.deltaContextEnabled ? 1 : 0.5) : 0.45,
+                          color: deltaFlagState === 'all' ? 'var(--accent-primary)' : undefined,
+                        }}
+                        disabled={!isQuickColumnEnabled(c.id)}
+                      >
+                        <Power size={12} />
+                      </button>
+                    )}
                     <input
                       className="quick-filter-bar-input"
                       type="number" min={0} step={10}
                       value={activeFilters.deltaBeforeMs || ''}
                       placeholder="before ms"
                       aria-label="Time-Delta-Context before (ms)"
-                      style={{ opacity: activeFilters.deltaContextEnabled ? 1 : 0.5 }}
+                      style={{ opacity: isQuickColumnEnabled(c.id) ? (activeFilters.deltaContextEnabled ? 1 : 0.5) : 0.45 }}
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => onDeltaContextChange?.(Math.max(0, Number(e.target.value) || 0), activeFilters.deltaAfterMs)}
                     />
                     <input
@@ -1504,7 +1579,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       value={activeFilters.deltaAfterMs || ''}
                       placeholder="after ms"
                       aria-label="Time-Delta-Context after (ms)"
-                      style={{ opacity: activeFilters.deltaContextEnabled ? 1 : 0.5 }}
+                      style={{ opacity: isQuickColumnEnabled(c.id) ? (activeFilters.deltaContextEnabled ? 1 : 0.5) : 0.45 }}
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => onDeltaContextChange?.(activeFilters.deltaBeforeMs, Math.max(0, Number(e.target.value) || 0))}
                     />
                   </>
@@ -1515,6 +1591,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     value={currentPatterns.type?.top ?? ''}
                     placeholder="WRITE, RESPONSE, Incoming…"
                     aria-label="Quick filter TYPE"
+                    disabled={!isQuickColumnEnabled(c.id)}
                     onChange={e => setQuickCell('type', 'top', e.target.value)}
                   />
                 ) : c.id === 'time' ? (
@@ -1524,6 +1601,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       type="datetime-local" step="1"
                       value={currentPatterns.time?.top ?? ''}
                       aria-label="Quick filter TIME from"
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell('time', 'top', e.target.value)}
                     />
                     <input
@@ -1531,6 +1609,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       type="datetime-local" step="1"
                       value={currentPatterns.time?.bottom ?? ''}
                       aria-label="Quick filter TIME to"
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell('time', 'bottom', e.target.value)}
                     />
                   </>
@@ -1542,6 +1621,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       value={currentPatterns.value?.top ?? ''}
                       placeholder="from / 0x.. / 0b.. / &quot;regex&quot;"
                       aria-label="Quick filter VALUE from"
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell('value', 'top', e.target.value)}
                     />
                     <input
@@ -1550,6 +1630,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       value={currentPatterns.value?.bottom ?? ''}
                       placeholder="to / pattern…"
                       aria-label="Quick filter VALUE to"
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell('value', 'bottom', e.target.value)}
                     />
                   </>
@@ -1562,6 +1643,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       value={currentPatterns[c.id]?.top ?? ''}
                       placeholder={c.id === 'dpt' ? '1.008-1.011, 16.*' : c.id === 'source' ? '*.1.*, 1.2.12-1.2.91' : '1/5/*, 3/1/1-3/1/127'}
                       aria-label={`Quick filter ${c.label} pattern`}
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell(c.id, 'top', e.target.value)}
                     />
                     <input
@@ -1570,6 +1652,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       value={currentPatterns[c.id]?.bottom ?? ''}
                       placeholder={c.id === 'dpt' ? 'description regex…' : 'name regex…'}
                       aria-label={`Quick filter ${c.label} name`}
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell(c.id, 'bottom', e.target.value)}
                     />
                   </>
@@ -1577,6 +1660,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               </div>
             </div>
           ))}
+          </div>
         </div>
       )}
 
@@ -1642,6 +1726,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               // Present only as unfiltered Time-Delta-Context, not a real filter
               // match (#343) — a distinct wash, but marks still take priority.
               const isContext = !marked && !!contextKeys?.has(key);
+              const flagged = flaggedSet.has(key);
               return (
                 <div
                   key={virtualRow.key}
@@ -1655,8 +1740,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     left: 0,
                     width: '100%',
                     transform: `translateY(${virtualRow.start}px)`,
-                    display: 'grid',
-                    gridTemplateColumns: gridTemplate,
+                    display: 'flex',
                     borderBottom: '1px solid var(--border-color)',
                     fontSize: '0.8125rem',
                     // Marked rows get an accent wash that overrides the zebra
@@ -1672,15 +1756,36 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                           ? 'color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent)'
                           : (virtualRow.index + stripeOffset) % 2 === 0 ? 'var(--bg-subtle)' : 'transparent',
                     boxShadow: latest ? 'inset 3px 0 0 0 var(--accent-primary)' : undefined,
-                    alignItems: 'start',
                     minHeight: '60px' // Ensure a minimum touch/visual target
                   }}
                   title={isContext ? 'Unfiltered Time-Delta-Context — this telegram did not match the active filters' : undefined}
                   className={`log-row${marked ? ' marked' : ''}${latest ? ' latest' : ''}${isContext ? ' context' : ''}`}
                 >
+                  {/* Left icon rail (#341): single row, vertically centered —
+                      the message-context (Time-Delta-Context) flag toggle. */}
+                  <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    {rowFlagsEnabled && (
+                      <button
+                        style={{
+                          background: 'transparent', border: 'none', cursor: 'pointer', padding: '0.15rem',
+                          borderRadius: '4px', display: 'flex', alignItems: 'center', flexShrink: 0,
+                          color: flagged ? 'var(--accent-primary)' : 'var(--text-dim)',
+                          opacity: activeFilters.deltaContextEnabled ? (flagged ? 1 : 0.35) : 0.25,
+                        }}
+                        title={flagged
+                          ? 'Always show context around this message — click to unflag (ctrl/cmd-click to apply to all marked rows)'
+                          : 'Always show context around this message, regardless of the active filters (ctrl/cmd-click to apply to all marked rows)'}
+                        onClick={e => handleFlagClick(e, key)}
+                      >
+                        {flagged ? <CircleDot size={12} /> : <Circle size={12} />}
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0, display: 'grid', gridTemplateColumns: gridTemplate, alignItems: 'start' }}>
                   {visibleCols.map(c => (
                     <React.Fragment key={c.id}>{renderCell(c.id, t)}</React.Fragment>
                   ))}
+                  </div>
                 </div>
               );
             })}
@@ -1728,10 +1833,27 @@ style.textContent = `
     color: #ef4444; /* red for cancel */
   }
 
+  .log-row::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border: 1px solid transparent;
+    pointer-events: none;
+    transition: border-color 0.15s ease;
+  }
+
+  .log-row:hover::after {
+    border-color: color-mix(in srgb, var(--text-main) 38%, transparent);
+  }
+
   .log-row:hover .quick-filter-btn:not(.active),
+  .log-row.marked .quick-filter-btn:not(.active),
   .log-row:hover .quick-visualize-btn,
+  .log-row.marked .quick-visualize-btn,
   .log-row:hover .quick-last-seen-btn,
-  .log-row:hover .quick-send-btn {
+  .log-row.marked .quick-last-seen-btn,
+  .log-row:hover .quick-send-btn,
+  .log-row.marked .quick-send-btn {
     opacity: 0.6;
   }
 
@@ -1905,6 +2027,13 @@ style.textContent = `
   }
 
   .col-resize-handle:hover::after {
+    background: var(--accent-primary);
+  }
+
+  /* Show the divider between two header columns when hovering either side,
+     not just the narrow drag handle strip itself. */
+  .header-col:hover .col-resize-handle::after,
+  .header-col:has(+ .header-col:hover) .col-resize-handle::after {
     background: var(--accent-primary);
   }
 `;
