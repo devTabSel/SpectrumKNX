@@ -39,24 +39,6 @@ test('hides the notice while project status is unknown', () => {
   expect(screen.queryByText(/No ETS project loaded/i)).not.toBeInTheDocument();
 });
 
-test('toggles the direction filter (#194)', () => {
-  const onFiltersChange = vi.fn();
-  render(
-    <FilterPanel
-      options={EMPTY_OPTIONS}
-      activeFilters={DEFAULT_FILTERS}
-      onFiltersChange={onFiltersChange}
-      counts={{ sources: {}, targets: {}, types: {}, directions: { Incoming: 7, Outgoing: 2 }, dpts: {} }}
-      mode="live"
-      projectLoaded={true}
-    />
-  );
-
-  expect(screen.getByText('Direction')).toBeInTheDocument();
-  fireEvent.click(screen.getByText('Outgoing'));
-  expect(onFiltersChange).toHaveBeenCalledWith({ ...DEFAULT_FILTERS, directions: ['Outgoing'] });
-});
-
 // ── Quick actions on active filter rows (#214) ───────────────────────────────
 
 const GA_OPTIONS: FilterOptions = {
@@ -147,10 +129,10 @@ test('toggles Edit ↔ Active views, keeps the count badge, and has no AND/OR co
       onQuickLastSeen={() => {}}
     />
   );
-  const header = screen.getByText('Filter').parentElement!;
+  const header = screen.getByText('Focus').parentElement!;
 
   // Default = Edit view: category sections shown, active rows hidden.
-  expect(screen.getByText('Direction')).toBeInTheDocument();
+  expect(screen.getByText('Source')).toBeInTheDocument();
   expect(screen.queryByTitle('send to this GA')).not.toBeInTheDocument();
   expect(within(header).getByText('2')).toBeInTheDocument();
   // All filters AND now — no combination control (#275).
@@ -160,39 +142,8 @@ test('toggles Edit ↔ Active views, keeps the count badge, and has no AND/OR co
   // Switch to Active view: rows appear, category sections gone, badge stays.
   fireEvent.click(screen.getByRole('button', { name: 'Active filters' }));
   expect(screen.getByTitle('send to this GA')).toBeInTheDocument();
-  expect(screen.queryByText('Direction')).not.toBeInTheDocument();
+  expect(screen.queryByText('Source')).not.toBeInTheDocument();
   expect(within(header).getByText('2')).toBeInTheDocument();
-});
-
-test('master toggle disables the whole set (live only, #370)', () => {
-  const onFiltersEnabledChange = vi.fn();
-  const { rerender } = render(
-    <FilterPanel
-      options={GA_OPTIONS}
-      activeFilters={ACTIVE}
-      onFiltersChange={() => {}}
-      mode="live"
-      projectLoaded={true}
-      filtersEnabled={true}
-      onFiltersEnabledChange={onFiltersEnabledChange}
-    />
-  );
-  fireEvent.click(screen.getByTitle('Disable all filters (keeps them)'));
-  expect(onFiltersEnabledChange).toHaveBeenCalledWith(false);
-
-  // Not offered in history mode (there the filter is the query).
-  rerender(
-    <FilterPanel
-      options={GA_OPTIONS}
-      activeFilters={ACTIVE}
-      onFiltersChange={() => {}}
-      mode="history"
-      projectLoaded={true}
-      filtersEnabled={true}
-      onFiltersEnabledChange={onFiltersEnabledChange}
-    />
-  );
-  expect(screen.queryByTitle(/Disable all filters|Enable filters/)).not.toBeInTheDocument();
 });
 
 test('hides the notice when a project is loaded', () => {

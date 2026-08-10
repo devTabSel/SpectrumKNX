@@ -27,7 +27,7 @@ import { expandWithDeltaContext } from './utils/deltaContextExpansion';
 import { anchorKey } from './utils/anchorKey';
 import { readSortConfigPref, writeScopedSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
 import { readVisibleColumnsPref, writeVisibleColumnsPref } from './utils/tablePrefs';
-import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
+import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, Search, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
 import { useTheme } from './hooks/useTheme';
@@ -819,9 +819,12 @@ function App() {
     ? activeFilters.sources.length + activeFilters.targets.length + activeFilters.types.length + activeFilters.directions.length + activeFilters.dpts.length
     : 0;
 
-  // The filter pane and its toggle are tied to the Telegram List (#374): only
-  // that panel consumes the main filter, so the pane shows only when it is active.
-  const showFilterPane = activePanel === 'list' && isFilterOpen;
+  // The Focus pane is global across all main panels; the toolbar toggle simply
+  // opens/closes it and panel switches do not implicitly close it.
+  const showFilterPane = isFilterOpen;
+  const handleToolbarFilterToggle = () => {
+    setIsFilterOpen(o => !o);
+  };
 
   // The buffer holds at most `loadLimit` (newest) telegrams; once it is at
   // capacity there is no room to load older history (#313).
@@ -885,7 +888,7 @@ function App() {
                 {/* Embedded Stats */}
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginRight: '1rem', background: 'var(--bg-subtle)', padding: '0.4rem 0.85rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
                   <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-dim)' }}>
-                    Rate: <span onClick={() => setRateMode(m => m === 's' ? 'm' : m === 'm' ? 'h' : 's')} style={{ color: 'var(--accent-primary)', fontWeight: 600, cursor: 'pointer' }}>{busRate.toFixed(1)}/{rateMode}</span>
+                    Rate: <span onClick={() => setRateMode(m => m === 's' ? 'm' : m === 'm' ? 'h' : 's')} style={{ color: 'var(--accent-primary)', fontWeight: 600, cursor: 'pointer', minWidth: '7ch', textAlign: 'right', display: 'inline-block', fontVariantNumeric: 'tabular-nums' }}>{busRate.toFixed(1)}/{rateMode}</span>
                   </span>
                   <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--text-dim)' }}>
                     Buffer:
@@ -926,38 +929,59 @@ function App() {
                     >
                       {isPaused ? <Play size={15} fill="currentColor" /> : <Pause size={15} fill="currentColor" />}
                     </button>
-                    <span style={{ color: 'var(--text-main)', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
-                      {activeFilterCount
-                        ? <>{filteredLiveTelegrams.length}{bufferLimitWarning}<span style={{ color: 'var(--text-dim)', fontWeight: 400 }}> / {liveTelegrams.length}</span></>
-                        : <>{liveTelegrams.length}{bufferLimitWarning}</>}
+                    <span style={{ color: 'var(--text-main)', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: '0.3rem', minWidth: '12ch', justifyContent: 'flex-end', fontVariantNumeric: 'tabular-nums' }}>
+                      <span>{activeFilterCount ? filteredLiveTelegrams.length : liveTelegrams.length}</span>
+                      {bufferLimitWarning}
+                      <span style={{ color: 'var(--text-dim)', fontWeight: 400, visibility: activeFilterCount ? 'visible' : 'hidden' }}> / {liveTelegrams.length}</span>
                     </span>
                   </span>
-                  {isPaused && (
-                    <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#fbbf24' }}>
-                      Paused: <span style={{ fontWeight: 600 }}>{pausedCount}</span>
-                    </span>
-                  )}
+                  <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#fbbf24', minWidth: '10ch', visibility: isPaused ? 'visible' : 'hidden' }}>
+                    Paused: <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{pausedCount}</span>
+                  </span>
                   <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-dim)' }}>
                     WS: <span style={{ color: isConnected ? 'var(--success)' : 'var(--error)', fontWeight: 500 }}>{isConnected ? 'Active' : 'Offline'}</span>
                   </span>
                   {/* Background history reads run without blocking the UI (#222) */}
-                  {isHistoryLoading && (
-                    <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--accent-primary)' }}>
-                      <span className="chip-spinner" /> History: loading…
-                    </span>
-                  )}
-                  {!isHistoryLoading && historyLoadError && (
-                    <span
-                      title={historyLoadError}
-                      style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--error)' }}
-                    >
-                      <AlertTriangle size={13} /> History: failed
-                    </span>
-                  )}
+                  <span
+                    title={!isHistoryLoading && historyLoadError ? historyLoadError : undefined}
+                    style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', minWidth: '15ch', color: isHistoryLoading ? 'var(--accent-primary)' : historyLoadError ? 'var(--error)' : 'transparent' }}
+                  >
+                    {isHistoryLoading ? (
+                      <><span className="chip-spinner" /> History: loading…</>
+                    ) : historyLoadError ? (
+                      <><AlertTriangle size={13} /> History: failed</>
+                    ) : (
+                      <span>History: loading…</span>
+                    )}
+                  </span>
                 </div>
 
                 {/* Main-panel switch (#374): the five panels close back to the
                     list; the Building opener also clears any drilled-in device. */}
+                <button
+                  className="icon-button"
+                  onClick={handleToolbarFilterToggle}
+                  title="toggle Focus panel"
+                  style={{
+                    position: 'relative',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    padding: '0.4rem', borderRadius: '8px',
+                    border: '1px solid var(--border-color)',
+                    background: 'var(--bg-subtle)',
+                    color: showFilterPane || (hasActiveFilters(activeFilters) && filtersEnabled) ? 'var(--accent-primary)' : 'var(--text-dim)',
+                  }}
+                >
+                  <Search size={18} />
+                  {activeFilterCount > 0 && (
+                    <span style={{
+                      position: 'absolute', top: -5, right: -5,
+                      fontSize: '0.55rem', fontWeight: 700, minWidth: 14, height: 14,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: filtersEnabled ? 'var(--accent-primary)' : 'var(--text-dim)',
+                      color: 'white', borderRadius: '999px',
+                    }}>{activeFilterCount}</span>
+                  )}
+                </button>
                 <PanelSwitch
                   active={activePanel}
                   onChange={(p) => { if (p !== 'building') setStatusDevice(null); setActivePanel(p); setIsDatabaseOpen(false); }}
@@ -967,8 +991,14 @@ function App() {
                   <button
                     className="icon-button"
                     onClick={() => setIsSendOpen(o => !o)}
-                    title="Send / read telegrams"
-                    style={{ color: isSendOpen ? 'var(--accent-primary)' : 'var(--text-dim)' }}
+                    title="toggle Write panel"
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      padding: '0.4rem', borderRadius: '8px',
+                      border: '1px solid var(--border-color)',
+                      background: 'var(--bg-subtle)',
+                      color: isSendOpen ? 'var(--accent-primary)' : 'var(--text-dim)',
+                    }}
                   >
                     <Send size={18} />
                   </button>
@@ -1330,33 +1360,6 @@ function App() {
                   <DatabaseOverlay onClose={() => setIsDatabaseOpen(false)} />
                 ) : (
                   <>
-                    {/* Telegram List panel header (#374): its own filter toggle. */}
-                    <div style={{
-                      display: 'flex', alignItems: 'center', gap: '0.5rem',
-                      padding: '0.4rem 0.75rem', flexShrink: 0,
-                      borderBottom: '1px solid var(--border-color)',
-                    }}>
-                      <button
-                        className="icon-button"
-                        onClick={() => setIsFilterOpen(o => !o)}
-                        title="Toggle filter panel"
-                        style={{
-                          position: 'relative',
-                          color: isFilterOpen || (hasActiveFilters(activeFilters) && filtersEnabled) ? 'var(--accent-primary)' : 'var(--text-dim)',
-                        }}
-                      >
-                        <SlidersHorizontal size={18} />
-                        {activeFilterCount > 0 && (
-                          <span style={{
-                            position: 'absolute', top: -5, right: -5,
-                            fontSize: '0.55rem', fontWeight: 700, minWidth: 14, height: 14,
-                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            background: filtersEnabled ? 'var(--accent-primary)' : 'var(--text-dim)',
-                            color: 'white', borderRadius: '999px',
-                          }}>{activeFilterCount}</span>
-                        )}
-                      </button>
-                    </div>
                     <TelegramTable
                     instanceId={LIVE_TABLE_INSTANCE_ID}
                     tableConfig={liveTableConfig}

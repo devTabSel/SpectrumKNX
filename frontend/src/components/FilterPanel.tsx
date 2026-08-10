@@ -1,17 +1,13 @@
 import React, { useState, useMemo } from 'react';
-import { Search, ChevronDown, ChevronRight, SlidersHorizontal, X, Clock, FolderInput, AlertTriangle, Power } from 'lucide-react';
+import { Search, ChevronDown, ChevronRight, X, Clock, FolderInput, AlertTriangle } from 'lucide-react';
 import {
   type FilterOptions,
   type ActiveFilters,
   type FilterCounts,
   DEFAULT_FILTERS,
-  DIRECTIONS,
-  dptKey
 } from '../types/filters';
 import { compareKnxAddress } from '../utils/knxAddress';
 import { KnxAddressTree } from './KnxAddressTree';
-import { DptTypeTree } from './DptTypeTree';
-import { dptWidthLabel, bareDptLabel } from '../utils/dpt';
 import { SendToGaPopover } from './SendToGaPopover';
 
 const rowActionBtnStyle: React.CSSProperties = {
@@ -209,15 +205,12 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
   onUploadProject,
   writeEnabled,
   filtersEnabled = true,
-  onFiltersEnabledChange,
 }) => {
   const [search, setSearch] = useState('');
   // The pane shows one of two views (#370): Edit filters (category controls) or
   // Active filters (the current set). No auto-inserted active block, so editing
   // never repositions entries (#87).
   const [view, setView] = useState<'edit' | 'active'>('edit');
-  const showMasterToggle = mode === 'live' && !!onFiltersEnabledChange;
-
   // Source/target/DPT options come from the ETS project. Without one, those
   // filters are empty and searching them turns up nothing — surface why.
   const showNoProjectNotice = projectLoaded === false;
@@ -236,42 +229,12 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
       .sort((a, b) => compareKnxAddress(a.address ?? '', b.address ?? '')),
     [options.targets, q]);
 
-  const filteredTypes = useMemo(() =>
-    options.types.filter(t => !q || t.toLowerCase().includes(q)), [options.types, q]);
-
-  const filteredDirections = useMemo(() =>
-    DIRECTIONS.filter(d => !q || d.toLowerCase().includes(q)), [q]);
-
-  const filteredDpts = useMemo(() =>
-    options.dpts.filter(d =>
-      !q
-      || d.label?.toLowerCase().includes(q)
-      || dptKey(d.main!, d.sub).includes(q)
-      || (d.main != null && dptWidthLabel(d.main).toLowerCase().includes(q))
-    ), [options.dpts, q]);
-
-  const toggle = <T extends string | number>(list: T[], value: T): T[] =>
-    list.includes(value) ? list.filter(v => v !== value) : [...list, value];
-
-  // Live count for a DPT filter key; a bare main-type key ("1") aggregates
-  // every subtype count of that main type (#273).
-  const dptCount = (key: string): number => {
-    const c = counts?.dpts ?? {};
-    if (!/^\d+$/.test(key)) return c[key] ?? 0;
-    return Object.entries(c)
-      .filter(([k]) => k === key || k.startsWith(`${key}.`))
-      .reduce((sum, [, v]) => sum + v, 0);
-  };
-
   const update = (patch: Partial<ActiveFilters>) =>
     onFiltersChange({ ...activeFilters, ...patch });
 
   const activeCount =
     activeFilters.sources.length +
-    activeFilters.targets.length +
-    activeFilters.types.length +
-    activeFilters.directions.length +
-    activeFilters.dpts.length;
+    activeFilters.targets.length;
 
   return (
     <div style={{
@@ -285,8 +248,8 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
         flexShrink: 0,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-          <SlidersHorizontal size={15} style={{ color: 'var(--accent-primary)' }} />
-          <span style={{ fontWeight: 700, fontSize: '0.875rem' }}>Filter</span>
+          <Search size={15} style={{ color: 'var(--accent-primary)' }} />
+          <span style={{ fontWeight: 700, fontSize: '0.875rem' }}>Focus</span>
           {activeCount > 0 && (
             <span style={{
               fontSize: '0.65rem', fontWeight: 700, padding: '0.1rem 0.45rem',
@@ -299,20 +262,6 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
           )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-          {/* Master enable/disable — keeps the set, hides its effect (#370) */}
-          {showMasterToggle && (
-            <button
-              onClick={() => onFiltersEnabledChange!(!filtersEnabled)}
-              title={filtersEnabled ? 'Disable all filters (keeps them)' : 'Enable filters'}
-              style={{
-                background: 'transparent', border: 'none', cursor: 'pointer',
-                color: filtersEnabled ? 'var(--accent-primary)' : 'var(--text-dim)',
-                display: 'flex', alignItems: 'center', padding: '0.2rem', borderRadius: '4px',
-              }}
-            >
-              <Power size={14} />
-            </button>
-          )}
           {activeCount > 0 && (
             <button
               onClick={() => onFiltersChange(DEFAULT_FILTERS)}
@@ -408,40 +357,6 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
               />
             );
           })}
-          {activeFilters.types.map(t => (
-            <OptionRow
-              key={`active-type-${t}`}
-              label={t}
-              checked={true}
-              count={mode === 'live' ? (counts?.types[t] ?? 0) : undefined}
-              onToggle={() => update({ types: activeFilters.types.filter(v => v !== t) })}
-              onRemove={() => update({ types: activeFilters.types.filter(v => v !== t) })}
-            />
-          ))}
-          {activeFilters.directions.map(d => (
-            <OptionRow
-              key={`active-dir-${d}`}
-              label={d}
-              checked={true}
-              count={mode === 'live' ? (counts?.directions[d] ?? 0) : undefined}
-              onToggle={() => update({ directions: activeFilters.directions.filter(v => v !== d) })}
-              onRemove={() => update({ directions: activeFilters.directions.filter(v => v !== d) })}
-            />
-          ))}
-          {activeFilters.dpts.map(d => {
-            const label = options.dpts.find(opt => dptKey(opt.main!, opt.sub) === d)?.label
-              ?? (/^\d+$/.test(d) ? bareDptLabel(Number(d)) : undefined);
-            return (
-              <OptionRow
-                key={`active-dpt-${d}`}
-                label={label || `DPT ${d}`}
-                checked={true}
-                count={mode === 'live' ? dptCount(d) : undefined}
-                onToggle={() => update({ dpts: activeFilters.dpts.filter(v => v !== d) })}
-                onRemove={() => update({ dpts: activeFilters.dpts.filter(v => v !== d) })}
-              />
-            );
-          })}
         </div>
       )}
 
@@ -495,7 +410,7 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
               </span>
             </div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: onUploadProject ? '0.7rem' : 0 }}>
-              Filtering by source, target and DPT needs the group and device names
+              Filtering by source and target needs the group and device names
               from your ETS project. Upload a <code>.knxproj</code> file to enable it.
             </div>
             {onUploadProject && (
@@ -549,50 +464,6 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
               searchQuery={q}
               onLastSeen={onQuickLastSeen ? addr => onQuickLastSeen(addr, 'ga') : undefined}
               writeEnabled={writeEnabled}
-            />
-          </Section>
-        )}
-
-        {/* Type */}
-        {filteredTypes.length > 0 && (
-          <Section title="Type" defaultOpen>
-            {filteredTypes.map(t => (
-              <OptionRow
-                key={t}
-                label={t}
-                checked={activeFilters.types.includes(t)}
-                count={mode === 'live' ? (counts?.types[t] ?? 0) : undefined}
-                onToggle={() => update({ types: toggle(activeFilters.types, t) })}
-              />
-            ))}
-          </Section>
-        )}
-
-        {/* Direction — orthogonal to Type: incoming bus traffic vs. self-sent telegrams (#194) */}
-        {filteredDirections.length > 0 && (
-          <Section title="Direction" defaultOpen>
-            {filteredDirections.map(d => (
-              <OptionRow
-                key={d}
-                label={d}
-                checked={activeFilters.directions.includes(d)}
-                count={mode === 'live' ? (counts?.directions[d] ?? 0) : undefined}
-                onToggle={() => update({ directions: toggle(activeFilters.directions, d) })}
-              />
-            ))}
-          </Section>
-        )}
-
-        {/* DPT — grouped by main data type / bit-byte width (#273) */}
-        {filteredDpts.length > 0 && (
-          <Section title="DPT" defaultOpen={false}>
-            <DptTypeTree
-              entries={filteredDpts}
-              selected={activeFilters.dpts}
-              onChange={dpts => update({ dpts })}
-              counts={counts?.dpts}
-              mode={mode}
-              searchQuery={q}
             />
           </Section>
         )}
