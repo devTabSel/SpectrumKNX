@@ -2,8 +2,8 @@ import React, { useMemo, useRef, useEffect, useLayoutEffect, useState, useCallba
 import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
-import { ChevronUp, ChevronDown, Filter, LineChart, X, Clock, Power, Circle, CircleDot } from 'lucide-react';
-import { dptKey, type ActiveFilters } from '../types/filters';
+import { ChevronUp, ChevronDown, Filter, Search, LineChart, X, Clock, Power, Circle, CircleDot } from 'lucide-react';
+import { type ActiveFilters } from '../types/filters';
 import { SendToGaPopover } from './SendToGaPopover';
 import { GotoTimeControl } from './GotoTimeControl';
 import { getPref, setPref } from '../utils/prefs';
@@ -658,9 +658,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     anyQuickColumnEnabled &&
     telegrams.some(t => !quickMatches(t))
   );
-  const quickFilterDividerColor = !quickEnabled || !anyQuickColumnEnabled
-    ? '#000000'
-    : (quickFilterFiltersOutAnyMessage ? '#f59e0b' : '#6b7280');
 
   const hasNonInitialDeltaWindow = activeFilters.deltaBeforeMs !== 0 || activeFilters.deltaAfterMs !== 0;
   const showRowMessageContextControl =
@@ -714,6 +711,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const [deltaSortDirection, setDeltaSortDirection] = useState<'asc' | 'desc'>('desc');
   const [deltaFrozenRows, setDeltaFrozenRows] = useState<TelegramRow[] | null>(null);
   const [valueRowFilter, setValueRowFilter] = useState<'none' | 'marked' | 'flagged'>('none');
+  const applyFlaggedKeysList = useCallback((nextKeys: string[]) => {
+    setFlaggedKeysList(nextKeys);
+    if (valueRowFilter === 'flagged' && nextKeys.length === 0) {
+      setValueRowFilter('none');
+    }
+  }, [setFlaggedKeysList, valueRowFilter]);
   const preDeltaSortFollowRef = useRef<boolean | null>(null);
 
   const sortByDelta = useCallback((rows: TelegramRow[], direction: 'asc' | 'desc') =>
@@ -799,6 +802,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
     return preValueFilterRows;
   }, [preValueFilterRows, valueRowFilter, markedSet, flaggedSet, contextKeys, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs]);
+  const valueRowFilterFiltersOutAnyMessage = valueRowFilter !== 'none' && telegramRows.length < preValueFilterRows.length;
+  const filterIndicatorFiltersOutAnyMessage = quickFilterFiltersOutAnyMessage || valueRowFilterFiltersOutAnyMessage;
+  const quickFilterDividerColor = filterIndicatorFiltersOutAnyMessage
+    ? '#f59e0b'
+    : (!quickEnabled || !anyQuickColumnEnabled ? '#000000' : '#6b7280');
+
   const markedToggleCount = useMemo(
     () => preValueFilterRows.reduce((n, t) => n + (markedSet.has(anchorKey(t)) ? 1 : 0), 0),
     [preValueFilterRows, markedSet],
@@ -836,8 +845,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
 
     setMarkedKeysList(nextKeys);
+    if (additive && valueRowFilter === 'marked' && nextKeys.length === 0) {
+      setValueRowFilter('none');
+    }
     setLastMarked(key);
-  }, [lastMarked, markedKeysList, markedSet, rowMarksEnabled, setLastMarked, setMarkedKeysList, telegramRows]);
+  }, [lastMarked, markedKeysList, markedSet, rowMarksEnabled, setLastMarked, setMarkedKeysList, telegramRows, valueRowFilter]);
 
   // Message-context flags follow the row-click semantics: plain click sets only
   // this row, ctrl/cmd toggles just this row, shift sets a range, and
@@ -865,7 +877,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
     const currentIdx = telegramRows.findIndex(r => anchorKey(r) === key);
     if (currentIdx !== -1) {
-      applyRowMarkSelection(e, key, currentIdx);
+      // Ctrl/cmd-click on the message-context control is additive-only for row
+      // marks: it may add a mark, but never remove an existing one.
+      if (additive && !range) {
+        if (!markedSet.has(key)) {
+          setMarkedKeysList([...markedKeysList, key]);
+        }
+        setLastMarked(key);
+      } else {
+        applyRowMarkSelection(e, key, currentIdx);
+      }
     }
 
     let nextKeys: string[];
@@ -895,9 +916,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       nextKeys = [key];
     }
 
-    setFlaggedKeysList(nextKeys);
+    applyFlaggedKeysList(nextKeys);
     lastFlaggedKeyRef.current = key;
-  }, [applyRowMarkSelection, flaggedSet, flaggedKeysList, onListAnchorKeyChange, onListFollowChange, rowFlagsEnabled, setFlaggedKeysList, telegramRows]);
+  }, [applyFlaggedKeysList, applyRowMarkSelection, flaggedSet, flaggedKeysList, markedSet, markedKeysList, onListAnchorKeyChange, onListFollowChange, rowFlagsEnabled, setLastMarked, setMarkedKeysList, telegramRows]);
 
   // ── Global Time-Delta-Context tristate (#318, #319) ─────────────────────────
   // Reflects the per-message flags among the currently visible rows: none set,
@@ -923,7 +944,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       const nextKeys = allDisplayedFlagged
         ? flaggedKeysList.filter(key => !displayedKeySet.has(key))
         : [...new Set([...flaggedKeysList, ...displayedKeys])];
-      setFlaggedKeysList(nextKeys);
+      applyFlaggedKeysList(nextKeys);
       return;
     }
     const markedRows = telegramRows.filter(t => markedSet.has(anchorKey(t)));
@@ -935,8 +956,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     const nextKeys = deltaFlagState === 'none'
       ? [...new Set([...flaggedKeysList, ...eligibleKeys])]
       : flaggedKeysList.filter(key => !eligibleKeySet.has(key));
-    setFlaggedKeysList(nextKeys);
-  }, [deltaFlagState, telegramRows, markedSet, contextKeys, flaggedSet, flaggedKeysList, setFlaggedKeysList]);
+    applyFlaggedKeysList(nextKeys);
+  }, [applyFlaggedKeysList, deltaFlagState, telegramRows, markedSet, contextKeys, flaggedSet, flaggedKeysList]);
 
   // ── Quick info bar metrics (#311) ───────────────────────────────────────────
   // Summarizes the currently visible (sorted + filtered) rows; oldest/newest
@@ -1466,16 +1487,23 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               <button
                 className={`quick-filter-btn ${activeFilters.sources.includes(t.source_address) ? 'active' : ''}`}
                 onClick={(e) => { e.stopPropagation(); onQuickFilter('sources', t.source_address); }}
-                title="Toggle source filter"
+                title="focus device"
               >
-                <Filter className="filter-icon" size={12} />
+                <Search className="filter-icon" size={12} />
                 <X className="cancel-icon" size={12} />
+              </button>
+              <button
+                className="quick-visualize-btn"
+                onClick={(e) => { e.stopPropagation(); onQuickVisualize(t.source_address); }}
+                title="visualize this device"
+              >
+                <LineChart size={14} />
               </button>
               {onQuickLastSeen && (
                 <button
                   className="quick-last-seen-btn"
                   onClick={(e) => { e.stopPropagation(); onQuickLastSeen(t.source_address, 'pa'); }}
-                  title="Show last seen values for this device"
+                  title="show last seen values for this device"
                 >
                   <Clock size={12} />
                 </button>
@@ -1499,16 +1527,23 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               <button
                 className={`quick-filter-btn ${activeFilters.targets.includes(t.target_address) ? 'active' : ''}`}
                 onClick={(e) => { e.stopPropagation(); onQuickFilter('targets', t.target_address); }}
-                title="Toggle target filter"
+                title="focus GA"
               >
-                <Filter className="filter-icon" size={12} />
+                <Search className="filter-icon" size={12} />
                 <X className="cancel-icon" size={12} />
+              </button>
+              <button
+                className="quick-visualize-btn"
+                onClick={(e) => { e.stopPropagation(); onQuickVisualize(t.target_address); }}
+                title="visualize this GA"
+              >
+                <LineChart size={14} />
               </button>
               {onQuickLastSeen && (
                 <button
                   className="quick-last-seen-btn"
                   onClick={(e) => { e.stopPropagation(); onQuickLastSeen(t.target_address, 'ga'); }}
-                  title="Show last seen values for this GA"
+                  title="show last seen values for this GA"
                 >
                   <Clock size={12} />
                 </button>
@@ -1538,14 +1573,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               <div style={{ color: getTypeColor(t.simplified_type), fontWeight: 600, fontSize: '0.75rem', textTransform: 'uppercase' }}>
                 {t.simplified_type || t.telegram_type}
               </div>
-              <button
-                className={`quick-filter-btn ${activeFilters.types.includes(t.simplified_type || t.telegram_type) ? 'active' : ''}`}
-                onClick={(e) => { e.stopPropagation(); onQuickFilter('types', t.simplified_type || t.telegram_type); }}
-                title="Toggle type filter"
-              >
-                <Filter className="filter-icon" size={12} />
-                <X className="cancel-icon" size={12} />
-              </button>
             </div>
             <div style={{ fontSize: '0.65rem', color: t.direction === 'Outgoing' ? '#f59e0b' : '#10b981', marginTop: '0.1rem', opacity: 0.8 }}>{t.direction === 'Outgoing' ? 'Outgoing' : 'Incoming'}</div>
           </div>
@@ -1567,14 +1594,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     {dptDescriptionLabel(t.dpt_name, t.unit) ?? '-'}
                   </div>
                 </div>
-                <button
-                  className={`quick-filter-btn ${activeFilters.dpts.includes(dptKey(t.dpt_main, t.dpt_sub)) ? 'active' : ''}`}
-                  onClick={(e) => { e.stopPropagation(); if (t.dpt_main != null) onQuickFilter('dpts', dptKey(t.dpt_main, t.dpt_sub)); }}
-                  title="Toggle DPT filter"
-                >
-                  <Filter className="filter-icon" size={12} />
-                  <X className="cancel-icon" size={12} />
-                </button>
               </div>
             ) : '-'}
           </div>
@@ -1588,14 +1607,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 {t.value_formatted || (t.value_numeric !== null ? String(t.value_numeric) : '-')}
               </span>
               {t.unit && <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', fontWeight: 500 }}>{t.unit}</span>}
-
-              <button
-                className="quick-visualize-btn"
-                onClick={(e) => { e.stopPropagation(); onQuickVisualize(t.target_address); }}
-                title="Visualize this target"
-              >
-                <LineChart size={14} />
-              </button>
             </div>
             {effectiveVisibleColumns.data && t.raw_hex && (
               <div style={{ marginTop: '0.18rem', fontSize: '0.65rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
@@ -2399,10 +2410,6 @@ style.textContent = `
     background: var(--bg-hover);
     color: var(--accent-primary);
     transform: scale(1.1);
-  }
-
-  .quick-visualize-btn:hover {
-    color: #10b981;
   }
 
   .quick-last-seen-btn:hover {

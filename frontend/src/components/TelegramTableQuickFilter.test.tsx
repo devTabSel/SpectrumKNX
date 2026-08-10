@@ -745,6 +745,42 @@ test('flagging a single row reports the tristate as "some" (#319)', () => {
   expect(screen.getByTitle(/some messages flagged/)).toBeInTheDocument();
 });
 
+test('context-marks filter auto-disables when DELTA tristate clears the last flagged row', () => {
+  const { container } = renderTable();
+  fireEvent.click(screen.getByTitle('Show quick filter bar'));
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  const rows = [...container.querySelectorAll('.log-row')];
+  fireEvent.click(rows[0].querySelector('button[title*="Always show context"]')!);
+
+  const ctxFilterBtn = screen.getByTitle('Context-marked message count');
+  fireEvent.click(ctxFilterBtn);
+  expect(container.querySelectorAll('.log-row')).toHaveLength(1);
+
+  fireEvent.click(screen.getByTitle(/all messages flagged/));
+
+  expect(container.querySelectorAll('.log-row')).toHaveLength(3);
+  expect(screen.getByTitle('Context-marked message count')).toBeDisabled();
+});
+
+test('context-marks filter auto-disables when row msg-context control unflags the last flagged row', () => {
+  const { container } = renderTable();
+  fireEvent.click(screen.getByTitle('Show quick filter bar'));
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  const rows = [...container.querySelectorAll('.log-row')];
+  fireEvent.click(rows[0].querySelector('button[title*="Always show context"]')!);
+
+  const ctxFilterBtn = screen.getByTitle('Context-marked message count');
+  fireEvent.click(ctxFilterBtn);
+  expect(container.querySelectorAll('.log-row')).toHaveLength(1);
+
+  fireEvent.click(container.querySelector('.log-row button[title*="click to unflag"]')!, { ctrlKey: true });
+
+  expect(container.querySelectorAll('.log-row')).toHaveLength(3);
+  expect(screen.getByTitle('Context-marked message count')).toBeDisabled();
+});
+
 test('delta tristate scopes to marked rows when more than one row is marked', () => {
   const { container } = renderTable();
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
@@ -900,7 +936,7 @@ test('plain click on a message-context control marks only that row', () => {
   expect(rows[1].className).toContain('marked');
 });
 
-test('ctrl-click on a message-context control toggles row marking like a row click', () => {
+test('ctrl-click on a message-context control never removes existing row marks', () => {
   const { container } = renderTable();
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
   const rows = [...container.querySelectorAll('.log-row')];
@@ -910,8 +946,9 @@ test('ctrl-click on a message-context control toggles row marking like a row cli
   expect(container.querySelectorAll('.log-row.marked')).toHaveLength(2);
 
   fireEvent.click(rows[2].querySelector('button[title*="click to unflag"]')!, { ctrlKey: true });
-  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(1);
+  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(2);
   expect(rows[0].className).toContain('marked');
+  expect(rows[2].className).toContain('marked');
 });
 
 test('shift and ctrl+shift on a message-context control apply row-click range marking semantics', () => {

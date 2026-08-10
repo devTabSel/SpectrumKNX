@@ -29,7 +29,7 @@ interface Props {
  * portalled to <body> and fixed-positioned so it is never clipped by scroll
  * containers (e.g. the virtualized telegram table).
  */
-export function SendToGaPopover({ address, name, dptMain, dptSub, title = 'Send to this GA', buttonClassName, buttonStyle }: Props) {
+export function SendToGaPopover({ address, name, dptMain, dptSub, title = 'send to this GA', buttonClassName, buttonStyle }: Props) {
   const [open, setOpen] = useState(false);
   const [hovered, setHovered] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -182,7 +182,7 @@ export function SendToGaPopover({ address, name, dptMain, dptSub, title = 'Send 
               onWrite={payload => void write(payload)}
               disabled={busy}
             />
-            <button onClick={() => void read()} disabled={busy} style={secondaryBtn(busy)} title="Send a GroupValueRead">
+            <button onClick={() => void read()} disabled={busy} style={secondaryBtn(busy)} title="send a GroupValueRead">
               <Radio size={13} /> Read
             </button>
           </div>

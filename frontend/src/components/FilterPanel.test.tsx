@@ -83,7 +83,7 @@ test('active target rows offer send-to-GA and last-seen actions (#214)', () => {
   // Active rows live in the "Active filters" view (#370), not shown by default.
   fireEvent.click(screen.getByRole('button', { name: 'Active filters' }));
   // One send trigger: the active GA target row (sources are PAs — no send).
-  expect(screen.getAllByTitle('Send to this GA')).toHaveLength(1);
+  expect(screen.getAllByTitle('send to this GA')).toHaveLength(1);
 
   const lastSeen = screen.getAllByTitle('Show last seen values');
   expect(lastSeen).toHaveLength(2); // source (PA) + target (GA)
@@ -106,7 +106,7 @@ test('hides the send action on active rows when writes are disabled', () => {
     />
   );
   fireEvent.click(screen.getByRole('button', { name: 'Active filters' }));
-  expect(screen.queryByTitle('Send to this GA')).not.toBeInTheDocument();
+  expect(screen.queryByTitle('send to this GA')).not.toBeInTheDocument();
   expect(screen.getAllByTitle('Show last seen values')).toHaveLength(2);
 });
 
@@ -126,10 +126,10 @@ test('opens the quick-send popover from an active target row', async () => {
     />
   );
   fireEvent.click(screen.getByRole('button', { name: 'Active filters' }));
-  fireEvent.click(screen.getByTitle('Send to this GA'));
+  fireEvent.click(screen.getByTitle('send to this GA'));
   // The popover shows the last value and the write/read controls.
   expect(await screen.findByText(/Last value/)).toBeInTheDocument();
-  expect(screen.getByTitle('Send a GroupValueRead')).toBeInTheDocument();
+  expect(screen.getByTitle('send a GroupValueRead')).toBeInTheDocument();
   vi.unstubAllGlobals();
 });
 
@@ -151,7 +151,7 @@ test('toggles Edit ↔ Active views, keeps the count badge, and has no AND/OR co
 
   // Default = Edit view: category sections shown, active rows hidden.
   expect(screen.getByText('Direction')).toBeInTheDocument();
-  expect(screen.queryByTitle('Send to this GA')).not.toBeInTheDocument();
+  expect(screen.queryByTitle('send to this GA')).not.toBeInTheDocument();
   expect(within(header).getByText('2')).toBeInTheDocument();
   // All filters AND now — no combination control (#275).
   expect(screen.queryByText(/Combine as/i)).not.toBeInTheDocument();
@@ -159,7 +159,7 @@ test('toggles Edit ↔ Active views, keeps the count badge, and has no AND/OR co
 
   // Switch to Active view: rows appear, category sections gone, badge stays.
   fireEvent.click(screen.getByRole('button', { name: 'Active filters' }));
-  expect(screen.getByTitle('Send to this GA')).toBeInTheDocument();
+  expect(screen.getByTitle('send to this GA')).toBeInTheDocument();
   expect(screen.queryByText('Direction')).not.toBeInTheDocument();
   expect(within(header).getByText('2')).toBeInTheDocument();
 });

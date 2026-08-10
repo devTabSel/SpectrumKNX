@@ -34,7 +34,7 @@ test('opens on click, shows the last value and sends a DPT-1 boolean', async () 
   // Popover is closed initially.
   expect(screen.queryByText(/Last value/)).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole('button', { name: /Send to this GA/ }));
+  fireEvent.click(screen.getByRole('button', { name: /send to this GA/ }));
 
   // Last value loads and DPT-1 renders On/Off (no free-text field).
   await waitFor(() => expect(screen.getByText('Off')).toBeInTheDocument());
@@ -63,7 +63,7 @@ test('triggers a GroupValueRead from the Read button', async () => {
   vi.stubGlobal('fetch', fetchMock);
 
   render(<SendToGaPopover address="1/1/97" name="Helligkeit" dptMain={9} dptSub={4} />);
-  fireEvent.click(screen.getByRole('button', { name: /Send to this GA/ }));
+  fireEvent.click(screen.getByRole('button', { name: /send to this GA/ }));
 
   // Non-DPT-1 shows the free value field.
   await waitFor(() => expect(screen.getByPlaceholderText(/Value/)).toBeInTheDocument());

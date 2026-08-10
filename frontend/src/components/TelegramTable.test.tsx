@@ -742,6 +742,37 @@ test('quick info value mark/context-mark toggles are disabled when count is zero
   expect(container.querySelectorAll('.log-row')).toHaveLength(2);
 });
 
+test('marks filter auto-disables when ctrl-click on a row clears the last mark', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', raw_hex: '0xE1' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', raw_hex: '0xE2' }),
+  ];
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      bufferCapacity={100000}
+      allBufferMessageCount={2}
+    />,
+  );
+
+  fireEvent.click(container.querySelector('.log-row')!);
+  fireEvent.click(screen.getByTitle('Show info bar'));
+  fireEvent.click(screen.getByTitle('Marked message count'));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(1);
+
+  fireEvent.click(container.querySelector('.log-row')!, { ctrlKey: true });
+
+  expect(container.querySelectorAll('.log-row')).toHaveLength(2);
+  expect(screen.getByTitle('Marked message count')).toHaveTextContent('0');
+});
+
 test('quick info delta min/max clicks only add marks and never remove them', () => {
   const base = new Date('2024-01-01T10:00:00.000Z').getTime();
   const rows: Telegram[] = [
