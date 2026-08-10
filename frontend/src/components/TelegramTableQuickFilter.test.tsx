@@ -121,9 +121,18 @@ test('expanding the quick filter bar and typing in the name row filters the rows
   fireEvent.change(nameInput, { target: { value: 'küche' } });
   expect(rowCount(container)).toBe(1);
 
-  // Regex alternation on the name row.
-  fireEvent.change(nameInput, { target: { value: 'Küche|Flur' } });
+  // Regex alternation on the name row requires regex: prefix.
+  fireEvent.change(nameInput, { target: { value: 'regex:Küche|Flur' } });
   expect(rowCount(container)).toBe(2);
+});
+
+test('without regex: prefix, text is matched as a literal substring', () => {
+  const { container } = renderTable();
+  fireEvent.click(screen.getByTitle('Show quick filter bar'));
+  const nameInput = screen.getByLabelText('Quick filter TARGET name');
+
+  fireEvent.change(nameInput, { target: { value: 'Küche|Flur' } });
+  expect(rowCount(container)).toBe(0);
 });
 
 test('the address pattern row (#309) matches by wildcard, independent of the name row', () => {
@@ -137,13 +146,44 @@ test('the address pattern row (#309) matches by wildcard, independent of the nam
   expect(rowCount(container)).toBe(1);
 });
 
-test('an invalid regex in the name row falls back to a literal substring match', () => {
+test('quoted text patterns use exact wildcard matching with * and +', () => {
+  const telegrams: Telegram[] = [
+    makeTelegram({ target_name: 'ABC', target_address: '1/1/1' }),
+    makeTelegram({ target_name: 'AXBC', target_address: '1/1/2' }),
+    makeTelegram({ target_name: 'AB', target_address: '1/1/3' }),
+  ];
+  const { container } = render(
+    <TelegramTable
+      telegrams={telegrams}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterFiltersOutAny
+    />,
+  );
+  fireEvent.click(screen.getByTitle('Show quick filter bar'));
+  const nameInput = screen.getByLabelText('Quick filter TARGET name');
+
+  fireEvent.change(nameInput, { target: { value: '"A*", "*C"' } });
+  expect(rowCount(container)).toBe(3);
+
+  fireEvent.change(nameInput, { target: { value: '"+A*"' } });
+  expect(rowCount(container)).toBe(0);
+
+  fireEvent.change(nameInput, { target: { value: '"*C+"' } });
+  expect(rowCount(container)).toBe(0);
+});
+
+test('an invalid regex: expression in the name row falls back to a literal substring match', () => {
   const { container } = renderTable();
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
   const nameInput = screen.getByLabelText('Quick filter TARGET name');
 
-  // "(" alone is an invalid regex — must not crash, matches nothing literally…
-  fireEvent.change(nameInput, { target: { value: '(' } });
+  // "regex:(" is invalid regex syntax — must not crash, matches nothing literally…
+  fireEvent.change(nameInput, { target: { value: 'regex:(' } });
   expect(rowCount(container)).toBe(0);
 
   // …and a literal fragment of a name still matches.
@@ -205,6 +245,32 @@ test('context rows are not filtered out again by the quick filter', () => {
   );
 
   expect(rowCount(container)).toBe(2);
+});
+
+test('context rows are hidden when quick filter excludes every message', () => {
+  const contextTelegram = makeTelegram({
+    timestamp: '2024-01-01T10:00:00.000Z',
+    target_address: '9/9/9',
+    target_name: 'Context Only',
+    raw_hex: '0x09',
+  });
+  const { container } = render(
+    <TelegramTable
+      telegrams={[...TELEGRAMS, contextTelegram]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ target: { top: '', bottom: 'regex:^no-match$' } }}
+      contextKeys={new Set([anchorKey(contextTelegram)])}
+    />,
+  );
+
+  expect(rowCount(container)).toBe(0);
 });
 
 test('context-only rows do not show a message-context flag control, even when marked', () => {
@@ -425,7 +491,7 @@ test('disabling the DELTA quick-filter column re-evaluates contextual rows as if
   expect(rowCount(container)).toBe(1);
 });
 
-test('the TYPE row matches a comma-separated list against type or direction', () => {
+test('the TYPE rows apply regex matching to type (top) and direction (bottom) via regex: prefix', () => {
   const telegrams: Telegram[] = [
     makeTelegram({ simplified_type: 'Write', direction: 'Incoming' }),
     makeTelegram({ simplified_type: 'Read', direction: 'Incoming' }),
@@ -443,8 +509,11 @@ test('the TYPE row matches a comma-separated list against type or direction', ()
     />,
   );
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
-  fireEvent.change(screen.getByLabelText('Quick filter TYPE'), { target: { value: 'Write, Outgoing' } });
-  expect(rowCount(container)).toBe(2); // the Write/Incoming row and the Response/Outgoing row
+  fireEvent.change(screen.getByLabelText('Quick filter TYPE'), { target: { value: 'regex:write|response' } });
+  expect(rowCount(container)).toBe(2);
+
+  fireEvent.change(screen.getByLabelText('Quick filter TYPE direction'), { target: { value: 'regex:^out' } });
+  expect(rowCount(container)).toBe(1);
 });
 
 test('the TIME row restricts to a from/to range', () => {

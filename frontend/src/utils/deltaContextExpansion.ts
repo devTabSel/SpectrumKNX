@@ -1,9 +1,9 @@
 // Time-Delta-Context expansion (#309/#318/#319): given which telegrams
 // already match the active filters, keep those matches visible and optionally
 // pull in every other telegram within a before/after window around each
-// per-message-flagged telegram — even though it wouldn't otherwise pass the
-// filter. Shared by the live Group Monitor and History Search views so the
-// algorithm can't drift.
+// message-context-flagged telegram that is currently in the visible list
+// (i.e. matches the active filter set). Shared by the live Group Monitor and
+// History Search views so the algorithm can't drift.
 
 interface Timestamped {
   timestamp: string;
@@ -24,8 +24,8 @@ export interface DeltaExpansionResult<T> {
  * @param items The full (already sorted) buffer.
  * @param matches Per-item result of the primary filter match, same order as `items`.
  * @param anchorKeyOf Stable per-item identity, for testing `flaggedKeys` membership.
- * @param flaggedKeys Keys of telegrams individually flagged to always anchor a
- *   context window around themselves (#319), regardless of the primary filter.
+ * @param flaggedKeys Keys of telegrams individually flagged as context anchors.
+ *   Only rows that are both flagged and currently matched can anchor context.
  * @param beforeMs / @param afterMs The effective (already #318-gated) window.
  */
 export function expandWithDeltaContext<T extends Timestamped>(
@@ -36,10 +36,10 @@ export function expandWithDeltaContext<T extends Timestamped>(
   beforeMs: number,
   afterMs: number,
 ): DeltaExpansionResult<T> {
-  // A flagged telegram is always shown and anchors its own context window,
-  // independent of whether it passes the primary filter.
-  const visibleMatch = items.map((t, i) => matches[i] || flaggedKeys.has(anchorKeyOf(t)));
-  const contextAnchor = items.map(t => flaggedKeys.has(anchorKeyOf(t)));
+  // Only primary-filter matches are visible by default. Context can be added
+  // around rows that are both in-list (matched) and explicitly flagged.
+  const visibleMatch = items.map((_, i) => matches[i]);
+  const contextAnchor = items.map((t, i) => matches[i] && flaggedKeys.has(anchorKeyOf(t)));
 
   if (beforeMs <= 0 && afterMs <= 0) {
     return { items: items.filter((_, i) => visibleMatch[i]), contextKeys: new Set() };

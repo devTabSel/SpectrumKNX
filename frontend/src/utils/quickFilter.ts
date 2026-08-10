@@ -22,13 +22,111 @@ export const DEFAULT_QUICK_FILTER_COLUMN_ENABLED: QuickFilterColumnEnabled = {
 };
 
 const makeTextMatcher = (pattern: string): ((s: string) => boolean) => {
-  try {
-    const re = new RegExp(pattern, 'i');
-    return s => re.test(s);
-  } catch {
-    const lower = pattern.toLowerCase();
-    return s => s.toLowerCase().includes(lower);
+  const trimmed = pattern.trim();
+  if (trimmed.length === 0) return () => true;
+
+  const makeLiteralSubstringMatcher = (needle: string) => {
+    const lower = needle.toLowerCase();
+    return (s: string) => s.toLowerCase().includes(lower);
+  };
+
+  const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const compileWildcardPattern = (wildcardPattern: string): RegExp => {
+    let regexBody = '';
+    for (let i = 0; i < wildcardPattern.length; i++) {
+      const ch = wildcardPattern[i];
+      if (ch === '\\') {
+        if (i + 1 < wildcardPattern.length) {
+          regexBody += escapeRegex(wildcardPattern[i + 1]);
+          i++;
+        } else {
+          regexBody += '\\\\';
+        }
+        continue;
+      }
+      if (ch === '*') {
+        regexBody += '.*';
+        continue;
+      }
+      if (ch === '+') {
+        regexBody += '.';
+        continue;
+      }
+      regexBody += escapeRegex(ch);
+    }
+    return new RegExp(`^${regexBody}$`, 'i');
+  };
+
+  const parseQuotedPatternList = (text: string): string[] | null => {
+    const out: string[] = [];
+    let i = 0;
+    const len = text.length;
+
+    const skipWs = () => {
+      while (i < len && /\s/u.test(text[i])) i++;
+    };
+
+    skipWs();
+    while (i < len) {
+      if (text[i] !== '"') return null;
+      i++;
+
+      let token = '';
+      let closed = false;
+      while (i < len) {
+        const ch = text[i];
+        if (ch === '\\') {
+          if (i + 1 < len) {
+            token += text[i + 1];
+            i += 2;
+          } else {
+            token += '\\';
+            i++;
+          }
+          continue;
+        }
+        if (ch === '"') {
+          i++;
+          closed = true;
+          break;
+        }
+        token += ch;
+        i++;
+      }
+      if (!closed) return null;
+      out.push(token);
+
+      skipWs();
+      if (i >= len) break;
+      if (text[i] !== ',') return null;
+      i++;
+      skipWs();
+    }
+
+    return out.length > 0 ? out : null;
+  };
+
+  const makeQuotedPatternMatcher = (patterns: string[]) => {
+    const compiled = patterns.map(compileWildcardPattern);
+    return (s: string) => compiled.some(re => re.test(s));
+  };
+
+  if (trimmed.toLowerCase().startsWith('regex:')) {
+    const expr = trimmed.slice('regex:'.length);
+    try {
+      const re = new RegExp(expr, 'i');
+      return s => re.test(s);
+    } catch {
+      const quotedPatterns = parseQuotedPatternList(expr);
+      if (quotedPatterns) return makeQuotedPatternMatcher(quotedPatterns);
+      return makeLiteralSubstringMatcher(expr);
+    }
   }
+
+  const quotedPatterns = parseQuotedPatternList(trimmed);
+  if (quotedPatterns) return makeQuotedPatternMatcher(quotedPatterns);
+  return makeLiteralSubstringMatcher(trimmed);
 };
 
 export const compileQuickFilters = (
@@ -71,14 +169,12 @@ export const compileQuickFilters = (
 
   const type = patterns.type;
   if (enabledColumns.type !== false && type?.top) {
-    const values = type.top.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-    if (values.length > 0) {
-      checks.push(t => {
-        const typeVal = (t.simplified_type || t.telegram_type || '').toLowerCase();
-        const dirVal = (t.direction ?? '').toLowerCase();
-        return values.some(v => v === typeVal || v === dirVal);
-      });
-    }
+    const m = makeTextMatcher(type.top);
+    checks.push(t => m(t.simplified_type || t.telegram_type || ''));
+  }
+  if (enabledColumns.type !== false && type?.bottom) {
+    const m = makeTextMatcher(type.bottom);
+    checks.push(t => m(t.direction ?? ''));
   }
 
   const dpt = patterns.dpt;

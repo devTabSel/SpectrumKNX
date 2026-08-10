@@ -254,9 +254,10 @@ const ROW_ESTIMATE = 85; // matches the virtualizer's estimateSize
 // ── Quick filter bar (#271, #309) ────────────────────────────────────────────
 // Two rows per applicable column: a top pattern row (address/DPT-key patterns
 // with wildcards and ranges, or a from/range bound) and a bottom text row
-// (regex/literal, or a to/range bound). TYPE only uses the top row (a
-// comma-separated fixed-value list); DELTA doesn't participate here at all —
-// it edits the Time-Delta-Context window instead (#371).
+// (regex/literal, or a to/range bound). TYPE uses two regex/literal rows:
+// top against telegram type, bottom against direction. DELTA doesn't
+// participate here at all — it edits the Time-Delta-Context window instead
+// (#371).
 
 
 export const TelegramTable: React.FC<TelegramTableProps> = ({
@@ -412,6 +413,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     setQuickPatterns(prev => ({ ...prev, [id]: { ...(prev[id] ?? EMPTY_CELL), [row]: text } }));
   }, [setQuickPatterns]);
 
+  const quickInputClassName = useCallback((value: string | number | null | undefined, kind?: 'datetime') => {
+    const empty = value === '' || value == null;
+    return `quick-filter-bar-input${empty ? ' quick-filter-bar-input-empty' : ''}${kind === 'datetime' ? ' quick-filter-bar-input-datetime' : ''}`;
+  }, []);
+
   const clearQuickColumnInputs = useCallback((id: ColId) => {
     if (id === 'delta') {
       onDeltaContextChange?.(0, 0);
@@ -508,6 +514,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   );
   const quickFiltered = useMemo(() => {
     if (!quickFilterFeatureEnabled || !quickOpen || !quickEnabled) return telegrams;
+    const hasAnyQuickMatch = telegrams.some(t => quickMatches(t));
+    if (!hasAnyQuickMatch) return [];
     return telegrams.filter(t => quickMatches(t) || !!contextKeys?.has(anchorKey(t)));
   }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, quickMatches, contextKeys]);
 
@@ -1530,9 +1538,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         </div>
       </div>
 
-      {/* Quick filter bar (#271, #309) — two rows per column: a pattern/from row
-          and a text/to row, except TYPE (one row) and DELTA (Time-Delta-Context
-          before/after, #371) which don't go through the pattern pipeline. */}
+        {/* Quick filter bar (#271, #309) — two rows per column: a pattern/from row
+          and a text/to row. TYPE uses type/direction regex rows; DELTA
+          (Time-Delta-Context before/after, #371) doesn't go through the
+          pattern pipeline. */}
       {quickFilterFeatureEnabled && quickOpen && (
         <>
         <div style={{ display: 'flex', background: 'var(--bg-subtle)', borderBottom: '1px solid var(--border-color)', flexShrink: 0, opacity: quickEnabled ? 1 : 0.5 }}>
@@ -1592,7 +1601,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 {c.id === 'delta' ? (
                   <>
                     <input
-                      className="quick-filter-bar-input"
+                      className={quickInputClassName(activeFilters.deltaBeforeMs || '')}
                       type="number" min={0} step={10}
                       value={activeFilters.deltaBeforeMs || ''}
                       placeholder="before ms"
@@ -1602,7 +1611,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       onChange={e => onDeltaContextChange?.(Math.max(0, Number(e.target.value) || 0), activeFilters.deltaAfterMs)}
                     />
                     <input
-                      className="quick-filter-bar-input"
+                      className={quickInputClassName(activeFilters.deltaAfterMs || '')}
                       type="number" min={0} step={10}
                       value={activeFilters.deltaAfterMs || ''}
                       placeholder="after ms"
@@ -1613,19 +1622,30 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     />
                   </>
                 ) : c.id === 'type' ? (
-                  <input
-                    className="quick-filter-bar-input"
-                    type="text"
-                    value={currentPatterns.type?.top ?? ''}
-                    placeholder="WRITE, RESPONSE, Incoming…"
-                    aria-label="Quick filter TYPE"
-                    disabled={!isQuickColumnEnabled(c.id)}
-                    onChange={e => setQuickCell('type', 'top', e.target.value)}
-                  />
+                  <>
+                    <input
+                      className={quickInputClassName(currentPatterns.type?.top ?? '')}
+                      type="text"
+                      value={currentPatterns.type?.top ?? ''}
+                      placeholder="type regex…"
+                      aria-label="Quick filter TYPE"
+                      disabled={!isQuickColumnEnabled(c.id)}
+                      onChange={e => setQuickCell('type', 'top', e.target.value)}
+                    />
+                    <input
+                      className={quickInputClassName(currentPatterns.type?.bottom ?? '')}
+                      type="text"
+                      value={currentPatterns.type?.bottom ?? ''}
+                      placeholder="direction regex…"
+                      aria-label="Quick filter TYPE direction"
+                      disabled={!isQuickColumnEnabled(c.id)}
+                      onChange={e => setQuickCell('type', 'bottom', e.target.value)}
+                    />
+                  </>
                 ) : c.id === 'time' ? (
                   <>
                     <input
-                      className="quick-filter-bar-input"
+                      className={quickInputClassName(currentPatterns.time?.top ?? '', 'datetime')}
                       type="datetime-local" step="1"
                       value={currentPatterns.time?.top ?? ''}
                       aria-label="Quick filter TIME from"
@@ -1633,7 +1653,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       onChange={e => setQuickCell('time', 'top', e.target.value)}
                     />
                     <input
-                      className="quick-filter-bar-input"
+                      className={quickInputClassName(currentPatterns.time?.bottom ?? '', 'datetime')}
                       type="datetime-local" step="1"
                       value={currentPatterns.time?.bottom ?? ''}
                       aria-label="Quick filter TIME to"
@@ -1644,7 +1664,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 ) : c.id === 'value' ? (
                   <>
                     <input
-                      className="quick-filter-bar-input"
+                      className={quickInputClassName(currentPatterns.value?.top ?? '')}
                       type="text"
                       value={currentPatterns.value?.top ?? ''}
                       placeholder="from / 0x.. / 0b.. / &quot;regex&quot;"
@@ -1653,7 +1673,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       onChange={e => setQuickCell('value', 'top', e.target.value)}
                     />
                     <input
-                      className="quick-filter-bar-input"
+                      className={quickInputClassName(currentPatterns.value?.bottom ?? '')}
                       type="text"
                       value={currentPatterns.value?.bottom ?? ''}
                       placeholder="to / pattern…"
@@ -1666,7 +1686,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   // source / target / dpt: top = address/DPT-key pattern, bottom = name/description regex
                   <>
                     <input
-                      className="quick-filter-bar-input"
+                      className={quickInputClassName(currentPatterns[c.id]?.top ?? '')}
                       type="text"
                       value={currentPatterns[c.id]?.top ?? ''}
                       placeholder={c.id === 'dpt' ? '1.008-1.011, 16.*' : c.id === 'source' ? '*.1.*, 1.2.12-1.2.91' : '1/5/*, 3/1/1-3/1/127'}
@@ -1675,7 +1695,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       onChange={e => setQuickCell(c.id, 'top', e.target.value)}
                     />
                     <input
-                      className="quick-filter-bar-input"
+                      className={quickInputClassName(currentPatterns[c.id]?.bottom ?? '')}
                       type="text"
                       value={currentPatterns[c.id]?.bottom ?? ''}
                       placeholder={c.id === 'dpt' ? 'description regex…' : 'name regex…'}
@@ -1987,6 +2007,33 @@ style.textContent = `
     font-family: var(--font-mono, monospace);
     outline: none;
     transition: border-color 0.15s;
+  }
+
+  .quick-filter-bar-input::placeholder {
+    color: color-mix(in srgb, var(--text-dim) 18%, transparent);
+    opacity: 1;
+  }
+
+  .quick-filter-bar-input-empty {
+    color: color-mix(in srgb, var(--text-dim) 14%, transparent);
+  }
+
+  .quick-filter-bar-input-datetime.quick-filter-bar-input-empty::-webkit-datetime-edit,
+  .quick-filter-bar-input-datetime.quick-filter-bar-input-empty::-webkit-datetime-edit-fields-wrapper,
+  .quick-filter-bar-input-datetime.quick-filter-bar-input-empty::-webkit-datetime-edit-text,
+  .quick-filter-bar-input-datetime.quick-filter-bar-input-empty::-webkit-datetime-edit-month-field,
+  .quick-filter-bar-input-datetime.quick-filter-bar-input-empty::-webkit-datetime-edit-day-field,
+  .quick-filter-bar-input-datetime.quick-filter-bar-input-empty::-webkit-datetime-edit-year-field,
+  .quick-filter-bar-input-datetime.quick-filter-bar-input-empty::-webkit-datetime-edit-hour-field,
+  .quick-filter-bar-input-datetime.quick-filter-bar-input-empty::-webkit-datetime-edit-minute-field,
+  .quick-filter-bar-input-datetime.quick-filter-bar-input-empty::-webkit-datetime-edit-second-field {
+    color: color-mix(in srgb, var(--text-dim) 14%, transparent);
+  }
+
+  .quick-filter-bar-input-datetime::-webkit-calendar-picker-indicator,
+  .goto-time-input::-webkit-calendar-picker-indicator {
+    opacity: 1;
+    filter: brightness(1.35);
   }
 
   .quick-filter-bar-input:focus {

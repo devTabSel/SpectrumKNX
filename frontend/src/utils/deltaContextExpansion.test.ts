@@ -28,32 +28,32 @@ describe('expandWithDeltaContext', () => {
     expect(out.contextKeys).toEqual(new Set());
   });
 
-  it('a flagged item anchors its own window even when it does not match the filter, and is not itself context', () => {
+  it('a flagged item that is not in the matched list does not anchor context', () => {
     const items = [
       item('a', '2024-01-01T10:00:00.000Z'), // flagged, doesn't match
       item('b', '2024-01-01T10:00:00.500Z'), // near the flagged item
       item('c', '2024-01-01T10:00:10.000Z'), // far from everything
     ];
     const out = expandWithDeltaContext(items, [false, false, false], keyOf, new Set(['a']), 0, 1000);
-    expect(out.items.map(keyOf)).toEqual(['a', 'b']);
-    expect(out.contextKeys).toEqual(new Set(['b'])); // 'a' is flagged, not context
+    expect(out.items.map(keyOf)).toEqual([]);
+    expect(out.contextKeys).toEqual(new Set());
   });
 
-  it('a context message can have its own flag and still remain context when another flagged message pulls it in', () => {
+  it('a context message can have its own flag and still remain context when another in-list flagged message pulls it in', () => {
     const items = [
       item('a', '2024-01-01T10:00:00.000Z'),
       item('b', '2024-01-01T10:00:00.500Z'),
       item('c', '2024-01-01T10:00:10.000Z'),
     ];
-    const out = expandWithDeltaContext(items, [false, false, false], keyOf, new Set(['a', 'b']), 1000, 1000);
+    const out = expandWithDeltaContext(items, [true, false, false], keyOf, new Set(['a', 'b']), 1000, 1000);
     expect(out.items.map(keyOf)).toEqual(['a', 'b']);
-    expect(out.contextKeys).toEqual(new Set(['a', 'b']));
+    expect(out.contextKeys).toEqual(new Set(['b']));
   });
 
-  it('a flagged item is shown even with no window at all (before=after=0)', () => {
+  it('a flagged item not in the matched list is not shown with no window (before=after=0)', () => {
     const items = [item('a', '2024-01-01T10:00:00Z'), item('b', '2024-01-01T10:00:01Z')];
     const out = expandWithDeltaContext(items, [false, false], keyOf, new Set(['a']), 0, 0);
-    expect(out.items.map(keyOf)).toEqual(['a']);
+    expect(out.items.map(keyOf)).toEqual([]);
     expect(out.contextKeys).toEqual(new Set());
   });
 
