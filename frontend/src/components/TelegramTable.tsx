@@ -60,9 +60,17 @@ export interface TelegramTableColumnCellContent {
   bottom?: (row: Telegram) => React.ReactNode;
 }
 
+export interface TelegramTableColumnConditionalLineStyle {
+  /** Regex matcher as /pattern/flags or plain pattern string. */
+  regex: string;
+  style: React.CSSProperties;
+}
+
 export interface TelegramTableColumnLineStyles {
   top?: React.CSSProperties;
   bottom?: React.CSSProperties;
+  topConditional?: TelegramTableColumnConditionalLineStyle[];
+  bottomConditional?: TelegramTableColumnConditionalLineStyle[];
 }
 
 export interface TelegramTableColumnConfig {
@@ -217,7 +225,7 @@ const dptDescriptionLabel = (dptName: string | null, unit: string | null | undef
   return unit ? `${base} (${unit})` : base;
 };
 
-type TelegramRow = Telegram & { deltaStr: string | null; deltaMs: number | null };
+type TelegramRow = Telegram & { deltaStr: string | null; deltaNextStr: string | null; deltaMs: number | null };
 
 const formatDeltaMs = (diffMs: number, sign: '+' | '-'): string => {
   const mm = String(Math.floor(diffMs / 60000)).padStart(2, '0');
@@ -231,17 +239,33 @@ const RAIL_WIDTH = '1.75rem'; // Fixed width of the left-edge icon rail, shared 
 
 // Default two-line styles per column. These are the built-in render defaults
 // and can be overridden per column via tableConfig.columns[col].lineStyles.
+const SOURCE_NAME_TEXT_STYLE: React.CSSProperties = {
+  fontSize: '0.7rem',
+  color: 'var(--text-main)',
+  fontWeight: 500,
+};
+
 const DEFAULT_COLUMN_LINE_STYLES: Partial<Record<ColId, TelegramTableColumnLineStyles>> = {
   time: {
     top: { color: 'var(--text-main)', fontVariantNumeric: 'tabular-nums', fontWeight: 500 },
     bottom: { fontSize: '0.65rem', color: 'var(--text-dim)', marginTop: '0.15rem', fontVariantNumeric: 'tabular-nums' },
   },
+  delta: {
+    top: { fontSize: '0.65rem', color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums', minHeight: '1em' },
+    bottom: { fontSize: '0.65rem', color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums', minHeight: '1em', marginTop: '0.02rem' },
+    topConditional: [
+      { regex: '/^-/', style: SOURCE_NAME_TEXT_STYLE },
+    ],
+    bottomConditional: [
+      { regex: '/^-/', style: SOURCE_NAME_TEXT_STYLE },
+    ],
+  },
   source: {
     // Device name style aligned to GA name style by default.
-    bottom: { fontSize: '0.7rem', color: 'var(--text-main)', fontWeight: 500, marginTop: '0.15rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+    bottom: { ...SOURCE_NAME_TEXT_STYLE, marginTop: '0.15rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   },
   target: {
-    bottom: { fontSize: '0.7rem', color: 'var(--text-main)', fontWeight: 500, marginTop: '0.15rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+    bottom: { ...SOURCE_NAME_TEXT_STYLE, marginTop: '0.15rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   },
   dpt: {
     top: { fontSize: '0.75rem', color: 'var(--text-main)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 },
@@ -306,11 +330,38 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const effectiveInfoBarOpen = tableConfig?.infoBarOpen ?? infoBarOpen;
   const effectiveOnInfoBarOpenChange = tableConfig?.onInfoBarOpenChange ?? onInfoBarOpenChange;
 
-  const lineStyle = useCallback((colId: ColId, line: 'top' | 'bottom'): React.CSSProperties | undefined => {
-    const base = DEFAULT_COLUMN_LINE_STYLES[colId]?.[line];
-    const override = tableConfig?.columns?.[colId]?.lineStyles?.[line];
-    if (!base && !override) return undefined;
-    return { ...(base ?? {}), ...(override ?? {}) };
+  const lineStyle = useCallback((colId: ColId, line: 'top' | 'bottom', lineText?: string): React.CSSProperties | undefined => {
+    const defaultLineStyles = DEFAULT_COLUMN_LINE_STYLES[colId];
+    const overrideLineStyles = tableConfig?.columns?.[colId]?.lineStyles;
+    const base = defaultLineStyles?.[line];
+    const override = overrideLineStyles?.[line];
+    const conditionalRules = (overrideLineStyles?.[line === 'top' ? 'topConditional' : 'bottomConditional']
+      ?? defaultLineStyles?.[line === 'top' ? 'topConditional' : 'bottomConditional']) ?? [];
+
+    const parseRegex = (expr: string): RegExp | null => {
+      const match = expr.match(/^\/(.*)\/([a-z]*)$/i);
+      try {
+        if (match) return new RegExp(match[1], match[2]);
+        return new RegExp(expr);
+      } catch {
+        return null;
+      }
+    };
+
+    let conditionalStyle: React.CSSProperties | undefined;
+    if (lineText && conditionalRules.length > 0) {
+      for (const rule of conditionalRules) {
+        const re = parseRegex(rule.regex);
+        if (!re) continue;
+        if (re.test(lineText)) {
+          conditionalStyle = rule.style;
+          break;
+        }
+      }
+    }
+
+    if (!base && !override && !conditionalStyle) return undefined;
+    return { ...(base ?? {}), ...(override ?? {}), ...(conditionalStyle ?? {}) };
   }, [tableConfig?.columns]);
 
   const loadColumnWidths = useCallback((): Record<string, number> => {
@@ -549,6 +600,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const naturalTelegramRows = useMemo<TelegramRow[]>(() => {
     return quickFiltered.map((t, idx) => {
       let deltaStr: string | null = null;
+      let deltaNextStr: string | null = null;
       let deltaMs: number | null = null;
       if (idx > 0) {
         const curr = new Date(t.timestamp).getTime();
@@ -560,7 +612,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           : (rawDiff >= 0 ? '+' : '-');
         deltaStr = formatDeltaMs(deltaMs, sign);
       }
-      return { ...t, deltaStr, deltaMs };
+      if (idx < quickFiltered.length - 1) {
+        const curr = new Date(t.timestamp).getTime();
+        const next = new Date(quickFiltered[idx + 1].timestamp).getTime();
+        const rawDiffToNext = next - curr;
+        const nextSign: '+' | '-' = timeSortDirection
+          ? (timeSortDirection === 'asc' ? '-' : '+')
+          : (rawDiffToNext >= 0 ? '-' : '+');
+        deltaNextStr = formatDeltaMs(Math.abs(rawDiffToNext), nextSign);
+      }
+      return { ...t, deltaStr, deltaNextStr, deltaMs };
     });
   }, [quickFiltered, timeSortDirection]);
 
@@ -1173,10 +1234,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         );
 
       case 'delta': {
+        const topText = t.deltaStr ?? '';
+        const bottomText = t.deltaNextStr ?? '';
         return (
           <div style={{ padding: cellPadding, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '0.16rem' }}>
-            <div className="mono-addr" style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums', minHeight: '1em' }}>
-              {t.deltaStr ?? ''}
+            <div className="mono-addr" style={lineStyle('delta', 'top', topText)}>
+              {topText}
+            </div>
+            <div className="mono-addr" style={lineStyle('delta', 'bottom', bottomText)}>
+              {bottomText}
             </div>
           </div>
         );

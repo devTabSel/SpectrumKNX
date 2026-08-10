@@ -230,6 +230,18 @@ test('delta column (#311): stays visible when sorted by a non-time column', () =
   expect(screen.getByText('Δt')).toBeInTheDocument();
 });
 
+test('delta column shows previous/next deltas with opposite signs and conditional line styles', () => {
+  renderTable(makeList(3, 2));
+
+  const minus = screen.getAllByText('- 00:01.000')[0] as HTMLElement;
+  const plus = screen.getAllByText('+ 00:01.000')[0] as HTMLElement;
+
+  expect(minus.style.fontSize).toBe('0.7rem');
+  expect(minus.style.color).toBe('var(--text-main)');
+  expect(plus.style.fontSize).toBe('0.65rem');
+  expect(plus.style.color).toBe('var(--text-dim)');
+});
+
 test('delta-sort exclusive mode (#311): activates on click, pauses live-follow, and exits on another header click', () => {
   const onListFollowChange = vi.fn();
   const { rerender } = render(
