@@ -40,7 +40,6 @@ test('shows the five main-panel tabs with Telegram List active by default (#374)
 
 test('play/pause and the filter toggle live with the Telegram List (#374)', async () => {
   render(<App />);
-  // The live toolbar owns the disabled focus-panel toggle and play/pause.
-  expect(await screen.findByRole('button', { name: 'Focus panel toggle temporarily disabled' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Focus panel toggle temporarily disabled' })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument();
 });

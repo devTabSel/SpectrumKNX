@@ -992,32 +992,6 @@ function App() {
 
                 {/* Main-panel switch (#374): the five panels close back to the
                     list; the Building opener also clears any drilled-in device. */}
-                <button
-                  className="icon-button"
-                  disabled
-                  title="Focus panel toggle temporarily disabled"
-                  style={{
-                    position: 'relative',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    padding: '0.4rem', borderRadius: '8px',
-                    border: '1px solid var(--border-color)',
-                    background: 'var(--bg-subtle)',
-                    color: 'var(--text-dim)',
-                    opacity: 0.45,
-                    cursor: 'default',
-                  }}
-                >
-                  <Search size={18} />
-                  {activeFilterCount > 0 && (
-                    <span style={{
-                      position: 'absolute', top: -5, right: -5,
-                      fontSize: '0.55rem', fontWeight: 700, minWidth: 14, height: 14,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      background: filtersEnabled ? 'var(--accent-primary)' : 'var(--text-dim)',
-                      color: 'white', borderRadius: '999px',
-                    }}>{activeFilterCount}</span>
-                  )}
-                </button>
                 <PanelSwitch
                   active={activePanel}
                   onChange={(p) => { if (p !== 'building') setStatusDevice(null); setActivePanel(p); setIsDatabaseOpen(false); }}
