@@ -1,14 +1,15 @@
-import React, { useRef, useLayoutEffect, useState, useMemo } from 'react';
+import React, { useEffect, useRef, useLayoutEffect, useState, useMemo } from 'react';
 import UplotReact from 'uplot-react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
-import { Lock, LockOpen, ChevronDown, ChevronRight } from 'lucide-react';
+import { Lock, LockOpen } from 'lucide-react';
 import type { ChartBucket } from '../hooks/useChartData';
 import { useThemeTick } from '../hooks/useTheme';
 import { seriesColor } from '../utils/seriesColors';
 import { isSeriesHidden, setSeriesHidden } from '../utils/legendVisibility';
 import { computeSharedLeftGutter } from '../utils/chartGutter';
 import { spansMultipleDays, formatAxisTime, formatFullTime } from '../utils/timeFormat';
+import { isRightSideHoverActive, setRightSideHoverSource, subscribeRightSideHover } from '../utils/rightSideHoverSync';
 
 interface MixedChartProps {
   bucket: ChartBucket;
@@ -29,7 +30,7 @@ interface MixedChartProps {
   onToggleLock?: () => void;
   /** Click (not drag-select) on the chart: navigate to the telegram list around
    * this timestamp (#308). */
-  onTimeClick?: (ms: number) => void;
+  onTimeClick?: (ms: number, chartTargets?: string[]) => void;
   /** Shared left-axis gutter (#... ) so every chart's X-axis starts at the same
    * pixel column; falls back to this chart's own bucket when not provided. */
   leftGutter?: number;
@@ -43,12 +44,19 @@ export const MixedChart: React.FC<MixedChartProps> = ({
   groupLabel, locked, onToggleLock, onTimeClick, leftGutter: sharedLeftGutter,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const plotRef = useRef<uPlot | null>(null);
   const [width, setWidth] = useState(800);
-  const [legendOpen, setLegendOpen] = useState(true);
+  const [, setLegendVersion] = useState(0);
   const themeTick = useThemeTick();
   // Ref-read inside the stable `ready` hook (same pattern as realIndicesRef
   // below) so a new onTimeClick identity each render doesn't rebuild the chart.
   const onTimeClickRef = useRef(onTimeClick);
+  const hoverSourceIdRef = useRef(`mixed-${Math.random().toString(36).slice(2)}`);
+  const rightBandLocalRef = useRef(false);
+  const rightSideHoverRef = useRef(isRightSideHoverActive());
+  const cursorActiveRef = useRef(false);
+  const showCurrentValuesRef = useRef<() => void>(() => {});
+  const clearValuesRef = useRef<() => void>(() => {});
   // eslint-disable-next-line react-hooks/refs
   onTimeClickRef.current = onTimeClick;
 
@@ -63,6 +71,9 @@ export const MixedChart: React.FC<MixedChartProps> = ({
   }, []);
 
   const { unit, isBinary, timestamps, series } = bucket;
+  const oldestBufferMs = timestamps.length > 0 ? timestamps[0] : null;
+  const newestBufferMs = timestamps.length > 0 ? timestamps[timestamps.length - 1] : null;
+  const chartHeight = isBinary ? Math.max(150, series.length * 50) : 300;
   const leftGutter = useMemo(
     () => sharedLeftGutter ?? computeSharedLeftGutter([bucket]),
     [sharedLeftGutter, bucket],
@@ -70,21 +81,45 @@ export const MixedChart: React.FC<MixedChartProps> = ({
 
   // Show a date alongside times once the visible range crosses midnight (#281).
   const multiDay = minTime != null && maxTime != null && spansMultipleDays(minTime, maxTime);
+  const rightRulerPad = multiDay ? 240 : 160;
 
   // Prepare data array: [ [x], [y1], [y2] ]
   // We divide timestamps by 1000 since uPlot expects unix seconds by default
-  const data: uPlot.AlignedData = [
-    timestamps.map(t => t / 1000),
-    ...series.map(s => s.data)
-  ];
+  const data: uPlot.AlignedData = useMemo(() => {
+    const xs = [...timestamps];
+    const ys = series.map(s => [...s.data]);
+
+    // Metrics: visually carry the latest value almost to the right boundary so
+    // the line does not stop abruptly before the chart edge.
+    if (!isBinary && xs.length > 0 && maxTime != null) {
+      const lastTs = xs[xs.length - 1];
+      if (lastTs < maxTime) {
+        const firstTs = minTime ?? xs[0];
+        const spanMs = Math.max(1, maxTime - firstTs);
+        const gapMs = Math.max(1, Math.round(spanMs * 0.005));
+        const extendTs = Math.max(lastTs, maxTime - gapMs);
+        if (extendTs > lastTs) {
+          xs.push(extendTs);
+          ys.forEach((arr) => {
+            arr.push(arr[arr.length - 1] ?? null);
+          });
+        }
+      }
+    }
+
+    return [xs.map(t => t / 1000), ...ys];
+  }, [timestamps, series, isBinary, minTime, maxTime]);
 
   // Only the chart's *structure* (size, theme, series identity, unit) should
   // rebuild `options`; a new telegram changes `data`, not `options`, so
   // uplot-react updates via setData instead of destroying and recreating the
   // chart — which would drop the cursor/hover on every telegram (#207).
+  // minTime/maxTime are deliberately excluded here — they're applied via
+  // setScale in the effect below instead of forcing a full chart rebuild,
+  // so a live-following right edge (#... ticking every second) doesn't
+  // destroy/recreate the whole chart and visibly blink (#358).
   const structureKey = [
     width, isBinary, unit, stepped, showDots, themeTick, leftGutter,
-    minTime, maxTime,
     series.map(s => `${s.address}~${s.name}`).join('|'),
   ].join('§');
 
@@ -98,20 +133,42 @@ export const MixedChart: React.FC<MixedChartProps> = ({
   // filter, never during React render.
   // eslint-disable-next-line react-hooks/refs
   realIndicesRef.current = series.map(s => s.real.flatMap((r, i) => (r ? [i] : [])));
+  const realRef = useRef<boolean[][]>([]);
+  // eslint-disable-next-line react-hooks/refs
+  realRef.current = series.map(s => s.real);
 
   // Fixed legend (#349): unlike uPlot's native legend, this doesn't move
   // around under the cursor. Each row's value tracks the hovered x-position
-  // (or the series' last value while not hovering), and the row whose plotted
-  // y-position is nearest the cursor is highlighted so a crowded chart's
-  // hovered line is identifiable.
+  // (or the series' last value while not hovering).
   const legendValueRefs = useRef<(HTMLSpanElement | null)[]>([]);
-  const legendRowRefs = useRef<(HTMLDivElement | null)[]>([]);
+
+  const toggleSeriesVisibility = (seriesIdx: number) => {
+    const u = plotRef.current;
+    if (!u) return;
+    const uSeriesIdx = seriesIdx + 1;
+    const current = !!u.series[uSeriesIdx]?.show;
+    u.setSeries(uSeriesIdx, { show: !current });
+  };
+
+  useEffect(() => {
+    const unsub = subscribeRightSideHover((active) => {
+      rightSideHoverRef.current = active;
+      if (active) {
+        showCurrentValuesRef.current();
+      } else if (!cursorActiveRef.current) {
+        clearValuesRef.current();
+      }
+    });
+    return () => {
+      setRightSideHoverSource(hoverSourceIdRef.current, false);
+      unsub();
+    };
+  }, []);
 
   const options: uPlot.Options = useMemo(() => {
     const style = getComputedStyle(document.documentElement);
     const gridStroke = style.getPropertyValue('--border-subtle').trim();
     const axisStroke = style.getPropertyValue('--text-dim').trim();
-    const hoverColor = style.getPropertyValue('--accent-primary').trim() || '#6366f1';
 
     // Configure Y-Axis scale limits based on smart defaults
     let scaleConfig: uPlot.Scale = {};
@@ -127,10 +184,63 @@ export const MixedChart: React.FC<MixedChartProps> = ({
       scaleConfig = { auto: false, range: [-0.1, 1.1] };
     }
 
+    const currentValueMarkersPlugin = () => ({
+      hooks: {
+        draw: [(u: uPlot) => {
+          if (isBinary) return;
+          const { ctx } = u;
+          const { left, top, width, height } = u.bbox;
+          const xSep = left + width;
+          const x2 = Math.max(left + width + 20, u.width - 8);
+          const x1 = Math.min(xSep + 14, x2 - 24);
+
+          ctx.save();
+
+          series.forEach((s, sIdx) => {
+            if (isSeriesHidden(s.address)) return;
+            const yData = u.data[sIdx + 1] as Array<number | null> | undefined;
+            if (!yData || yData.length === 0) return;
+            let val: number | null = null;
+            for (let i = yData.length - 1; i >= 0; i--) {
+              const v = yData[i];
+              if (v != null) {
+                val = v;
+                break;
+              }
+            }
+            if (val == null) return;
+            // Draw plugin runs in canvas coordinates, so use canvas-space pos
+            // to keep marker perfectly aligned with plotted lines/scale.
+            const yRaw = u.valToPos(val, 'y', true);
+            if (!Number.isFinite(yRaw)) return;
+            const y = Math.max(top + 1, Math.min(top + height - 1, yRaw));
+
+            // Continue the horizontal grid feel into the right-side value area.
+            ctx.beginPath();
+            ctx.moveTo(x1, y);
+            ctx.lineTo(x2, y);
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = gridStroke;
+            ctx.stroke();
+
+            // Colored marker on top for the series' current value.
+            ctx.beginPath();
+            ctx.moveTo(x1, y);
+            ctx.lineTo(x2, y);
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = seriesColor(s.address);
+            ctx.stroke();
+          });
+
+          ctx.restore();
+        }]
+      }
+    });
+
     return {
       width,
-      height: isBinary ? Math.max(150, series.length * 50) : 300,
-      padding: [8, 16, 8, 0],
+      height: chartHeight,
+      padding: [8, rightRulerPad, 0, 0],
       legend: { show: false }, // replaced by the fixed overlay legend below (#349)
       cursor: {
         sync: { key: syncCursor.key },
@@ -146,45 +256,60 @@ export const MixedChart: React.FC<MixedChartProps> = ({
           if (idx == null || idx === 0 || !('show' in opts)) return;
           const addr = series[idx - 1]?.address;
           if (addr) setSeriesHidden(addr, !opts.show);
+          setLegendVersion(v => v + 1);
         }],
         setCursor: [
           (u) => {
             const idx = u.cursor.idx;
-            const isOutside = u.cursor.left == null || u.cursor.left < 0;
-            let nearestIdx = -1;
-            let nearestDist = Infinity;
+            const cursorActive = u.cursor.left != null && u.cursor.left >= 0 && idx != null;
+            cursorActiveRef.current = cursorActive;
+            const showCurrent = rightSideHoverRef.current;
             series.forEach((s, sIdx) => {
-              const val = isOutside || idx == null ? s.data[s.data.length - 1] : s.data[idx];
+              const val = showCurrent ? s.data[s.data.length - 1] : cursorActive ? s.data[idx] : null;
               const el = legendValueRefs.current[sIdx];
               if (el) {
-                el.textContent = val == null ? '–' : isBinary ? (val === 1 ? 'On' : 'Off') : `${val} ${unit}`;
+                el.textContent = val == null ? '' : isBinary ? (val === 1 ? 'On' : 'Off') : `${val} ${unit}`;
               }
-              // Nearest-to-cursor row (by plotted y pixel), for the hover highlight.
-              if (!isOutside && idx != null && val != null) {
-                const yPos = u.valToPos(val, 'y');
-                const dist = Math.abs(yPos - (u.cursor.top ?? -Infinity));
-                if (dist < nearestDist) { nearestDist = dist; nearestIdx = sIdx; }
-              }
-            });
-            legendRowRefs.current.forEach((row, sIdx) => {
-              if (!row) return;
-              const hot = !isOutside && sIdx === nearestIdx && nearestDist < 40;
-              row.style.background = hot ? `color-mix(in srgb, ${hoverColor} 16%, transparent)` : 'transparent';
-              row.style.fontWeight = hot ? '700' : '500';
             });
           }
         ],
         setSelect: [
           (u) => {
             if (u.select.width > 0) {
-              const min = u.posToVal(u.select.left, 'x');
-              const max = u.posToVal(u.select.left + u.select.width, 'x');
+              const plotWidth = u.bbox.width;
+              const rawLeft = u.select.left;
+              const rawRight = u.select.left + u.select.width;
+              const selLeft = Math.min(rawLeft, rawRight);
+              const selRight = Math.max(rawLeft, rawRight);
+              const leftPx = Math.max(0, Math.min(plotWidth, selLeft));
+              const rightPx = Math.max(leftPx, Math.min(plotWidth, selRight));
+              const min = u.posToVal(leftPx, 'x');
+              const max = u.posToVal(rightPx, 'x');
               onZoomRangeChange?.([min * 1000, max * 1000]);
             }
           }
         ],
         ready: [
           (u) => {
+            plotRef.current = u;
+            const showCurrentValues = () => {
+              series.forEach((s, sIdx) => {
+                const el = legendValueRefs.current[sIdx];
+                if (!el) return;
+                const val = s.data[s.data.length - 1];
+                el.textContent = val == null ? '' : isBinary ? (val === 1 ? 'On' : 'Off') : `${val} ${unit}`;
+              });
+            };
+
+            const clearValues = () => {
+              series.forEach((_s, sIdx) => {
+                const el = legendValueRefs.current[sIdx];
+                if (el) el.textContent = '';
+              });
+            };
+            showCurrentValuesRef.current = showCurrentValues;
+            clearValuesRef.current = clearValues;
+
             // Navigate only when clicking the chart's time ruler (x-axis band)
             // below the plot area, not when clicking the plot or dots.
             // Keep the delayed single-click so double-click zoom reset wins.
@@ -197,6 +322,57 @@ export const MixedChart: React.FC<MixedChartProps> = ({
               if (!start) return;
               const movedPx = Math.hypot(e.clientX - start.x, e.clientY - start.y);
               if (movedPx >= 5) return;
+
+              const pickDot = () => {
+                const overRect = u.over.getBoundingClientRect();
+                const withinOver =
+                  e.clientX >= overRect.left &&
+                  e.clientX <= overRect.right &&
+                  e.clientY >= overRect.top &&
+                  e.clientY <= overRect.bottom;
+                if (!withinOver) return null;
+
+                const xs = u.data[0] as number[];
+                if (!xs || xs.length === 0) return null;
+
+                const xVal = u.posToVal(e.clientX - overRect.left, 'x');
+                let lo = 0;
+                let hi = xs.length - 1;
+                while (lo < hi) {
+                  const mid = (lo + hi) >> 1;
+                  if (xs[mid] < xVal) lo = mid + 1;
+                  else hi = mid;
+                }
+                let idx = lo;
+                if (idx > 0 && Math.abs(xs[idx - 1] - xVal) <= Math.abs(xs[idx] - xVal)) idx -= 1;
+
+                const clickX = e.clientX - overRect.left;
+                const clickY = e.clientY - overRect.top;
+                let best: { target: string; ms: number; dist: number } | null = null;
+
+                for (let sIdx = 0; sIdx < series.length; sIdx++) {
+                  const target = series[sIdx]?.address;
+                  if (!target || isSeriesHidden(target)) continue;
+                  if (!realRef.current[sIdx]?.[idx]) continue;
+                  const yData = u.data[sIdx + 1] as Array<number | null> | undefined;
+                  const yVal = yData?.[idx];
+                  if (yVal == null) continue;
+                  const x = u.valToPos(xs[idx], 'x');
+                  const y = u.valToPos(yVal, 'y');
+                  const dist = Math.hypot(clickX - x, clickY - y);
+                  if (!best || dist < best.dist) {
+                    best = { target, ms: Math.round(xs[idx] * 1000), dist };
+                  }
+                }
+
+                return best && best.dist <= 8 ? best : null;
+              };
+
+              const picked = pickDot();
+              if (picked) {
+                onTimeClickRef.current?.(picked.ms, [picked.target]);
+                return;
+              }
 
               const rootRect = u.root.getBoundingClientRect();
               const overRect = u.over.getBoundingClientRect();
@@ -224,6 +400,24 @@ export const MixedChart: React.FC<MixedChartProps> = ({
               const withinOver =
                 e.clientX >= overRect.left && e.clientX <= overRect.right &&
                 e.clientY >= overRect.top && e.clientY <= overRect.bottom;
+              const inRightValueBand =
+                e.clientX > overRect.right && e.clientX <= rootRect.right &&
+                e.clientY >= overRect.top && e.clientY <= overRect.bottom;
+
+              if (inRightValueBand) {
+                if (!rightBandLocalRef.current) {
+                  rightBandLocalRef.current = true;
+                  setRightSideHoverSource(hoverSourceIdRef.current, true);
+                }
+                u.setCursor({ left: -10, top: -10 });
+                return;
+              }
+
+              if (rightBandLocalRef.current) {
+                rightBandLocalRef.current = false;
+                setRightSideHoverSource(hoverSourceIdRef.current, false);
+              }
+
               if (withinOver) return; // native cursor handling already applies
 
               const inXAxisBand =
@@ -233,7 +427,11 @@ export const MixedChart: React.FC<MixedChartProps> = ({
                 ? { left: e.clientX - overRect.left, top: overRect.height }
                 : { left: -10, top: -10 });
             });
-            u.root.addEventListener('mouseleave', () => u.setCursor({ left: -10, top: -10 }));
+            u.root.addEventListener('mouseleave', () => {
+              rightBandLocalRef.current = false;
+              setRightSideHoverSource(hoverSourceIdRef.current, false);
+              u.setCursor({ left: -10, top: -10 });
+            });
           }
         ]
       },
@@ -245,6 +443,7 @@ export const MixedChart: React.FC<MixedChartProps> = ({
         },
         y: scaleConfig
       },
+      plugins: [currentValueMarkersPlugin()],
       axes: [
         {
           // Wider minimum tick spacing when labels carry a date, so the
@@ -256,6 +455,7 @@ export const MixedChart: React.FC<MixedChartProps> = ({
         },
         {
           space: 30,
+          gap: 0,
           grid: { stroke: gridStroke, width: 1 },
           stroke: axisStroke,
           size: leftGutter,
@@ -288,7 +488,16 @@ export const MixedChart: React.FC<MixedChartProps> = ({
       ]
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [structureKey]);
+  }, [structureKey, rightRulerPad, chartHeight]);
+
+  // Apply x-range changes to the live chart instance instead of rebuilding
+  // `options` (which would destroy/recreate the whole uPlot and blink) —
+  // covers both normal zoom/pan and the live-now ticking right edge (#358).
+  useLayoutEffect(() => {
+    const u = plotRef.current;
+    if (!u || minTime == null || maxTime == null) return;
+    u.setScale('x', { min: minTime / 1000, max: maxTime / 1000 });
+  }, [minTime, maxTime, options]);
 
   const edgeLineStyle: React.CSSProperties = {
     position: 'absolute',
@@ -328,67 +537,133 @@ export const MixedChart: React.FC<MixedChartProps> = ({
         )}
       </div>
       <div style={{ position: 'relative' }}>
+        <div style={{
+          position: 'absolute',
+          left: '8px',
+          top: '8px',
+          width: `${Math.max(0, leftGutter - 16)}px`,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '0.25rem',
+          zIndex: 10,
+        }}>
+          {series.map((s, sIdx) => {
+            const isShown = !isSeriesHidden(s.address);
+            return (
+              <div
+                key={s.address}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '12px minmax(0, 1fr)',
+                  columnGap: '0.4rem',
+                  alignItems: 'start',
+                  opacity: isShown ? 1 : 0.5,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => toggleSeriesVisibility(sIdx)}
+                  title={isShown ? 'Disable series' : 'Enable series'}
+                  style={{
+                    width: '10px',
+                    height: '10px',
+                    borderRadius: '50%',
+                    border: `1px solid ${seriesColor(s.address)}`,
+                    background: isShown ? seriesColor(s.address) : 'transparent',
+                    marginTop: '2px',
+                    padding: 0,
+                    cursor: 'pointer',
+                  }}
+                />
+                <div style={{ minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: '0.75rem',
+                      fontWeight: 400,
+                      color: 'var(--text-main)',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={s.name}
+                  >
+                    {s.name}
+                  </div>
+                  <div
+                    ref={el => { legendValueRefs.current[sIdx] = el; }}
+                    style={{
+                      display: 'block',
+                      height: '14px',
+                      minHeight: '14px',
+                      maxHeight: '14px',
+                      lineHeight: '14px',
+                      fontSize: '0.7rem',
+                      fontWeight: 400,
+                      color: 'var(--text-dim)',
+                      fontVariantNumeric: 'tabular-nums',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {''}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
         <div ref={containerRef} style={{ width: '100%', overflow: 'hidden', position: 'relative' }}>
            {/* Re-fit to new data only while not zoomed (#340): keeps a new telegram
                visible instead of dropping off a frozen scale. When the user has
                zoomed, autoFollow is false so the range is preserved (#281). */}
            <UplotReact options={options} data={data} resetScales={autoFollow} />
-
-           {/* Fixed legend (#349): stays put while hovering, unlike uPlot's native
-               legend, and shows each GA's value at the hovered x-position. */}
-           <div style={{
-             position: 'absolute', top: 4, right: 4, zIndex: 10,
-             // --bg-inset (and every --bg-* token) is intentionally translucent
-             // for this app's glass-panel look, but a plotted line crossing
-             // behind a legend row at the same height reads badly through it —
-             // --bg-dark is the one fully opaque token, used here instead.
-             background: 'var(--bg-dark)',
-             boxShadow: '0 1px 4px rgba(0,0,0,0.25)',
-             border: '1px solid var(--border-color)', borderRadius: '6px',
-             maxWidth: '55%', pointerEvents: 'auto',
-           }}>
-             <button
-               onClick={() => setLegendOpen(o => !o)}
-               style={{
-                 display: 'flex', alignItems: 'center', gap: '0.25rem', width: '100%',
-                 background: 'transparent', border: 'none', cursor: 'pointer',
-                 padding: '0.25rem 0.4rem', fontSize: '0.65rem', color: 'var(--text-dim)',
-               }}
-             >
-               {legendOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-               {series.length} GA{series.length !== 1 ? 's' : ''}
-             </button>
-             {legendOpen && (
-               <div style={{ maxHeight: '160px', overflowY: 'auto', padding: '0 0.4rem 0.35rem' }}>
-                 {series.map((s, sIdx) => (
-                   <div
-                     key={s.address}
-                     ref={el => { legendRowRefs.current[sIdx] = el; }}
-                     style={{
-                       display: 'flex', alignItems: 'center', gap: '0.35rem',
-                       padding: '0.15rem 0.3rem', borderRadius: '4px', fontSize: '0.68rem',
-                       transition: 'background 0.1s',
-                     }}
-                   >
-                     <span style={{ width: 8, height: 8, borderRadius: '50%', background: seriesColor(s.address), flexShrink: 0 }} />
-                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-main)' }} title={s.name}>
-                       {s.name}
-                     </span>
-                     <span
-                       ref={el => { legendValueRefs.current[sIdx] = el; }}
-                       style={{ marginLeft: 'auto', flexShrink: 0, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}
-                     >
-                       {s.data[s.data.length - 1] == null ? '–' : isBinary ? (s.data[s.data.length - 1] === 1 ? 'On' : 'Off') : `${s.data[s.data.length - 1]} ${unit}`}
-                     </span>
-                   </div>
-                 ))}
-               </div>
-             )}
-           </div>
         </div>
         {/* Plot bounds markers for the chart area. */}
         <div style={{ ...edgeLineStyle, left: `${leftGutter}px` }} />
-        <div style={{ ...edgeLineStyle, right: '16px' }} />
+        <div style={{ ...edgeLineStyle, right: `${rightRulerPad}px` }} />
+        {oldestBufferMs != null && (
+          <div
+            style={{
+              position: 'absolute',
+              left: 0,
+              bottom: '18px',
+              width: `${Math.max(0, leftGutter - 4)}px`,
+              paddingRight: '4px',
+              textAlign: 'right',
+              fontSize: '0.68rem',
+              lineHeight: 1,
+              color: 'var(--text-dim)',
+              fontVariantNumeric: 'tabular-nums',
+              pointerEvents: 'none',
+              zIndex: 6,
+            }}
+            title="Oldest telegram in buffer"
+          >
+            {formatFullTime(oldestBufferMs, multiDay)}
+          </div>
+        )}
+        {newestBufferMs != null && (
+          <div
+            style={{
+              position: 'absolute',
+              left: `calc(100% - ${rightRulerPad}px)`,
+              bottom: '18px',
+              paddingLeft: '4px',
+              textAlign: 'left',
+              fontSize: '0.68rem',
+              lineHeight: 1,
+              color: 'var(--text-dim)',
+              fontVariantNumeric: 'tabular-nums',
+              pointerEvents: 'none',
+              zIndex: 6,
+              whiteSpace: 'nowrap',
+            }}
+            title="Newest telegram in buffer"
+          >
+            {formatFullTime(newestBufferMs, multiDay)}
+          </div>
+        )}
       </div>
     </div>
   );

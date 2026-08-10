@@ -772,8 +772,9 @@ function App() {
   // the reason (#343, #380).
   const contextTelegramKeys = deltaExpandedLive.contextReasons;
 
-  const handleChartTimeClick = useCallback((ms: number) => {
-    const nearest = findNearestVisibleVisualizationTelegram(liveTelegrams, selectedVisualizationTargets, ms);
+  const handleChartTimeClick = useCallback((ms: number, chartTargets?: string[]) => {
+    const scopeTargets = chartTargets && chartTargets.length > 0 ? chartTargets : selectedVisualizationTargets;
+    const nearest = findNearestVisibleVisualizationTelegram(liveTelegrams, scopeTargets, ms);
     if (!nearest) return;
     const key = anchorKey(nearest);
     setVisualNavigationTelegramKey(key);

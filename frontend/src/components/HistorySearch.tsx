@@ -218,8 +218,9 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     () => sortTelegrams(telegrams, sortConfig),
     [telegrams, sortConfig]
   );
-  const handleChartTimeClick = useCallback((ms: number) => {
-    const nearest = findNearestVisibleVisualizationTelegram(sortedTelegrams, selectedVisualizationTargets, ms);
+  const handleChartTimeClick = useCallback((ms: number, chartTargets?: string[]) => {
+    const scopeTargets = chartTargets && chartTargets.length > 0 ? chartTargets : selectedVisualizationTargets;
+    const nearest = findNearestVisibleVisualizationTelegram(sortedTelegrams, scopeTargets, ms);
     if (!nearest) return;
     const key = anchorKey(nearest);
     setVisualNavigationKey(key);

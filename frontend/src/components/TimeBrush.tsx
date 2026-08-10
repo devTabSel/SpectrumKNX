@@ -1,6 +1,5 @@
 import React, { useRef, useMemo, useEffect, useState } from 'react';
 import type { Telegram } from '../hooks/useWebSocket';
-import { spansMultipleDays, formatFullTime } from '../utils/timeFormat';
 
 interface TimeBrushProps {
   minTime: number;
@@ -12,6 +11,12 @@ interface TimeBrushProps {
    * as the buffer grows/purges instead of staying at a frozen time (#341). */
   leftPinned?: boolean;
   rightPinned?: boolean;
+  /** Horizontal inset (px) matching the charts' left gutter / right ruler-pad
+   * vertical marker lines, so the ruler's ends line up with them (#358). */
+  leftInset?: number;
+  rightInset?: number;
+  /** Compact inline mode for embedding the ruler into the Visualizer header row. */
+  compact?: boolean;
 }
 
 export const TimeBrush: React.FC<TimeBrushProps> = ({
@@ -22,6 +27,9 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
   telegrams,
   leftPinned = false,
   rightPinned = false,
+  leftInset = 24,
+  rightInset = 24,
+  compact = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragMode, setDragMode] = useState<'left' | 'right' | 'middle' | null>(null);
@@ -121,19 +129,15 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
     };
   }, [dragMode, minTime, maxTime, range, value, onChange]);
 
-  // Date-aware edge labels: show the date too once the data spans days (#281),
-  // so the selected window's bounds aren't ambiguous across midnight.
-  const multiDay = spansMultipleDays(minTime, maxTime);
-  const formatTime = (ms: number) => formatFullTime(ms, multiDay);
-
   return (
-    <div style={{ padding: '0.75rem 1.5rem', borderTop: '1px solid var(--border-color)', background: 'var(--bg-panel)', flexShrink: 0 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.73rem', color: 'var(--text-dim)', marginBottom: '0.4rem' }}>
-        <span>{formatTime(value[0])}</span>
-        <span style={{ fontWeight: 500, color: 'var(--text-main)' }}>Pan & Zoom Timeline</span>
-        <span>{formatTime(value[1])}</span>
-      </div>
-
+    <div style={{
+      padding: compact ? 0 : '0.75rem',
+      paddingLeft: leftInset,
+      paddingRight: rightInset,
+      borderTop: compact ? 'none' : '1px solid var(--border-color)',
+      background: compact ? 'transparent' : 'var(--bg-panel)',
+      flexShrink: 0,
+    }}>
       <div
         ref={containerRef}
         style={{

@@ -1,4 +1,4 @@
-import React, { useRef, useLayoutEffect, useState, useMemo } from 'react';
+import React, { useEffect, useRef, useLayoutEffect, useState, useMemo } from 'react';
 import UplotReact from 'uplot-react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
@@ -7,6 +7,7 @@ import { useThemeTick } from '../hooks/useTheme';
 import { seriesColor } from '../utils/seriesColors';
 import { computeSharedLeftGutter } from '../utils/chartGutter';
 import { spansMultipleDays, formatAxisTime, formatFullTime } from '../utils/timeFormat';
+import { isRightSideHoverActive, setRightSideHoverSource, subscribeRightSideHover } from '../utils/rightSideHoverSync';
 
 interface EventDotsChartProps {
   bucket: ChartBucket;
@@ -16,7 +17,7 @@ interface EventDotsChartProps {
   onZoomRangeChange?: (value: [number, number] | null) => void;
   /** Click (not drag-select) on the chart: navigate to the telegram list around
    * this timestamp (#308). */
-  onTimeClick?: (ms: number) => void;
+  onTimeClick?: (ms: number, chartTargets?: string[]) => void;
   /** Shared left-axis gutter (#... ) so every chart's X-axis starts at the same
    * pixel column; falls back to this chart's own bucket when not provided. */
   leftGutter?: number;
@@ -33,9 +34,16 @@ const syncCursor = uPlot.sync('knx-time-axis');
  */
 export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime, maxTime, autoFollow = false, onZoomRangeChange, onTimeClick, leftGutter: sharedLeftGutter }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const plotRef = useRef<uPlot | null>(null);
   const [width, setWidth] = useState(800);
   const themeTick = useThemeTick();
   const valueRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const hoverSourceIdRef = useRef(`events-${Math.random().toString(36).slice(2)}`);
+  const rightBandLocalRef = useRef(false);
+  const rightSideHoverRef = useRef(isRightSideHoverActive());
+  const cursorActiveRef = useRef(false);
+  const showCurrentValuesRef = useRef<() => void>(() => {});
+  const clearValuesRef = useRef<() => void>(() => {});
 
   // Ref-read inside the stable draw/cursor plugins (same pattern as the other
   // charts) so live data/callback updates don't force a chart rebuild.
@@ -49,6 +57,21 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
   // eslint-disable-next-line react-hooks/refs
   onTimeClickRef.current = onTimeClick;
 
+  useEffect(() => {
+    const unsub = subscribeRightSideHover((active) => {
+      rightSideHoverRef.current = active;
+      if (active) {
+        showCurrentValuesRef.current();
+      } else if (!cursorActiveRef.current) {
+        clearValuesRef.current();
+      }
+    });
+    return () => {
+      setRightSideHoverSource(hoverSourceIdRef.current, false);
+      unsub();
+    };
+  }, []);
+
   useLayoutEffect(() => {
     if (!containerRef.current) return;
     const obs = new ResizeObserver(entries => {
@@ -59,6 +82,8 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
   }, []);
 
   const { series, timestamps } = bucket;
+  const oldestBufferMs = timestamps.length > 0 ? timestamps[0] : null;
+  const newestBufferMs = timestamps.length > 0 ? timestamps[timestamps.length - 1] : null;
   const data: uPlot.AlignedData = [
     timestamps.map(t => t / 1000),
     ...series.map(s => s.data)
@@ -69,6 +94,7 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
     () => sharedLeftGutter ?? computeSharedLeftGutter([bucket]),
     [sharedLeftGutter, bucket],
   );
+  const rightRulerPad = multiDay ? 240 : 160;
 
   const rowHeight = 32;
   const rowGap = 4;
@@ -79,8 +105,12 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
   // but the row/legend heights on our own side need enough room to show in.
   const chartHeight = Math.max(160, series.length * (rowHeight + rowGap) + 60);
 
+  // minTime/maxTime are deliberately excluded here — applied via setScale in
+  // the effect below instead of forcing a full chart rebuild, so a live-
+  // following right edge doesn't destroy/recreate the whole chart and
+  // visibly blink (#358).
   const structureKey = [
-    width, themeTick, minTime, maxTime, LEFT_GUTTER, series.map(s => s.name).join('|'),
+    width, themeTick, LEFT_GUTTER, series.map(s => `${s.address}~${s.name}`).join('|'),
   ].join('§');
 
   const options: uPlot.Options = useMemo(() => {
@@ -102,16 +132,13 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
 
           const xs = u.data[0];
           const seriesCount = u.data.length - 1;
-          // Row positions are derived from uPlot's *actual* plot area (bbox),
-          // not a value computed independently on our side — the bottom time
-          // axis + padding reserve a fixed amount of space regardless of the
-          // container height, so a row position computed from a static offset
-          // can land outside the real (and clipped) plot rect for a small
-          // series count, silently drawing nothing.
-          const rowSlot = seriesCount > 0 ? height / seriesCount : height;
+          const nameCenterOffset = Math.max(8, Math.round(rowHeight * 0.28));
 
           for (let sIdx = 0; sIdx < seriesCount; sIdx++) {
-            const yMid = top + sIdx * rowSlot + rowSlot / 2;
+            // Keep dot rows aligned with the fixed GA/value rows rendered in
+            // the left gutter overlay.
+            const yTop = top + sIdx * (rowHeight + rowGap) + rowGap;
+            const yMid = yTop + nameCenterOffset;
             const color = seriesColor(series[sIdx]?.address ?? String(sIdx));
 
             // Baseline for the row, so an empty stretch still reads as "this GA's lane".
@@ -144,7 +171,7 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
     return {
       width,
       height: chartHeight,
-      padding: [10, 16, 30, 0],
+      padding: [10, rightRulerPad, 0, 0],
       legend: { show: false },
       cursor: {
         sync: { key: syncCursor.key },
@@ -154,32 +181,65 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
         setCursor: [
           (u) => {
             const idx = u.cursor.idx;
-            const isOutside = u.cursor.left == null || u.cursor.left < 0;
+            const cursorActive = u.cursor.left != null && u.cursor.left >= 0 && idx != null;
+            cursorActiveRef.current = cursorActive;
+            const showCurrent = rightSideHoverRef.current;
             series.forEach((_s, sIdx) => {
               const el = valueRefs.current[sIdx];
               if (!el) return;
               const labels = labelsRef.current[sIdx] ?? [];
-              // While hovering, show the label at the cursor column only if
-              // this row actually had an event there; otherwise fall back to
-              // its last known label (matching the other charts' hover UX).
-              const hoverLabel = !isOutside && idx != null ? labels[idx] : null;
-              const lastLabel = [...labels].reverse().find(l => l != null) ?? null;
-              const text = hoverLabel ?? lastLabel;
-              el.textContent = text ?? '–';
+              let hoverLabel: string | null = null;
+              if (cursorActive) {
+                for (let i = idx; i >= 0; i--) {
+                  if (labels[i] != null) {
+                    hoverLabel = labels[i] as string;
+                    break;
+                  }
+                }
+              }
+              const currentLabel = [...labels].reverse().find(l => l != null) ?? null;
+              el.textContent = hoverLabel ?? (showCurrent ? (currentLabel ?? '') : '');
             });
           }
         ],
         setSelect: [
           (u) => {
             if (u.select.width > 0) {
-              const min = u.posToVal(u.select.left, 'x');
-              const max = u.posToVal(u.select.left + u.select.width, 'x');
+              const plotWidth = u.bbox.width;
+              const rawLeft = u.select.left;
+              const rawRight = u.select.left + u.select.width;
+              const selLeft = Math.min(rawLeft, rawRight);
+              const selRight = Math.max(rawLeft, rawRight);
+              const leftPx = Math.max(0, Math.min(plotWidth, selLeft));
+              const rightPx = Math.max(leftPx, Math.min(plotWidth, selRight));
+              const min = u.posToVal(leftPx, 'x');
+              const max = u.posToVal(rightPx, 'x');
               onZoomRangeChange?.([min * 1000, max * 1000]);
             }
           }
         ],
         ready: [
           (u) => {
+            plotRef.current = u;
+            const showCurrentValues = () => {
+              series.forEach((s, sIdx) => {
+                const el = valueRefs.current[sIdx];
+                if (!el) return;
+                const labels = s.labels ?? [];
+                const currentLabel = [...labels].reverse().find(l => l != null) ?? null;
+                el.textContent = currentLabel ?? '';
+              });
+            };
+
+            const clearValues = () => {
+              series.forEach((_s, sIdx) => {
+                const el = valueRefs.current[sIdx];
+                if (el) el.textContent = '';
+              });
+            };
+            showCurrentValuesRef.current = showCurrentValues;
+            clearValuesRef.current = clearValues;
+
             // Navigate only when clicking the chart's time ruler (x-axis band)
             // below the plot area, not when clicking the plot or dots.
             // Keep the delayed single-click so double-click zoom reset wins.
@@ -192,6 +252,55 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
               if (!start) return;
               const movedPx = Math.hypot(e.clientX - start.x, e.clientY - start.y);
               if (movedPx >= 5) return;
+
+              const pickDot = () => {
+                const overRect = u.over.getBoundingClientRect();
+                const withinOver =
+                  e.clientX >= overRect.left &&
+                  e.clientX <= overRect.right &&
+                  e.clientY >= overRect.top &&
+                  e.clientY <= overRect.bottom;
+                if (!withinOver) return null;
+
+                const xs = u.data[0] as number[];
+                if (!xs || xs.length === 0) return null;
+
+                const xVal = u.posToVal(e.clientX - overRect.left, 'x');
+                let lo = 0;
+                let hi = xs.length - 1;
+                while (lo < hi) {
+                  const mid = (lo + hi) >> 1;
+                  if (xs[mid] < xVal) lo = mid + 1;
+                  else hi = mid;
+                }
+                let idx = lo;
+                if (idx > 0 && Math.abs(xs[idx - 1] - xVal) <= Math.abs(xs[idx] - xVal)) idx -= 1;
+
+                const clickX = e.clientX - overRect.left;
+                const clickY = e.clientY - overRect.top;
+                const nameCenterOffset = Math.max(8, Math.round(rowHeight * 0.28));
+                let best: { target: string; ms: number; dist: number } | null = null;
+
+                for (let sIdx = 0; sIdx < series.length; sIdx++) {
+                  if (!realRef.current[sIdx]?.[idx]) continue;
+                  if ((u.data[sIdx + 1] as Array<number | null> | undefined)?.[idx] == null) continue;
+
+                  const x = u.valToPos(xs[idx], 'x');
+                  const y = sIdx * (rowHeight + rowGap) + rowGap + nameCenterOffset;
+                  const dist = Math.hypot(clickX - x, clickY - y);
+                  if (!best || dist < best.dist) {
+                    best = { target: series[sIdx].address, ms: Math.round(xs[idx] * 1000), dist };
+                  }
+                }
+
+                return best && best.dist <= 9 ? best : null;
+              };
+
+              const picked = pickDot();
+              if (picked) {
+                onTimeClickRef.current?.(picked.ms, [picked.target]);
+                return;
+              }
 
               const rootRect = u.root.getBoundingClientRect();
               const overRect = u.over.getBoundingClientRect();
@@ -219,6 +328,24 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
               const withinOver =
                 e.clientX >= overRect.left && e.clientX <= overRect.right &&
                 e.clientY >= overRect.top && e.clientY <= overRect.bottom;
+              const inRightValueBand =
+                e.clientX > overRect.right && e.clientX <= rootRect.right &&
+                e.clientY >= overRect.top && e.clientY <= overRect.bottom;
+
+              if (inRightValueBand) {
+                if (!rightBandLocalRef.current) {
+                  rightBandLocalRef.current = true;
+                  setRightSideHoverSource(hoverSourceIdRef.current, true);
+                }
+                u.setCursor({ left: -10, top: -10 });
+                return;
+              }
+
+              if (rightBandLocalRef.current) {
+                rightBandLocalRef.current = false;
+                setRightSideHoverSource(hoverSourceIdRef.current, false);
+              }
+
               if (withinOver) return; // native cursor handling already applies
 
               const inXAxisBand =
@@ -228,7 +355,11 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
                 ? { left: e.clientX - overRect.left, top: overRect.height }
                 : { left: -10, top: -10 });
             });
-            u.root.addEventListener('mouseleave', () => u.setCursor({ left: -10, top: -10 }));
+            u.root.addEventListener('mouseleave', () => {
+              rightBandLocalRef.current = false;
+              setRightSideHoverSource(hoverSourceIdRef.current, false);
+              u.setCursor({ left: -10, top: -10 });
+            });
           }
         ]
       },
@@ -251,7 +382,7 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
         {
           show: true,
           stroke: axisStroke,
-          grid: { stroke: gridStroke },
+          grid: { show: false },
           size: LEFT_GUTTER,
           values: () => []
         }
@@ -267,7 +398,16 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
       ]
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [structureKey]);
+  }, [structureKey, rightRulerPad]);
+
+  // Apply x-range changes to the live chart instance instead of rebuilding
+  // `options` (which would destroy/recreate the whole uPlot and blink) —
+  // covers both normal zoom/pan and the live-now ticking right edge (#358).
+  useLayoutEffect(() => {
+    const u = plotRef.current;
+    if (!u || minTime == null || maxTime == null) return;
+    u.setScale('x', { min: minTime / 1000, max: maxTime / 1000 });
+  }, [minTime, maxTime, options]);
 
   const plotTop = 10;
   const edgeLineStyle: React.CSSProperties = {
@@ -309,13 +449,13 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
                   marginBottom: `${rowGap}px`,
                   display: 'flex',
                   flexDirection: 'column',
-                  justifyContent: 'center',
+                  justifyContent: 'flex-start',
                   fontSize: '0.75rem',
                   lineHeight: '1.2',
                 }}
               >
                 <div style={{
-                  fontWeight: 600,
+                  fontWeight: 400,
                   color: 'var(--text-main)',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
@@ -327,7 +467,7 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
                   ref={el => { valueRefs.current[sIdx] = el; }}
                   style={{
                     fontSize: '0.7rem',
-                    fontWeight: 700,
+                    fontWeight: 400,
                     color: 'var(--text-dim)',
                     marginTop: '2px',
                     overflow: 'hidden',
@@ -336,8 +476,43 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
                   }}
                   title={lastLabel ?? undefined}
                 >
-                  {lastLabel ?? '–'}
+                  {''}
                 </div>
+              </div>
+            );
+          })}
+        </div>
+        <div style={{
+          position: 'absolute',
+          left: `calc(100% - ${rightRulerPad}px + 14px)`,
+          top: `${plotTop + rowGap}px`,
+          width: `${Math.max(0, rightRulerPad - 18)}px`,
+          display: 'flex',
+          flexDirection: 'column',
+          pointerEvents: 'none',
+          zIndex: 10,
+        }}>
+          {series.map((s) => {
+            const labels = s.labels ?? [];
+            const lastLabel = [...labels].reverse().find(l => l != null) ?? null;
+            return (
+              <div
+                key={`right-${s.address}`}
+                style={{
+                  height: `${rowHeight}px`,
+                  marginBottom: `${rowGap}px`,
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  fontSize: '0.7rem',
+                  fontWeight: 400,
+                  color: 'var(--text-dim)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                title={lastLabel ?? undefined}
+              >
+                {lastLabel ?? '–'}
               </div>
             );
           })}
@@ -347,7 +522,49 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
         </div>
         {/* Plot bounds markers for the chart area. */}
         <div style={{ ...edgeLineStyle, left: `${LEFT_GUTTER}px` }} />
-        <div style={{ ...edgeLineStyle, right: '16px' }} />
+        <div style={{ ...edgeLineStyle, right: `${rightRulerPad}px` }} />
+        {oldestBufferMs != null && (
+          <div
+            style={{
+              position: 'absolute',
+              left: 0,
+              bottom: '18px',
+              width: `${Math.max(0, LEFT_GUTTER - 4)}px`,
+              paddingRight: '4px',
+              textAlign: 'right',
+              fontSize: '0.68rem',
+              lineHeight: 1,
+              color: 'var(--text-dim)',
+              fontVariantNumeric: 'tabular-nums',
+              pointerEvents: 'none',
+              zIndex: 6,
+            }}
+            title="Oldest telegram in buffer"
+          >
+            {formatFullTime(oldestBufferMs, multiDay)}
+          </div>
+        )}
+        {newestBufferMs != null && (
+          <div
+            style={{
+              position: 'absolute',
+              left: `calc(100% - ${rightRulerPad}px)`,
+              bottom: '18px',
+              paddingLeft: '4px',
+              textAlign: 'left',
+              fontSize: '0.68rem',
+              lineHeight: 1,
+              color: 'var(--text-dim)',
+              fontVariantNumeric: 'tabular-nums',
+              pointerEvents: 'none',
+              zIndex: 6,
+              whiteSpace: 'nowrap',
+            }}
+            title="Newest telegram in buffer"
+          >
+            {formatFullTime(newestBufferMs, multiDay)}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -19,8 +19,6 @@ test('renders TimeBrush, handles middle click and drags to pan', () => {
     />
   );
 
-  expect(screen.getByText('Pan & Zoom Timeline')).toBeInTheDocument();
-
   // Find container div that has clientWidth/getBoundingClientRect mocked
   const track = container.querySelector('div[style*="position: relative"]');
   expect(track).toBeTruthy();

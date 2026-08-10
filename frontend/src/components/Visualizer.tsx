@@ -1,4 +1,4 @@
-import React, { useRef, useState, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import type { Telegram } from '../hooks/useWebSocket';
 import { VisualizerSidebar } from './VisualizerSidebar';
 import { useChartData } from '../hooks/useChartData';
@@ -6,12 +6,13 @@ import { MixedChart } from './MixedChart';
 import { TimelineChart } from './TimelineChart';
 import { EventDotsChart } from './EventDotsChart';
 import { TimeBrush } from './TimeBrush';
-import { Download, Link2, Check, X } from 'lucide-react';
+import { Download, Link2, Check, X, LineChart, CircleDot } from 'lucide-react';
 import { getPref, setPref } from '../utils/prefs';
 import { clearSeriesHidden } from '../utils/legendVisibility';
 import { expandDegenerateRange } from '../utils/timeRange';
 import { splitLockedBuckets } from '../utils/chartLock';
 import { computeSharedLeftGutter } from '../utils/chartGutter';
+import { spansMultipleDays } from '../utils/timeFormat';
 
 interface VisualizerProps {
   telegrams: Telegram[];
@@ -26,7 +27,7 @@ interface VisualizerProps {
   onZoomRangeChange?: (range: [number, number] | null) => void;
   /** Click on a chart's time ruler: navigate to the telegram list around that
    * timestamp (#308). */
-  onTimeClick?: (ms: number) => void;
+  onTimeClick?: (ms: number, chartTargets?: string[]) => void;
   /** Per-target row actions in the sidebar (#341): write/filter/last-seen. */
   writeEnabled?: boolean;
   onFilterGAs?: (addresses: string[]) => void;
@@ -123,6 +124,13 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   // like the list's follow state: not part of the shareable-link zoomRange
   // contract, so it resets on reload rather than being encoded in a URL.
   const [edgePinned, setEdgePinned] = useState<{ left: boolean; right: boolean }>({ left: false, right: false });
+  const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!edgePinned.right) return;
+    const id = window.setInterval(() => setLiveNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [edgePinned.right]);
 
   const setZoomRange = (val: [number, number] | null | ((prev: [number, number] | null) => [number, number] | null)) => {
     const next = typeof val === 'function' ? val(currentZoomRange) : val;
@@ -142,6 +150,22 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     const right = edgePinned.right ? maxTime : Math.max(left, Math.min(maxTime, currentZoomRange[1]));
     return [left, right];
   }, [currentZoomRange, minTime, maxTime, defaultRange, edgePinned]);
+
+  const chartMaxTime = useMemo(() => {
+    if (edgePinned.right) return Math.max(activeRange[1], liveNowMs);
+    return activeRange[1];
+  }, [activeRange, edgePinned.right, liveNowMs]);
+
+  // Align the TimeBrush ruler's ends with each chart's left gutter / right
+  // ruler-pad vertical marker lines (#358): both sit CHART_OUTER_INSET (the
+  // chart card's 1rem padding + 1px border) plus the charts wrapper's own
+  // padding away from the shared column edge, then the gutter/pad itself.
+  const CHART_OUTER_INSET = 17;
+  const chartsWrapperPad = embed ? 12 : 24;
+  const rulerMultiDay = spansMultipleDays(activeRange[0], chartMaxTime);
+  const chartRightRulerPad = rulerMultiDay ? 240 : 160;
+  const rulerLeftInset = chartsWrapperPad + CHART_OUTER_INSET + sharedLeftGutter;
+  const rulerRightInset = chartsWrapperPad + CHART_OUTER_INSET + chartRightRulerPad;
 
   // Deselecting a target clears any legend-hide on it, so reselecting the same
   // target shows its series again instead of staying invisible (#205).
@@ -192,18 +216,18 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     <div ref={chartWrapperRef} style={{ flex: 1, overflowY: 'auto', padding: embed ? '0.75rem' : '1.5rem' }}>
       {displayBuckets.map(g => (
         g.bucket.isBinary ? (
-          <TimelineChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={activeRange[1]} showDots={showDots} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={onTimeClick} leftGutter={sharedLeftGutter} />
+          <TimelineChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime} showDots={showDots} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))} leftGutter={sharedLeftGutter} />
         ) : g.bucket.isEvents ? (
-          <EventDotsChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={activeRange[1]} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={onTimeClick} leftGutter={sharedLeftGutter} />
+          <EventDotsChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))} leftGutter={sharedLeftGutter} />
         ) : (
           <MixedChart
-            key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={activeRange[1]}
+            key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime}
             stepped={stepped} showDots={showDots} autoFollow={autoFollow} onZoomRangeChange={setZoomRange}
             groupLabel={g.groupCount > 1 ? `${g.groupIndex}/${g.groupCount}` : undefined}
             // Only the unit's currently-open chart is lockable; earlier ones are permanently closed (#349).
             locked={g.isLatest ? (lockThresholds[g.bucket.unit]?.at(-1) === g.bucket.series.length) : undefined}
             onToggleLock={g.isLatest ? () => toggleLock(g.bucket.unit, g.bucket.series.length) : undefined}
-            onTimeClick={onTimeClick}
+            onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))}
             leftGutter={sharedLeftGutter}
           />
         )
@@ -230,6 +254,8 @@ export const Visualizer: React.FC<VisualizerProps> = ({
             telegrams={telegrams}
             leftPinned={edgePinned.left}
             rightPinned={edgePinned.right}
+            leftInset={rulerLeftInset}
+            rightInset={rulerRightInset}
           />
         )}
         {charts}
@@ -255,44 +281,67 @@ export const Visualizer: React.FC<VisualizerProps> = ({
 
         {/* Chart Area */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: 'var(--bg-subtle)' }}>
-          <div style={{ padding: '1rem 1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-color)' }}>
-            <div>
-              <h3 style={{ fontSize: '1rem', margin: 0 }}>Visualization</h3>
-              {selectedTargets.length === 0 ? (
-                <p style={{ color: 'var(--text-dim)', fontSize: '0.8125rem', margin: '0.2rem 0 0' }}>Select targets from the sidebar to begin.</p>
-              ) : (
-                <p style={{ color: 'var(--text-dim)', fontSize: '0.8125rem', margin: '0.2rem 0 0' }}>Plotting {selectedTargets.length} targets across {buckets.length} metric group(s).</p>
-              )}
-            </div>
+          <div style={{ padding: '1rem 1.5rem', position: 'relative', borderBottom: '1px solid var(--border-color)' }}>
+            {minTime !== null && maxTime !== null && minTime < maxTime && (
+              <div
+                style={{
+                  position: 'absolute',
+                  inset: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  pointerEvents: 'none',
+                }}
+              >
+                <div style={{ width: '100%', pointerEvents: 'auto' }}>
+                  <TimeBrush
+                    minTime={minTime}
+                    maxTime={maxTime}
+                    value={activeRange}
+                    onChange={setZoomRange}
+                    telegrams={telegrams}
+                    leftPinned={edgePinned.left}
+                    rightPinned={edgePinned.right}
+                    leftInset={rulerLeftInset}
+                    rightInset={rulerRightInset}
+                    compact
+                  />
+                </div>
+              </div>
+            )}
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.9rem', position: 'relative', zIndex: 2 }}>
+              <div style={{ flexShrink: 0 }}>
+                <h3 style={{ fontSize: '1rem', margin: 0 }}>Visualization</h3>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexShrink: 0 }}>
               {buckets.length > 0 && (
                 <>
                 <button
                   onClick={toggleStepped}
                   title={stepped ? 'Switch to linear interpolation' : 'Switch to stepped (hold-last-value)'}
                   style={{
-                    display: 'flex', alignItems: 'center', gap: '0.5rem',
-                    padding: '0.4rem 0.85rem', border: '1px solid var(--border-color)',
-                    borderRadius: '7px', fontSize: '0.8125rem', cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    width: 30, height: 30, border: '1px solid var(--border-color)',
+                    borderRadius: '7px', cursor: 'pointer',
                     background: stepped ? 'rgba(99,102,241,0.15)' : 'transparent',
                     color: stepped ? 'var(--accent-primary)' : 'var(--text-dim)',
                   }}
                 >
-                  {stepped ? 'Stepped' : 'Linear'}
+                  <LineChart size={15} />
                 </button>
                 <button
                   onClick={toggleDots}
                   title={showDots ? 'Hide telegram dots' : 'Show a dot at each telegram (makes cyclic repeats visible)'}
                   style={{
-                    display: 'flex', alignItems: 'center', gap: '0.5rem',
-                    padding: '0.4rem 0.85rem', border: '1px solid var(--border-color)',
-                    borderRadius: '7px', fontSize: '0.8125rem', cursor: 'pointer',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    width: 30, height: 30, border: '1px solid var(--border-color)',
+                    borderRadius: '7px', cursor: 'pointer',
                     background: showDots ? 'rgba(99,102,241,0.15)' : 'transparent',
                     color: showDots ? 'var(--accent-primary)' : 'var(--text-dim)',
                   }}
                 >
-                  Dots
+                  <CircleDot size={15} />
                 </button>
                 {getShareLink && (
                   <button
@@ -312,9 +361,9 @@ export const Visualizer: React.FC<VisualizerProps> = ({
                   className="icon-button"
                   onClick={exportPng}
                   title="Print / PDF Export"
-                  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0.85rem', border: '1px solid var(--border-color)', borderRadius: '7px', fontSize: '0.8125rem' }}
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, border: '1px solid var(--border-color)', borderRadius: '7px' }}
                 >
-                  <Download size={16} /> Export
+                  <Download size={15} />
                 </button>
                 </>
               )}
@@ -327,21 +376,9 @@ export const Visualizer: React.FC<VisualizerProps> = ({
               >
                 <X size={18} />
               </button>
+              </div>
             </div>
           </div>
-
-          {/* Pan & zoom timeline sits above the charts it controls (#308). */}
-          {minTime !== null && maxTime !== null && minTime < maxTime && (
-            <TimeBrush
-              minTime={minTime}
-              maxTime={maxTime}
-              value={activeRange}
-              onChange={setZoomRange}
-              telegrams={telegrams}
-              leftPinned={edgePinned.left}
-              rightPinned={edgePinned.right}
-            />
-          )}
           {charts}
         </div>
       </div>

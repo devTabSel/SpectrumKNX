@@ -29,3 +29,11 @@ export const formatFullTime = (ms: number, multiDay: boolean): string => {
   const date = d.toLocaleDateString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' });
   return `${date} ${time}`;
 };
+
+/** Always show date + time for fixed context labels in the chart gutter. */
+export const formatDateTime = (ms: number): string => {
+  const d = new Date(ms);
+  const date = d.toLocaleDateString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit' });
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  return `${date} ${time}`;
+};

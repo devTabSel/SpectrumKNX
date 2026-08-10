@@ -2,11 +2,11 @@
 // (Mixed/Timeline/Events) must reserve the same width before its plot area
 // begins, so their X-axes all start at the identical vertical pixel column
 // when stacked, and the gutter must be wide enough for the widest y-axis
-// tick label and chart title among every currently displayed chart.
+// tick label, chart title, and GA label among every currently displayed chart.
 import type { ChartBucket } from '../hooks/useChartData';
 
 export const MIN_LEFT_GUTTER = 60;
-export const MAX_LEFT_GUTTER = 260;
+export const MAX_LEFT_GUTTER = 700;
 
 let measureCanvas: HTMLCanvasElement | null = null;
 
@@ -41,9 +41,20 @@ const widestTickLabelWidth = (bucket: ChartBucket, measure: typeof measureTextWi
   return measure(sample, '11px sans-serif');
 };
 
+/** Widest GA name rendered in the left gutter list. */
+const widestGaLabelWidth = (bucket: ChartBucket, measure: typeof measureTextWidth): number => {
+  let widest = 0;
+  for (const s of bucket.series) {
+    widest = Math.max(widest, measure(s.name, '600 12px sans-serif'));
+  }
+  // Add fixed room for the left legend dot + spacing used in chart rows.
+  widest += 18;
+  return widest;
+};
+
 /**
  * One shared gutter width for every bucket currently on screen: wide enough
- * for the widest y-axis tick label AND the widest chart title among them.
+ * for the widest y-axis tick label, chart title, and GA label among them.
  * `measure` is injectable so the aggregation/clamping logic is unit-testable
  * without a real canvas; defaults to the canvas-based measurement above.
  */
@@ -55,6 +66,8 @@ export const computeSharedLeftGutter = (
   for (const bucket of buckets) {
     widest = Math.max(widest, widestTickLabelWidth(bucket, measure) + 30);
     widest = Math.max(widest, measure(chartTitleFor(bucket), 'bold 14px sans-serif') + 20);
+    widest = Math.max(widest, widestGaLabelWidth(bucket, measure) + 34);
   }
-  return Math.min(MAX_LEFT_GUTTER, Math.max(MIN_LEFT_GUTTER, Math.ceil(widest)));
+  const safetyReserve = 20;
+  return Math.min(MAX_LEFT_GUTTER, Math.max(MIN_LEFT_GUTTER, Math.ceil(widest + safetyReserve)));
 };
