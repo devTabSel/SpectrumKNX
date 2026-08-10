@@ -7,7 +7,7 @@ import {
 } from './TelegramTable';
 import { compileQuickFilters, DEFAULT_QUICK_FILTER_COLUMN_ENABLED, type ColId, type QuickFilterColumnEnabled } from '../utils/quickFilter';
 import { readSortConfigPref, writeScopedSortConfigPref, toggleSortLevel, sortTelegrams } from '../utils/sortConfig';
-import { readVisibleColumnsPref } from '../utils/tablePrefs';
+import { readVisibleColumnsPref, readColumnOrderPref, writeColumnOrderPref } from '../utils/tablePrefs';
 import { expandWithDeltaContext } from '../utils/deltaContextExpansion';
 import { anchorKey } from '../utils/anchorKey';
 import type { Telegram } from '../hooks/useWebSocket';
@@ -66,6 +66,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   projectLoaded, selectedVisualizationTargets, onVisualizationTargetsChange, initialView
 }) => {
   const [visibleColumns] = useState<{ [key: string]: boolean }>(() => readVisibleColumnsPref(HISTORY_TABLE_INSTANCE_ID));
+  const [columnOrder, setColumnOrder] = useState<ColId[]>(() => readColumnOrderPref(HISTORY_TABLE_INSTANCE_ID));
   const [telegrams, setTelegrams] = useState<Telegram[]>([]);
   const [isLoaderOpen, setIsLoaderOpen] = useState(false);
   const [metadata, setMetadata] = useState<{ total_count: number; limit_reached: boolean } | null>(null);
@@ -95,6 +96,10 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   useEffect(() => {
     setPref(`flaggedKeys:${HISTORY_TABLE_INSTANCE_ID}`, JSON.stringify(flaggedKeys));
   }, [flaggedKeys]);
+
+  useEffect(() => {
+    writeColumnOrderPref(HISTORY_TABLE_INSTANCE_ID, columnOrder);
+  }, [columnOrder]);
 
   // Auto-load a view shared via URL exactly once on mount (#150)
   const initialViewLoaded = useRef(false);
@@ -154,7 +159,8 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     sortConfig,
     onSort: handleSort,
     visibleColumns,
-    columnOrder: ['time', 'delta', 'source', 'target', 'type', 'dpt', 'value'],
+    columnOrder,
+    onColumnOrderChange: setColumnOrder,
     grouping: [],
     features: {
       quickInfo: false,
@@ -177,7 +183,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
       flaggedKeys,
       onFlaggedKeysChange: setFlaggedKeys,
     },
-  }), [sortConfig, handleSort, visibleColumns, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled, flaggedKeys]);
+  }), [sortConfig, handleSort, visibleColumns, columnOrder, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled, flaggedKeys]);
 
   const sortedTelegrams = useMemo(
     () => sortTelegrams(telegrams, sortConfig),

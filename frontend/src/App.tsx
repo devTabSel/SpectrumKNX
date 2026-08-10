@@ -26,7 +26,7 @@ import { compileQuickFilters, DEFAULT_QUICK_FILTER_COLUMN_ENABLED, type QuickFil
 import { expandWithDeltaContext } from './utils/deltaContextExpansion';
 import { anchorKey } from './utils/anchorKey';
 import { readSortConfigPref, writeScopedSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
-import { readVisibleColumnsPref, writeVisibleColumnsPref } from './utils/tablePrefs';
+import { readVisibleColumnsPref, writeVisibleColumnsPref, readColumnOrderPref, writeColumnOrderPref } from './utils/tablePrefs';
 import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, Search, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
@@ -48,6 +48,7 @@ import { DatabaseOverlay } from './components/DatabaseOverlay';
 import { WriteToBusPanel } from './components/WriteToBusPanel';
 import { UpdateNotification } from './components/UpdateNotification';
 import { useUpdateCheck } from './hooks/useUpdateCheck';
+import type { ColId } from './utils/quickFilter';
 import {
   DEFAULT_FILTERS,
   dptKey,
@@ -294,6 +295,9 @@ function App() {
   const [visibleColumns, setVisibleColumns] = useState<{ [key: string]: boolean }>(() =>
     readVisibleColumnsPref(LIVE_TABLE_INSTANCE_ID)
   );
+  const [columnOrder, setColumnOrder] = useState<ColId[]>(() =>
+    readColumnOrderPref(LIVE_TABLE_INSTANCE_ID)
+  );
   const [rateMode, setRateMode] = useState<'s' | 'm' | 'h'>((getPref('rateMode') as 's' | 'm' | 'h') || 's');
   // Restore the browser telegram cache (and fill the gap from the backend) on
   // startup. On by default; when off the view starts empty and shows only live
@@ -449,9 +453,10 @@ function App() {
   useEffect(() => {
     setPref('loadLimit', loadLimit.toString());
     writeVisibleColumnsPref(LIVE_TABLE_INSTANCE_ID, visibleColumns);
+    writeColumnOrderPref(LIVE_TABLE_INSTANCE_ID, columnOrder);
     setPref('rateMode', rateMode);
     setPref('restoreOnStartup', String(restoreOnStartup));
-  }, [loadLimit, visibleColumns, rateMode, restoreOnStartup]);
+  }, [loadLimit, visibleColumns, columnOrder, rateMode, restoreOnStartup]);
 
   // ── Persist workspace (#211) ────────────────────────────────────────────────
   const workspaceView: WorkspaceView = isDatabaseOpen
@@ -663,7 +668,8 @@ function App() {
     sortConfig,
     onSort: handleSort,
     visibleColumns,
-    columnOrder: ['time', 'delta', 'source', 'target', 'type', 'dpt', 'value'],
+    columnOrder,
+    onColumnOrderChange: setColumnOrder,
     grouping: [],
     features: {
       quickInfo: true,
@@ -698,6 +704,7 @@ function App() {
     handleSort,
     sortConfig,
     visibleColumns,
+    columnOrder,
     quickFilterOpen,
     quickFilterEnabled,
     quickPatterns,

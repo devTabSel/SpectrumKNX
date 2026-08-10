@@ -79,6 +79,10 @@ export interface TelegramTableColumnConfig {
   width?: number;
   content?: TelegramTableColumnCellContent;
   lineStyles?: TelegramTableColumnLineStyles;
+  /** When this column participates in sorting (except TIME/Δt), hide repeated
+   * values on its sort level for consecutive rows. The first visible row always
+   * keeps its value. Defaults to true; set to false to keep repeats visible. */
+  hideRepeatedWhenSorted?: boolean;
 }
 
 export interface TelegramTableConfig {
@@ -86,6 +90,7 @@ export interface TelegramTableConfig {
   onSort: (key: SortKey, opts?: { additive?: boolean }) => void;
   visibleColumns: { [key: string]: boolean };
   columnOrder?: ColId[];
+  onColumnOrderChange?: (order: ColId[]) => void;
   grouping?: TelegramTableGroupingLevel[];
   columns?: Partial<Record<ColId, TelegramTableColumnConfig>>;
   features?: TelegramTableFeatures;
@@ -458,6 +463,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   // ── Column widths (persisted per table instance) ──
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(loadColumnWidths);
+  const [internalColumnOrder, setInternalColumnOrder] = useState<ColId[]>(() => COLUMNS.map(c => c.id));
+  const [hideRepeatedOverrides, setHideRepeatedOverrides] = useState<Partial<Record<ColId, boolean>>>({});
 
   useEffect(() => {
     setColumnWidths(loadColumnWidths());
@@ -502,6 +509,31 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       return next;
     });
   }, [persistWidths]);
+
+  const [draggingColumnId, setDraggingColumnId] = useState<ColId | null>(null);
+  const [dragOverColumn, setDragOverColumn] = useState<{ id: ColId; side: 'before' | 'after' } | null>(null);
+
+  const applyColumnOrderChange = useCallback((nextOrder: ColId[]) => {
+    if (tableConfig?.onColumnOrderChange) {
+      tableConfig.onColumnOrderChange(nextOrder);
+      return;
+    }
+    setInternalColumnOrder(nextOrder);
+  }, [tableConfig]);
+
+  const isHideRepeatedWhenSortedEnabled = useCallback((id: ColId): boolean => {
+    const override = hideRepeatedOverrides[id];
+    if (override !== undefined) return override;
+    return tableConfig?.columns?.[id]?.hideRepeatedWhenSorted ?? true;
+  }, [hideRepeatedOverrides, tableConfig?.columns]);
+
+  const toggleHideRepeatedWhenSortedForColumn = useCallback((id: ColId) => {
+    if (id === 'time' || id === 'delta') return;
+    setHideRepeatedOverrides(prev => {
+      const current = prev[id] ?? (tableConfig?.columns?.[id]?.hideRepeatedWhenSorted ?? true);
+      return { ...prev, [id]: !current };
+    });
+  }, [tableConfig?.columns]);
 
   // ── Quick filter bar (#271): per-column regex/literal filter on top of the
   // complex filter. Expanding enables it, collapsing disables it; the toggle
@@ -1375,7 +1407,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       if (explicitVisible !== undefined) return explicitVisible;
       return !c.visibleKey || effectiveVisibleColumns[c.visibleKey];
     });
-    const order = tableConfig?.columnOrder;
+    const order = tableConfig?.columnOrder ?? internalColumnOrder;
     const rank = new Map<ColId, number>();
     if (order && order.length > 0) {
       order.forEach((id, idx) => rank.set(id, idx));
@@ -1394,7 +1426,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       if (br == null) return -1;
       return ar - br;
     });
-  }, [effectiveVisibleColumns, tableConfig?.columnOrder, tableConfig?.columns]);
+  }, [effectiveVisibleColumns, tableConfig?.columnOrder, tableConfig?.columns, internalColumnOrder]);
 
   const gridTemplate = useMemo(
     () => visibleCols
@@ -1406,6 +1438,32 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       .join(' '),
     [visibleCols, widthFor],
   );
+
+  const handleColumnDrop = useCallback((fromId: ColId, overId: ColId, side: 'before' | 'after') => {
+    if (fromId === overId) return;
+    const visibleIds = visibleCols.map(c => c.id);
+    if (!visibleIds.includes(fromId) || !visibleIds.includes(overId)) return;
+
+    const fromIdx = visibleIds.indexOf(fromId);
+    const overIdx = visibleIds.indexOf(overId);
+    if (fromIdx === -1 || overIdx === -1) return;
+
+    const nextVisibleIds = [...visibleIds];
+    nextVisibleIds.splice(fromIdx, 1);
+    const overIdxAfterRemoval = nextVisibleIds.indexOf(overId);
+    const insertionIdx = side === 'after' ? overIdxAfterRemoval + 1 : overIdxAfterRemoval;
+    nextVisibleIds.splice(insertionIdx, 0, fromId);
+
+    if (nextVisibleIds.every((id, idx) => id === visibleIds[idx])) return;
+
+    const configuredOrder = (tableConfig?.columnOrder && tableConfig.columnOrder.length > 0)
+      ? tableConfig.columnOrder
+      : internalColumnOrder;
+    const visibleSet = new Set(visibleIds);
+    const hiddenIds = configuredOrder.filter(id => !visibleSet.has(id));
+    const nextOrder = [...nextVisibleIds, ...hiddenIds];
+    applyColumnOrderChange(nextOrder);
+  }, [visibleCols, tableConfig?.columnOrder, internalColumnOrder, applyColumnOrderChange]);
 
   // Multi-level sort indicator (#311): the chevron shows this column's own
   // direction; a small numbered badge additionally marks its position in the
@@ -1431,10 +1489,45 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     );
   };
 
+  const isSameSortKeyValue = useCallback((a: TelegramRow, b: TelegramRow, key: SortKey): boolean => {
+    const av = a[key];
+    const bv = b[key];
+    if (key === 'timestamp') {
+      return new Date(av as string).getTime() === new Date(bv as string).getTime();
+    }
+    return av === bv;
+  }, []);
+
+  const shouldHideRepeatedOnSortLevel = useCallback((id: ColId, rowIndex: number, forceShow = false): boolean => {
+    if (forceShow || rowIndex <= 0) return false;
+    if (id === 'time' || id === 'delta') return false;
+    const hideRepeatedEnabled = isHideRepeatedWhenSortedEnabled(id);
+    if (!hideRepeatedEnabled) return false;
+
+    const sortKey = COLUMNS.find(c => c.id === id)?.sortKey;
+    if (!sortKey || sortKey === 'timestamp') return false;
+
+    const levelIdx = effectiveSortConfig.findIndex(level => level.key === sortKey);
+    if (levelIdx === -1) return false;
+
+    const prev = telegramRows[rowIndex - 1];
+    const curr = telegramRows[rowIndex];
+    if (!prev || !curr) return false;
+
+    for (let i = 0; i <= levelIdx; i++) {
+      if (!isSameSortKeyValue(prev, curr, effectiveSortConfig[i].key)) return false;
+    }
+    return true;
+  }, [isHideRepeatedWhenSortedEnabled, effectiveSortConfig, telegramRows, isSameSortKeyValue]);
+
   // ── Per-cell body content (keyed switch keeps body aligned with header order) ──
-  const renderCell = (id: ColId, t: TelegramRow): React.ReactNode => {
+  const renderCell = (id: ColId, t: TelegramRow, rowIndex: number, forceShow = false): React.ReactNode => {
+    const hideRepeated = shouldHideRepeatedOnSortLevel(id, rowIndex, forceShow);
     const customContent = tableConfig?.columns?.[id]?.content;
     if (customContent) {
+      if (hideRepeated) {
+        return <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }} />;
+      }
       return (
         <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }}>
           <div style={lineStyle(id, 'top')}>
@@ -1447,6 +1540,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           )}
         </div>
       );
+    }
+
+    if (hideRepeated) {
+      return <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }} className="filterable-cell" />;
     }
 
     switch (id) {
@@ -1977,7 +2074,44 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         {visibleCols.map((c, i) => (
           // Three stacked rows with no visible divider between them — only the
           // middle row carries the column label.
-          <div key={c.id} className="header-col" style={{ position: 'relative', display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          <div
+            key={c.id}
+            className={`header-col${draggingColumnId === c.id ? ' drag-source' : ''}${dragOverColumn?.id === c.id ? ` drop-${dragOverColumn.side}` : ''}`}
+            draggable
+            onDragStart={(e) => {
+              setDraggingColumnId(c.id);
+              e.dataTransfer?.setData('text/plain', c.id);
+              if (e.dataTransfer) {
+                e.dataTransfer.effectAllowed = 'move';
+              }
+            }}
+            onDragOver={(e) => {
+              if (!draggingColumnId || draggingColumnId === c.id) return;
+              e.preventDefault();
+              if (e.dataTransfer) {
+                e.dataTransfer.dropEffect = 'move';
+              }
+              const rect = e.currentTarget.getBoundingClientRect();
+              const side: 'before' | 'after' = (e.clientX - rect.left) < (rect.width / 2) ? 'before' : 'after';
+              if (!dragOverColumn || dragOverColumn.id !== c.id || dragOverColumn.side !== side) {
+                setDragOverColumn({ id: c.id, side });
+              }
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              if (draggingColumnId && draggingColumnId !== c.id) {
+                const side = dragOverColumn?.id === c.id ? dragOverColumn.side : 'before';
+                handleColumnDrop(draggingColumnId, c.id, side);
+              }
+              setDragOverColumn(null);
+              setDraggingColumnId(null);
+            }}
+            onDragEnd={() => {
+              setDragOverColumn(null);
+              setDraggingColumnId(null);
+            }}
+            style={{ position: 'relative', display: 'flex', flexDirection: 'column', minWidth: 0 }}
+          >
             <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }} />
             <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
               {c.id === 'delta' ? (
@@ -1993,8 +2127,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               ) : c.sortKey ? (
                 <button
                   className="sort-header"
-                  onClick={(e) => handleColumnSort(c.sortKey!, { additive: e.ctrlKey || e.metaKey })}
-                  title="Click to sort · ctrl/cmd-click to add as a further sort level (TIME is always the deepest tiebreaker)"
+                  onClick={(e) => {
+                    if (e.altKey && c.id !== 'time' && c.id !== 'delta') {
+                      e.preventDefault();
+                      toggleHideRepeatedWhenSortedForColumn(c.id);
+                      return;
+                    }
+                    handleColumnSort(c.sortKey!, { additive: e.ctrlKey || e.metaKey });
+                  }}
+                  title="Click to sort · ctrl/cmd-click to add as a further sort level (TIME is always the deepest tiebreaker) · alt-click toggles repeated-value hiding"
                 >
                   {c.label} {renderSortArrow(c.sortKey)}
                 </button>
@@ -2231,16 +2372,28 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         </button>
       )}
 
-      {/* Clear-marks pill — shown only while rows are marked (#310) */}
-      {rowMarksEnabled && markedKeysList.length > 0 && (
-        <button
-          onClick={clearMarks}
-          className="clear-marks-pill"
-          style={{ position: 'absolute', right: '1rem', top: '0.75rem', zIndex: 20 }}
-          title="Clear all marks"
-        >
-          <X size={13} /> Clear {markedKeysList.length} mark{markedKeysList.length === 1 ? '' : 's'}
-        </button>
+      {/* Clear marks/context-marks pills — shown while entries exist (#310, #319) */}
+      {((rowMarksEnabled && markedKeysList.length > 0) || (rowFlagsEnabled && flaggedKeysList.length > 0)) && (
+        <div style={{ position: 'absolute', right: '1rem', top: '0.75rem', zIndex: 20, display: 'flex', flexDirection: 'column', gap: '0.35rem', alignItems: 'flex-end' }}>
+          {rowMarksEnabled && markedKeysList.length > 0 && (
+            <button
+              onClick={clearMarks}
+              className="clear-marks-pill"
+              title="Clear all marks"
+            >
+              <X size={13} /> Clear {markedKeysList.length} mark{markedKeysList.length === 1 ? '' : 's'}
+            </button>
+          )}
+          {rowFlagsEnabled && flaggedKeysList.length > 0 && (
+            <button
+              onClick={() => applyFlaggedKeysList([])}
+              className="clear-context-marks-pill"
+              title="Clear all context marks"
+            >
+              <X size={13} /> Clear {flaggedKeysList.length} context mark{flaggedKeysList.length === 1 ? '' : 's'}
+            </button>
+          )}
+        </div>
       )}
 
       {/* Virtualized Body */}
@@ -2264,7 +2417,17 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               position: 'relative'
             }}
           >
-            {virtualizer.getVirtualItems().map((virtualRow) => {
+            {(() => {
+              const virtualItems = virtualizer.getVirtualItems();
+              const scrollTop = parentRef.current?.scrollTop ?? 0;
+              const viewportHeight = parentRef.current?.clientHeight ?? 0;
+              const scrollBottom = scrollTop + viewportHeight;
+              const firstVisibleVirtual =
+                virtualItems.find(v => v.start >= scrollTop && (v.start + v.size) <= scrollBottom)
+                ?? virtualItems.find(v => (v.start + v.size) > scrollTop)
+                ?? virtualItems[0];
+              const firstVisibleRowIndex = firstVisibleVirtual?.index ?? -1;
+              return virtualItems.map((virtualRow) => {
               const t = telegramRows[virtualRow.index];
               const key = anchorKey(t);
               const marked = markedSet.has(key);
@@ -2331,12 +2494,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   </div>
                   <div style={{ flex: 1, minWidth: 0, display: 'grid', gridTemplateColumns: gridTemplate, alignItems: 'start' }}>
                   {visibleCols.map(c => (
-                    <React.Fragment key={c.id}>{renderCell(c.id, t)}</React.Fragment>
+                    <React.Fragment key={c.id}>{renderCell(c.id, t, virtualRow.index, virtualRow.index === firstVisibleRowIndex)}</React.Fragment>
                   ))}
                   </div>
                 </div>
               );
-            })}
+            });
+            })()}
           </div>
         )}
       </div>
@@ -2456,6 +2620,27 @@ style.textContent = `
   .clear-marks-pill:hover {
     color: var(--accent-primary);
     border-color: var(--accent-primary);
+  }
+
+  .clear-context-marks-pill {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.3rem 0.7rem;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--bg-panel);
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: var(--shadow-lg);
+    transition: color 0.15s, border-color 0.15s;
+  }
+
+  .clear-context-marks-pill:hover {
+    color: var(--warning, #f59e0b);
+    border-color: var(--warning, #f59e0b);
   }
 
   .quick-filter-bar-toggle {
@@ -2606,6 +2791,36 @@ style.textContent = `
   .header-col:hover .col-resize-handle::after,
   .header-col:has(+ .header-col:hover) .col-resize-handle::after {
     background: var(--accent-primary);
+  }
+
+  .header-col {
+    cursor: grab;
+  }
+
+  .header-col.drag-source {
+    opacity: 0.7;
+    cursor: grabbing;
+  }
+
+  .header-col.drop-before::before,
+  .header-col.drop-after::after {
+    content: '';
+    position: absolute;
+    top: 8%;
+    bottom: 8%;
+    width: 2px;
+    background: var(--accent-primary);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-primary) 35%, transparent);
+    pointer-events: none;
+    z-index: 4;
+  }
+
+  .header-col.drop-before::before {
+    left: 0;
+  }
+
+  .header-col.drop-after::after {
+    right: 0;
   }
 `;
 document.head.appendChild(style);

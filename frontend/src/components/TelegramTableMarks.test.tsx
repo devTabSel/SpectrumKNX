@@ -126,3 +126,17 @@ test('clicking a row still pauses live-following (#266) while marking it', () =>
   expect(onListFollowChange).toHaveBeenCalledWith(false);
   expect(marked(container)[0]).toBe(true);
 });
+
+test('clear-context-marks pill appears with count and clears all context marks', () => {
+  const onFlaggedKeysChange = vi.fn();
+  renderTable({
+    flaggedKeys: ['k1', 'k2'],
+    onFlaggedKeysChange,
+  });
+
+  const clearContextPill = screen.getByTitle('Clear all context marks');
+  expect(clearContextPill).toHaveTextContent('Clear 2 context marks');
+
+  fireEvent.click(clearContextPill);
+  expect(onFlaggedKeysChange).toHaveBeenCalledWith([]);
+});

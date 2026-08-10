@@ -194,6 +194,44 @@ test('multi-level sort (#311): plain click replaces, ctrl-click adds a level', (
   expect(onSort).toHaveBeenLastCalledWith('source_address', { additive: true });
 });
 
+test('column headers can be reordered via drag and drop', () => {
+  const onColumnOrderChange = vi.fn();
+  const dataTransfer = {
+    setData: vi.fn(),
+    getData: vi.fn(),
+    effectAllowed: 'move',
+    dropEffect: 'move',
+  } as unknown as DataTransfer;
+
+  render(
+    <TelegramTable
+      telegrams={makeList(3, 2)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      tableConfig={{
+        sortConfig,
+        onSort: vi.fn(),
+        visibleColumns,
+        columnOrder: ['time', 'delta', 'source', 'target', 'type', 'dpt', 'value'],
+        onColumnOrderChange,
+      }}
+    />,
+  );
+
+  const sourceHeaderCol = screen.getByText('SOURCE').closest('.header-col') as HTMLElement;
+  const valueHeaderCol = screen.getByText('VALUE').closest('.header-col') as HTMLElement;
+
+  fireEvent.dragStart(sourceHeaderCol, { dataTransfer });
+  fireEvent.dragOver(valueHeaderCol, { dataTransfer, clientX: 999 });
+  fireEvent.drop(valueHeaderCol, { dataTransfer, clientX: 999 });
+
+  expect(onColumnOrderChange).toHaveBeenCalledWith(['time', 'delta', 'target', 'type', 'dpt', 'value', 'source']);
+});
+
 test('multi-level sort (#311): a numbered badge marks each explicit level beyond the first', () => {
   const multiSort: SortConfig = [{ key: 'source_address', direction: 'asc' }, { key: 'target_address', direction: 'desc' }];
   render(
@@ -807,6 +845,65 @@ test('quick info delta min/max clicks only add marks and never remove them', () 
   fireEvent.click(screen.getByText(/Max Δt:/));
   expect(container.querySelectorAll('.log-row.marked')).toHaveLength(2);
   expect(container.querySelector('.log-row.latest')).toBeTruthy();
+});
+
+test('optional repeated-value hiding suppresses duplicate SOURCE entries on the sort level while keeping the first row value', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', source_address: '1.1.1', source_name: 'Kitchen', raw_hex: '0x11' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', source_address: '1.1.1', source_name: 'Kitchen', raw_hex: '0x12' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', source_address: '1.1.2', source_name: 'Hall', raw_hex: '0x13' }),
+  ];
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'source_address', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      tableConfig={{
+        sortConfig: [{ key: 'source_address', direction: 'desc' }],
+        onSort: vi.fn(),
+        visibleColumns,
+        columns: {
+          source: { hideRepeatedWhenSorted: true },
+        },
+      }}
+    />,
+  );
+
+  expect(screen.getAllByText('1.1.1')).toHaveLength(1);
+  expect(screen.getByText('1.1.2')).toBeInTheDocument();
+  expect(container.querySelectorAll('.log-row')).toHaveLength(3);
+});
+
+test('alt-click on a sortable header toggles repeated-value hiding for that column', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', source_address: '1.1.1', source_name: 'Kitchen', raw_hex: '0x21' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', source_address: '1.1.1', source_name: 'Kitchen', raw_hex: '0x22' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', source_address: '1.1.2', source_name: 'Hall', raw_hex: '0x23' }),
+  ];
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'source_address', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+
+  expect(screen.getAllByText('1.1.1')).toHaveLength(1);
+
+  const sourceHeader = screen.getByText('SOURCE').closest('button')!;
+  fireEvent.click(sourceHeader, { altKey: true });
+
+  expect(screen.getAllByText('1.1.1')).toHaveLength(2);
 });
 
 test('context rows (#343): marked with a distinct class/tooltip and counted in the info bar', () => {
