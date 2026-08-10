@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { TelegramTable, type SortConfig, type SortKey, type TelegramTableConfig } from './TelegramTable';
 import { readSortConfigPref, writeScopedSortConfigPref, toggleSortLevel, sortTelegrams } from '../utils/sortConfig';
 import { readVisibleColumnsPref } from '../utils/tablePrefs';
@@ -103,13 +103,13 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
       .catch(err => console.error('Failed to load shared view:', err));
   }, [initialView, loadLimit]);
 
-  const handleSort = (key: SortKey, opts?: { additive?: boolean }) => {
+  const handleSort = useCallback((key: SortKey, opts?: { additive?: boolean }) => {
     setSortConfig(prev => {
       const next = toggleSortLevel(prev, key, !!opts?.additive);
       writeScopedSortConfigPref(HISTORY_TABLE_INSTANCE_ID, next);
       return next;
     });
-  };
+  }, []);
 
   const handleQuickFilter = (key: 'sources' | 'targets' | 'types' | 'dpts', value: string | number) => {
     const current = activeFilters[key] as (string | number)[];

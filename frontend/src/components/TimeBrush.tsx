@@ -45,7 +45,7 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
     }
     const maxCount = Math.max(...counts, 1);
     return counts.map(c => c / maxCount);
-  }, [telegrams, minTime, maxTime, range]);
+  }, [telegrams, minTime, range]);
 
   const svgPath = useMemo(() => {
     const width = 1000;

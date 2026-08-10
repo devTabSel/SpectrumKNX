@@ -571,13 +571,13 @@ function App() {
 
   // ── Sorting (#311: multi-level, ctrl/cmd-click adds a level) ─────────────────
   const [sortConfig, setSortConfig] = useState<SortConfig>(() => readSortConfigPref(LIVE_TABLE_INSTANCE_ID));
-  const handleSort = (key: SortKey, opts?: { additive?: boolean }) => {
+  const handleSort = useCallback((key: SortKey, opts?: { additive?: boolean }) => {
     setSortConfig(prev => {
       const next = toggleSortLevel(prev, key, !!opts?.additive);
       writeScopedSortConfigPref(LIVE_TABLE_INSTANCE_ID, next);
       return next;
     });
-  };
+  }, []);
 
   const handleQuickFilter = (key: 'sources' | 'targets' | 'types' | 'dpts', value: string | number) => {
     handleFiltersChange(prev => {
@@ -855,6 +855,14 @@ function App() {
                       }}
                     >
                       <Download size={15} />
+                    </button>
+                    <button
+                      className="icon-button"
+                      onClick={togglePause}
+                      title={isPaused ? 'Resume' : 'Pause'}
+                      style={{ color: isPaused ? 'var(--accent-primary)' : 'var(--text-dim)', padding: '0.15rem' }}
+                    >
+                      {isPaused ? <Play size={15} fill="currentColor" /> : <Pause size={15} fill="currentColor" />}
                     </button>
                     <span style={{ color: 'var(--text-main)', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
                       {activeFilterCount
@@ -1260,8 +1268,7 @@ function App() {
                   <DatabaseOverlay onClose={() => setIsDatabaseOpen(false)} />
                 ) : (
                   <>
-                    {/* Telegram List panel header (#374): its own filter toggle
-                        (top-left) and the live play/pause it governs. */}
+                    {/* Telegram List panel header (#374): its own filter toggle. */}
                     <div style={{
                       display: 'flex', alignItems: 'center', gap: '0.5rem',
                       padding: '0.4rem 0.75rem', flexShrink: 0,
@@ -1286,14 +1293,6 @@ function App() {
                             color: 'white', borderRadius: '999px',
                           }}>{activeFilterCount}</span>
                         )}
-                      </button>
-                      <button
-                        className="icon-button"
-                        onClick={togglePause}
-                        title={isPaused ? 'Resume' : 'Pause'}
-                        style={{ color: isPaused ? 'var(--accent-primary)' : 'var(--text-dim)' }}
-                      >
-                        {isPaused ? <Play size={18} fill="currentColor" /> : <Pause size={18} fill="currentColor" />}
                       </button>
                     </div>
                     <TelegramTable
