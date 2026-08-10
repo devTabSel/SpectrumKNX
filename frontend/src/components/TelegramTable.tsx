@@ -114,6 +114,9 @@ interface TelegramTableProps {
   onQuickPatternsChange?: (patterns: Partial<Record<ColId, QuickCellValue>>) => void;
   quickFilterColumnEnabled?: QuickFilterColumnEnabled;
   onQuickFilterColumnEnabledChange?: (enabled: QuickFilterColumnEnabled) => void;
+  /** Optional upstream signal: true when quick filter hides at least one message
+   * from the full source set (before context rows are re-introduced). */
+  quickFilterFiltersOutAny?: boolean;
   /** Edits the Time-Delta-Context window (#309, #371) — moved here from the
    * filter pane; current values come from `activeFilters.deltaBeforeMs/deltaAfterMs`. */
   onDeltaContextChange?: (deltaBeforeMs: number, deltaAfterMs: number) => void;
@@ -262,6 +265,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   telegrams, visibleColumns, sortConfig, onSort, activeFilters, onQuickFilter, onQuickVisualize, onQuickLastSeen, canSend,
   quickFilterOpen, onQuickFilterOpenChange, quickFilterEnabled, onQuickFilterEnabledChange, quickPatterns, onQuickPatternsChange,
   quickFilterColumnEnabled, onQuickFilterColumnEnabledChange,
+  quickFilterFiltersOutAny,
   onDeltaContextChange, onDeltaContextEnabledChange,
   listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
   markedKeys, onMarkedKeysChange, lastMarkedKey, onLastMarkedKeyChange,
@@ -498,11 +502,27 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const flaggedSet = useMemo(() => new Set(flaggedKeysList), [flaggedKeysList]);
   const lastFlaggedKeyRef = useRef<string | null>(null);
 
+  const quickMatches = useMemo(
+    () => compileQuickFilters(currentPatterns, currentQuickColumnEnabled),
+    [currentPatterns, currentQuickColumnEnabled],
+  );
   const quickFiltered = useMemo(() => {
     if (!quickFilterFeatureEnabled || !quickOpen || !quickEnabled) return telegrams;
-    const matches = compileQuickFilters(currentPatterns, currentQuickColumnEnabled);
-    return telegrams.filter(t => matches(t) || !!contextKeys?.has(anchorKey(t)));
-  }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, currentPatterns, currentQuickColumnEnabled, contextKeys]);
+    return telegrams.filter(t => quickMatches(t) || !!contextKeys?.has(anchorKey(t)));
+  }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, quickMatches, contextKeys]);
+
+  const anyQuickColumnEnabled = useMemo(
+    () => Object.values(currentQuickColumnEnabled).some(Boolean),
+    [currentQuickColumnEnabled],
+  );
+  const quickFilterFiltersOutAnyMessage = quickFilterFiltersOutAny ?? (
+    quickEnabled &&
+    anyQuickColumnEnabled &&
+    telegrams.some(t => !quickMatches(t))
+  );
+  const quickFilterDividerColor = !quickEnabled || !anyQuickColumnEnabled
+    ? '#000000'
+    : (quickFilterFiltersOutAnyMessage ? '#f59e0b' : '#6b7280');
 
   const hasNonInitialDeltaWindow = activeFilters.deltaBeforeMs !== 0 || activeFilters.deltaAfterMs !== 0;
   const showRowMessageContextControl =
@@ -1513,6 +1533,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           and a text/to row, except TYPE (one row) and DELTA (Time-Delta-Context
           before/after, #371) which don't go through the pattern pipeline. */}
       {quickFilterFeatureEnabled && quickOpen && (
+        <>
         <div style={{ display: 'flex', background: 'var(--bg-subtle)', borderBottom: '1px solid var(--border-color)', flexShrink: 0, opacity: quickEnabled ? 1 : 0.5 }}>
           {/* Left icon rail (#341): DELTA window toggle on the first row,
               hide-arrow on the second row. */}
@@ -1668,6 +1689,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           ))}
           </div>
         </div>
+        <div
+          data-testid="quick-filter-divider"
+          style={{
+            height: '2px',
+            flexShrink: 0,
+            background: quickFilterDividerColor,
+          }}
+        />
+        </>
       )}
 
       {/* Body area — relative wrapper so the jump-to-live pill (#202) anchors

@@ -747,6 +747,22 @@ function App() {
   const filteredLiveTelegrams = deltaExpandedLive.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = deltaExpandedLive.contextKeys;
+  const liveQuickFilterFiltersOutAny = useMemo(() => {
+    if (!quickFilterOpen || !quickFilterEnabled) return false;
+    const quickMatches = compileQuickFilters(quickPatterns, quickFilterColumnEnabled);
+    const f = activeFilters;
+    const noFilter =
+      !filtersEnabled ||
+      (f.sources.length === 0 &&
+      f.targets.length === 0 &&
+      f.types.length === 0 &&
+      f.directions.length === 0 &&
+      f.dpts.length === 0);
+    return sortedLiveTelegrams.some(t => {
+      const baseMatch = noFilter ? true : matchesTelegram(t, f);
+      return baseMatch && !quickMatches(t);
+    });
+  }, [sortedLiveTelegrams, activeFilters, filtersEnabled, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled]);
 
   // ── Count bubbles (live only) ───────────────────────────────────────────────
   const filterCounts = useMemo((): FilterCounts => {
@@ -1331,6 +1347,7 @@ function App() {
                     onQuickFilterEnabledChange={setQuickFilterEnabled}
                     quickPatterns={quickPatterns}
                     onQuickPatternsChange={setQuickPatterns}
+                    quickFilterFiltersOutAny={liveQuickFilterFiltersOutAny}
                     onDeltaContextChange={handleDeltaContextChange}
                     onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
                     listFollow={listFollow}

@@ -227,6 +227,15 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   const filteredSortedTelegrams = deltaExpandedHistory.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = deltaExpandedHistory.contextKeys;
+  const historyQuickFilterFiltersOutAny = useMemo(() => {
+    if (!quickFilterOpen || !quickFilterEnabled) return false;
+    const quickMatches = compileQuickFilters(quickPatterns, quickFilterColumnEnabled);
+    const noFilter = !hasActiveFilters(activeFilters);
+    return sortedTelegrams.some(t => {
+      const baseMatch = noFilter || matchesTelegram(t, activeFilters);
+      return baseMatch && !quickMatches(t);
+    });
+  }, [sortedTelegrams, activeFilters, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled]);
 
   // True when current filters are less restrictive than what was used to fetch,
   // meaning some telegrams may be missing from the loaded set.
@@ -419,6 +428,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               activeFilters={activeFilters}
               onQuickFilter={handleQuickFilter}
               onQuickVisualize={handleQuickVisualize}
+              quickFilterFiltersOutAny={historyQuickFilterFiltersOutAny}
               onDeltaContextChange={handleDeltaContextChange}
               onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
               flaggedKeys={flaggedKeys}

@@ -492,6 +492,133 @@ test('ctrl/cmd-click on the global quick-filter toggle clears all quick-filter c
   expect(screen.getByLabelText('Quick filter VALUE from')).toHaveValue('');
 });
 
+test('quick-filter divider is black when the quick filter is globally disabled', () => {
+  render(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled={false}
+    />,
+  );
+
+  expect(screen.getByTestId('quick-filter-divider')).toHaveStyle({ background: '#000000' });
+});
+
+test('quick-filter divider is black when all column quick filters are disabled', () => {
+  render(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickFilterColumnEnabled={{
+        time: false,
+        delta: false,
+        source: false,
+        target: false,
+        type: false,
+        dpt: false,
+        value: false,
+      }}
+    />,
+  );
+
+  expect(screen.getByTestId('quick-filter-divider')).toHaveStyle({ background: '#000000' });
+});
+
+test('quick-filter divider is gray when filtering is enabled but all rows are shown', () => {
+  render(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{}}
+    />,
+  );
+
+  expect(screen.getByTestId('quick-filter-divider')).toHaveStyle({ background: '#6b7280' });
+});
+
+test('quick-filter divider is orange when at least one row is filtered out', () => {
+  render(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ target: { top: '', bottom: 'küche' } }}
+    />,
+  );
+
+  expect(screen.getByTestId('quick-filter-divider')).toHaveStyle({ background: '#f59e0b' });
+});
+
+test('quick-filter divider stays orange when excluded rows are re-shown as context rows', () => {
+  const contextKeys = new Set([
+    anchorKey(TELEGRAMS[1]),
+    anchorKey(TELEGRAMS[2]),
+  ]);
+  render(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ target: { top: '', bottom: 'küche' } }}
+      contextKeys={contextKeys}
+    />,
+  );
+
+  expect(screen.getByTestId('quick-filter-divider')).toHaveStyle({ background: '#f59e0b' });
+});
+
+test('quick-filter divider uses upstream exclusion signal for prefiltered table inputs', () => {
+  render(
+    <TelegramTable
+      telegrams={[TELEGRAMS[0]]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ target: { top: '', bottom: 'UGH_BJP_C1' } }}
+      quickFilterFiltersOutAny
+    />,
+  );
+
+  expect(screen.getByTestId('quick-filter-divider')).toHaveStyle({ background: '#f59e0b' });
+});
+
 test('ctrl/cmd-click on the DELTA TIME toggle disables/enables the window without losing the entered values (#318)', () => {
   const onDeltaContextChange = vi.fn();
   const onDeltaContextEnabledChange = vi.fn();
