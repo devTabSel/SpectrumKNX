@@ -619,24 +619,6 @@ function App() {
     setIsDatabaseOpen(false);
   }, []);
 
-  // Click a time/dot on a visualization chart: close the panel, land on the
-  // telegram nearest that timestamp with live-follow paused, and auto-flag it
-  // as a Time-Delta-Context anchor so its context window opens around it (#308).
-  const handleChartTimeClick = useCallback((ms: number) => {
-    if (liveTelegrams.length === 0) return;
-    let nearest = liveTelegrams[0];
-    let bestDiff = Infinity;
-    for (const t of liveTelegrams) {
-      const diff = Math.abs(new Date(t.timestamp).getTime() - ms);
-      if (diff < bestDiff) { bestDiff = diff; nearest = t; }
-    }
-    const key = anchorKey(nearest);
-    setFlaggedTelegramKeys(prev => prev.includes(key) ? prev : [...prev, key]);
-    setListFollow(false);
-    setListAnchorKey(key);
-    setActivePanel('list');
-  }, [liveTelegrams]);
-
   const handleQuickLastSeen = useCallback((address: string | string[], mode: 'ga' | 'pa') => {
     setLastSeenAddresses(Array.isArray(address) ? address : [address]);
     setLastSeenMode(mode);
@@ -782,6 +764,43 @@ function App() {
   const filteredLiveTelegrams = deltaExpandedLive.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = deltaExpandedLive.contextKeys;
+
+  // Click a chart time-ruler position: close the panel, land on the
+  // telegram nearest that timestamp with live-follow paused, and auto-flag it
+  // as a Time-Delta-Context anchor so its context window opens around it (#308).
+  // Additionally, mark the nearest row in the currently displayed telegram
+  // list as the latest clicked mark (additive, preserving existing marks).
+  const handleChartTimeClick = useCallback((ms: number) => {
+    if (liveTelegrams.length === 0) return;
+    let nearest = liveTelegrams[0];
+    let bestDiff = Infinity;
+    for (const t of liveTelegrams) {
+      const diff = Math.abs(new Date(t.timestamp).getTime() - ms);
+      if (diff < bestDiff) { bestDiff = diff; nearest = t; }
+    }
+    const key = anchorKey(nearest);
+    setFlaggedTelegramKeys(prev => prev.includes(key) ? prev : [...prev, key]);
+
+    if (filteredLiveTelegrams.length > 0) {
+      let nearestDisplayed = filteredLiveTelegrams[0];
+      let bestDisplayedDiff = Infinity;
+      for (const t of filteredLiveTelegrams) {
+        const diff = Math.abs(new Date(t.timestamp).getTime() - ms);
+        if (diff < bestDisplayedDiff) {
+          bestDisplayedDiff = diff;
+          nearestDisplayed = t;
+        }
+      }
+      const displayedKey = anchorKey(nearestDisplayed);
+      setMarkedTelegramKeys(prev => prev.includes(displayedKey) ? prev : [...prev, displayedKey]);
+      setLastMarkedTelegramKey(displayedKey);
+    }
+
+    setListFollow(false);
+    setListAnchorKey(key);
+    setActivePanel('list');
+  }, [liveTelegrams, filteredLiveTelegrams]);
+
   const liveQuickFilterFiltersOutAny = useMemo(() => {
     if (!quickFilterOpen || !quickFilterEnabled) return false;
     const quickMatches = compileQuickFilters(quickPatterns, quickFilterColumnEnabled);

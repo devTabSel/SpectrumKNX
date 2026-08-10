@@ -23,8 +23,8 @@ interface VisualizerProps {
   embed?: boolean;
   zoomRange?: [number, number] | null;
   onZoomRangeChange?: (range: [number, number] | null) => void;
-  /** Click on a chart's time ruler or a telegram dot: navigate to the telegram
-   * list around that timestamp (#308). */
+  /** Click on a chart's time ruler: navigate to the telegram list around that
+   * timestamp (#308). */
   onTimeClick?: (ms: number) => void;
   /** Per-target row actions in the sidebar (#341): write/filter/last-seen. */
   writeEnabled?: boolean;

@@ -2455,9 +2455,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     borderBottom: '1px solid var(--border-color)',
                     fontSize: '0.8125rem',
                     // Marked rows get an accent wash that overrides the zebra
-                    // stripe; the latest click is washed more strongly and gets
-                    // an accent bar. Context-only rows get a distinct (warning-
-                    // hued) wash instead, so they read apart from real matches.
+                    // stripe; the latest click is washed more strongly.
+                    // Context-only rows get a distinct (warning-hued) wash
+                    // instead, so they read apart from real matches.
                     // color-mix adapts to the theme's accent/warning colors.
                     background: latest
                       ? 'color-mix(in srgb, var(--accent-primary) 34%, transparent)'
@@ -2466,7 +2466,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                         : isContext
                           ? 'color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent)'
                           : (virtualRow.index + stripeOffset) % 2 === 0 ? 'var(--bg-subtle)' : 'transparent',
-                    boxShadow: latest ? 'inset 3px 0 0 0 var(--accent-primary)' : undefined,
                     minHeight: '60px' // Ensure a minimum touch/visual target
                   }}
                   title={isContext ? 'Unfiltered Time-Delta-Context — this telegram did not match the active filters' : undefined}

@@ -172,19 +172,29 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
         ],
         ready: [
           (u) => {
-            // Click (not drag-select) navigates to the telegram list around this
-            // time (#308); a dblclick still resets the zoom. The navigation is
-            // delayed past the dblclick window so the first click of a dblclick
-            // doesn't fire it before the reset cancels it.
+            // Navigate only when clicking the chart's time ruler (x-axis band)
+            // below the plot area, not when clicking the plot or dots.
+            // Keep the delayed single-click so double-click zoom reset wins.
             let clickTimer: ReturnType<typeof setTimeout> | null = null;
-            let downX: number | null = null;
-            u.over.addEventListener('mousedown', (e) => { downX = e.clientX; });
-            u.over.addEventListener('mouseup', (e) => {
-              const startX = downX;
-              downX = null;
-              if (startX === null || Math.abs(e.clientX - startX) >= 5) return;
-              const rect = u.over.getBoundingClientRect();
-              const ms = u.posToVal(e.clientX - rect.left, 'x') * 1000;
+            let down: { x: number; y: number } | null = null;
+            u.root.addEventListener('mousedown', (e) => { down = { x: e.clientX, y: e.clientY }; });
+            u.root.addEventListener('mouseup', (e) => {
+              const start = down;
+              down = null;
+              if (!start) return;
+              const movedPx = Math.hypot(e.clientX - start.x, e.clientY - start.y);
+              if (movedPx >= 5) return;
+
+              const rootRect = u.root.getBoundingClientRect();
+              const overRect = u.over.getBoundingClientRect();
+              const inXAxisBand =
+                e.clientX >= overRect.left &&
+                e.clientX <= overRect.right &&
+                e.clientY >= overRect.bottom &&
+                e.clientY <= rootRect.bottom;
+              if (!inXAxisBand) return;
+
+              const ms = u.posToVal(e.clientX - overRect.left, 'x') * 1000;
               clickTimer = setTimeout(() => onTimeClickRef.current?.(ms), 250);
             });
             u.over.addEventListener('dblclick', () => {
