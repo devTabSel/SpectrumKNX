@@ -63,6 +63,39 @@ const BUILDING_DATA = {
   ],
 };
 
+const BUILDING_DATA_NESTED = {
+  status: 'ok',
+  unassigned_devices: [],
+  tree: [
+    {
+      kind: 'space',
+      type: 'Building',
+      name: 'Main House',
+      devices: [],
+      functions: [],
+      spaces: [
+        {
+          kind: 'space',
+          type: 'Floor',
+          name: 'Floor 1',
+          devices: [],
+          functions: [],
+          spaces: [
+            {
+              kind: 'space',
+              type: 'Room',
+              name: 'Kitchen',
+              devices: [],
+              functions: [],
+              spaces: [],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
 function mockFetch(routes: Record<string, unknown>) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -245,6 +278,64 @@ test('clicking the location arrow shows the available location properties', asyn
   expect(screen.getAllByText('Building').length).toBeGreaterThan(0);
 });
 
+test('location PATH contains all parent locations for nested spaces', async () => {
+  vi.stubGlobal('fetch', mockFetch({ '/api/building': BUILDING_DATA_NESTED, '/api/telegrams/last': { telegrams: [] } }));
+
+  render(
+    <BuildingOverlay
+      onClose={noop} onFilterDevice={noop} onFilterGAs={noop} onLastSeen={noop}
+      onVisualizeGAs={noop} onDeviceStatus={noop}
+    />
+  );
+
+  await waitFor(() => expect(screen.getByText('Kitchen')).toBeInTheDocument());
+
+  const locationPropButtons = screen.getAllByTitle('Show location properties');
+  fireEvent.click(locationPropButtons[locationPropButtons.length - 1]);
+
+  expect(screen.getByText('PATH')).toBeInTheDocument();
+  expect(screen.getByText('Main House / Floor 1 / Kitchen')).toBeInTheDocument();
+});
+
+test('shift-click on a location toggles all sub-levels of that location', async () => {
+  vi.stubGlobal('fetch', mockFetch({ '/api/building': BUILDING_DATA_NESTED, '/api/telegrams/last': { telegrams: [] } }));
+
+  render(
+    <BuildingOverlay
+      onClose={noop} onFilterDevice={noop} onFilterGAs={noop} onLastSeen={noop}
+      onVisualizeGAs={noop} onDeviceStatus={noop}
+    />
+  );
+
+  await waitFor(() => expect(screen.getByText('Kitchen')).toBeInTheDocument());
+
+  fireEvent.click(screen.getByText('Floor 1'), { shiftKey: true });
+  expect(screen.queryByText('Kitchen')).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByText('Floor 1'), { shiftKey: true });
+  expect(screen.getAllByText('Kitchen').length).toBeGreaterThan(0);
+});
+
+test('shift-click on a device toggles all nested device levels', async () => {
+  vi.stubGlobal('fetch', mockFetch({ '/api/building': BUILDING_DATA, '/api/telegrams/last': { telegrams: [] } }));
+
+  render(
+    <BuildingOverlay
+      onClose={noop} onFilterDevice={noop} onFilterGAs={noop} onLastSeen={noop}
+      onVisualizeGAs={noop} onDeviceStatus={noop}
+    />
+  );
+
+  await waitFor(() => expect(screen.getByText('Push Button')).toBeInTheDocument());
+  const deviceLabel = screen.getAllByText('Push Button')[0];
+
+  fireEvent.click(deviceLabel, { shiftKey: true });
+  await waitFor(() => expect(screen.getAllByText('Status GA').length).toBeGreaterThan(0));
+
+  fireEvent.click(deviceLabel, { shiftKey: true });
+  await waitFor(() => expect(screen.queryAllByText('Status GA').length).toBe(0));
+});
+
 test('clicking the device arrow shows the available device properties', async () => {
   vi.stubGlobal('fetch', mockFetch({ '/api/building': BUILDING_DATA, '/api/telegrams/last': { telegrams: [] } }));
 
@@ -258,7 +349,7 @@ test('clicking the device arrow shows the available device properties', async ()
   await waitFor(() => expect(screen.getByText('Push Button')).toBeInTheDocument());
   fireEvent.click(screen.getByTitle('Show device properties'));
 
-  expect(screen.getByText('Address')).toBeInTheDocument();
+  expect(screen.getByTitle('Hide device properties')).toBeInTheDocument();
   expect(screen.getAllByText('1.1.1').length).toBeGreaterThan(0);
   expect(screen.getByText('Manufacturer')).toBeInTheDocument();
   expect(screen.getByText('MDT')).toBeInTheDocument();

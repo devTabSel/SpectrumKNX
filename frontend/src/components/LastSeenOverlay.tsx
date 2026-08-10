@@ -464,21 +464,6 @@ export const LastSeenOverlay: React.FC<LastSeenOverlayProps> = ({
               Live
             </button>
 
-            {/* Read from bus (GroupValueRead) */}
-            {writeEnabled && mode === 'ga' && selectedAddresses.length > 0 && (
-              <button
-                onClick={handleRead} disabled={busy}
-                title="Send a GroupValueRead; the response updates the last value"
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.25rem',
-                  padding: '0.2rem 0.5rem', borderRadius: 4, cursor: busy ? 'wait' : 'pointer', fontSize: '0.72rem',
-                  border: '1px solid var(--accent-primary)', background: 'var(--bg-subtle)', color: 'var(--accent-primary)',
-                }}
-              >
-                <Radio size={13} /> Read
-              </button>
-            )}
-
             {/* Manual refresh */}
             <button
               onClick={fetchData} disabled={isLoading} title="Refresh now"

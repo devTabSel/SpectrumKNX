@@ -42,11 +42,32 @@ const subscribe = (cb: () => void) => {
 
 const getSnapshot = () => version;
 
-const setOverride = (key: string, open: boolean) => {
-  overrides = { ...overrides, [key]: open };
+const getExpandedState = (key: string, defaultOpen: boolean): boolean =>
+  key in overrides ? overrides[key] : defaultOpen;
+
+const commitOverrides = (next: Record<string, boolean>) => {
+  overrides = next;
   version += 1;
   persist();
   listeners.forEach(l => l());
+};
+
+const setOverride = (key: string, open: boolean) => {
+  commitOverrides({ ...overrides, [key]: open });
+};
+
+export const getExpanded = (key: string, defaultOpen: boolean): boolean =>
+  getExpandedState(key, defaultOpen);
+
+export const setExpanded = (key: string, open: boolean) => {
+  setOverride(key, open);
+};
+
+export const setExpandedBatch = (updates: Array<{ key: string; open: boolean }>) => {
+  if (updates.length === 0) return;
+  const next = { ...overrides };
+  for (const update of updates) next[update.key] = update.open;
+  commitOverrides(next);
 };
 
 /**
@@ -55,9 +76,9 @@ const setOverride = (key: string, open: boolean) => {
  */
 export function useExpanded(key: string, defaultOpen: boolean): [boolean, () => void] {
   useSyncExternalStore(subscribe, getSnapshot);
-  const open = key in overrides ? overrides[key] : defaultOpen;
+  const open = getExpandedState(key, defaultOpen);
   const toggle = useCallback(() => {
-    const current = key in overrides ? overrides[key] : defaultOpen;
+    const current = getExpandedState(key, defaultOpen);
     setOverride(key, !current);
   }, [key, defaultOpen]);
   return [open, toggle];

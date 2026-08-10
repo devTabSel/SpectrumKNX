@@ -5,7 +5,7 @@ import {
   LineChart,
 } from 'lucide-react';
 import { apiUrl } from '../utils/basePath';
-import { useExpanded } from '../utils/buildingExpansion';
+import { setExpandedBatch, useExpanded } from '../utils/buildingExpansion';
 import { GaNameWidthContext } from '../utils/gaNameWidth';
 import { useLastSeenValues } from '../hooks/useLastSeenValues';
 import { SendToGaPopover } from './SendToGaPopover';
@@ -152,6 +152,38 @@ const sortSpaces = (spaces: SpaceNode[]): SpaceNode[] =>
     return nameA.localeCompare(nameB, undefined, { numeric: true, sensitivity: 'base' });
   });
 
+const collectDeviceCommObjectsExpansionKeys = (device: DeviceNode): string[] => {
+  const keys: string[] = [];
+  for (const channel of device.channels) {
+    keys.push(`ch:${device.address}:${channel.id}`);
+    sortKos(channel.kos).forEach((ko, i) => {
+      keys.push(`ko:${device.address}:${channel.id}:${ko.number}-${i}`);
+    });
+  }
+  sortKos(device.kos).forEach((ko, i) => {
+    keys.push(`ko:${device.address}:${ko.number}-${i}`);
+  });
+  return keys;
+};
+
+const collectDeviceExpansionKeys = (device: DeviceNode): string[] => [
+  `dev:${device.address}`,
+  `dev-props:${device.address}`,
+  `dev:${device.address}:gas`,
+  `dev:${device.address}:comm-objects`,
+  ...collectDeviceCommObjectsExpansionKeys(device),
+];
+
+const collectSpaceExpansionKeys = (space: SpaceNode, path: string): string[] => {
+  const keys: string[] = [`space:${path}`, `space-props:${path}`];
+  for (const device of space.devices) keys.push(...collectDeviceExpansionKeys(device));
+  for (const func of space.functions ?? []) keys.push(`func:${func.id}`);
+  sortSpaces(space.spaces).forEach((sub, i) => {
+    keys.push(...collectSpaceExpansionKeys(sub, `${path}/${sub.type}:${sub.name}#${i}`));
+  });
+  return keys;
+};
+
 // ── Search matching helpers ─────────────────────────────────────────────────────
 
 const gaMatches = (ga: GaRef, q: string) =>
@@ -247,6 +279,7 @@ const Caret: React.FC<{ open: boolean; hasChildren: boolean }> = ({ open, hasChi
 
 const DeviceSubtreeRow: React.FC<{
   storageKey: string;
+  descendantKeys?: string[];
   depth: number;
   label: string;
   countLabel?: string;
@@ -256,7 +289,7 @@ const DeviceSubtreeRow: React.FC<{
   defaultOpen?: boolean;
   actions?: React.ReactNode;
   children?: React.ReactNode;
-}> = ({ storageKey, depth, label, countLabel, query, icon, hasChildren, defaultOpen = true, actions, children }) => {
+}> = ({ storageKey, descendantKeys = [], depth, label, countLabel, query, icon, hasChildren, defaultOpen = true, actions, children }) => {
   const [open, toggle] = useExpanded(storageKey, defaultOpen);
   const effectiveOpen = open || !!query;
 
@@ -264,7 +297,15 @@ const DeviceSubtreeRow: React.FC<{
     <div>
       <div
         style={{ ...rowStyle(depth), cursor: hasChildren ? 'pointer' : 'default' }}
-        onClick={() => hasChildren && toggle()}
+        onClick={e => {
+          if (!hasChildren) return;
+          if (e.shiftKey) {
+            const nextOpen = !open;
+            setExpandedBatch([storageKey, ...descendantKeys].map(key => ({ key, open: nextOpen })));
+            return;
+          }
+          toggle();
+        }}
         onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
       >
@@ -301,14 +342,14 @@ const PropertyList: React.FC<{
         padding: '0.45rem 0.6rem',
         border: '1px solid var(--border-subtle)',
         borderRadius: 6,
-        background: 'rgba(255,255,255,0.02)',
+        background: 'var(--bg-subtle)',
       }}>
         {visibleItems.map(item => (
           <React.Fragment key={item.label}>
-            <span style={{ fontSize: '0.66rem', fontWeight: 400, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+            <span style={{ fontSize: '0.64rem', fontWeight: 400, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.03em', opacity: 0.9 }}>
               {item.label}
             </span>
-            <span style={{ fontSize: '0.74rem', fontWeight: 400, color: 'var(--text-main)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.value}>
+            <span style={{ fontSize: '0.72rem', fontWeight: 400, color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: 0.95 }} title={item.value}>
               {item.value}
             </span>
           </React.Fragment>
@@ -552,7 +593,15 @@ const DeviceRow: React.FC<{
     <div>
       <div
         style={{ ...rowStyle(depth), cursor: hasChildren ? 'pointer' : 'default' }}
-        onClick={() => hasChildren && toggle()}
+        onClick={e => {
+          if (!hasChildren) return;
+          if (e.shiftKey) {
+            const nextOpen = !open;
+            setExpandedBatch(collectDeviceExpansionKeys(device).map(key => ({ key, open: nextOpen })));
+            return;
+          }
+          toggle();
+        }}
         onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
       >
@@ -639,6 +688,7 @@ const DeviceRow: React.FC<{
         <div>
           <DeviceSubtreeRow
             storageKey={`dev:${device.address}:gas`}
+            descendantKeys={[]}
             depth={depth + 1}
             label="Group Addresses"
             countLabel={`${gaEntries.length} GA${gaEntries.length !== 1 ? 's' : ''}`}
@@ -691,6 +741,7 @@ const DeviceRow: React.FC<{
 
           <DeviceSubtreeRow
             storageKey={`dev:${device.address}:comm-objects`}
+            descendantKeys={collectDeviceCommObjectsExpansionKeys(device)}
             depth={depth + 1}
             label="Comm Objects"
             countLabel={`${koCount} KO${koCount !== 1 ? 's' : ''}`}
@@ -888,7 +939,7 @@ const FunctionRow: React.FC<{
 const SpaceRow: React.FC<{
   space: SpaceNode;
   path: string;
-  parentLabel?: string;
+  ancestryLabels: string[];
   depth: number;
   query: string;
   onFilterDevice: (pa: string) => void;
@@ -898,7 +949,7 @@ const SpaceRow: React.FC<{
   onDeviceStatus: (device: DeviceNode) => void;
   writeEnabled?: boolean;
   latestTelegram?: Telegram | null;
-}> = ({ space, path, parentLabel, depth, query, onFilterDevice, onFilterGAs, onLastSeen, onVisualizeGAs, onDeviceStatus, writeEnabled, latestTelegram }) => {
+}> = ({ space, path, ancestryLabels, depth, query, onFilterDevice, onFilterGAs, onLastSeen, onVisualizeGAs, onDeviceStatus, writeEnabled, latestTelegram }) => {
   const [open, toggle] = useExpanded(`space:${path}`, depth < 2);
   const [propsOpen, toggleProps] = useExpanded(`space-props:${path}`, false);
   if (query && !spaceMatches(space, query)) return null;
@@ -906,7 +957,8 @@ const SpaceRow: React.FC<{
   const hasChildren = space.spaces.length > 0 || space.devices.length > 0 || !!(space.functions && space.functions.length > 0);
   const visibleDevices = query ? space.devices.filter(d => deviceMatches(d, query)) : space.devices;
   const visibleFunctions = space.functions ? (query ? space.functions.filter(f => functionMatches(f, query)) : space.functions) : [];
-  const qualifiedName = [parentLabel, space.name].filter(Boolean).join(' ') || space.name || space.type;
+  const displayName = space.name || space.type;
+  const qualifiedName = [...ancestryLabels, displayName].filter(Boolean).join(' / ');
   const spaceProperties = useMemo(() => [
     { label: 'PATH', value: qualifiedName },
     { label: 'Name', value: space.name || '' },
@@ -917,7 +969,15 @@ const SpaceRow: React.FC<{
     <div>
       <div
         style={{ ...rowStyle(depth), cursor: hasChildren ? 'pointer' : 'default' }}
-        onClick={() => hasChildren && toggle()}
+        onClick={e => {
+          if (!hasChildren) return;
+          if (e.shiftKey) {
+            const nextOpen = !open;
+            setExpandedBatch(collectSpaceExpansionKeys(space, path).map(key => ({ key, open: nextOpen })));
+            return;
+          }
+          toggle();
+        }}
         onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
       >
@@ -948,7 +1008,7 @@ const SpaceRow: React.FC<{
         <div>
           {sortSpaces(space.spaces).map((sub, i) => (
             <SpaceRow
-              key={`${sub.name}-${i}`} space={sub} path={`${path}/${sub.type}:${sub.name}#${i}`} parentLabel={space.name || space.type} depth={depth + 1} query={query}
+              key={`${sub.name}-${i}`} space={sub} path={`${path}/${sub.type}:${sub.name}#${i}`} ancestryLabels={[...ancestryLabels, displayName]} depth={depth + 1} query={query}
               onFilterDevice={onFilterDevice} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
               onDeviceStatus={onDeviceStatus} writeEnabled={writeEnabled} latestTelegram={latestTelegram}
             />
@@ -1064,7 +1124,7 @@ export const BuildingOverlay: React.FC<BuildingOverlayProps> = ({
           <GaNameWidthContext.Provider value={gaNameWidthCh}>
           {sortSpaces(data.tree).map((space, i) => (
             <SpaceRow
-              key={`${space.name}-${i}`} space={space} path={`${space.type}:${space.name}#${i}`} depth={0} query={query}
+              key={`${space.name}-${i}`} space={space} path={`${space.type}:${space.name}#${i}`} ancestryLabels={[]} depth={0} query={query}
               onFilterDevice={onFilterDevice} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
               onDeviceStatus={onDeviceStatus} writeEnabled={writeEnabled} latestTelegram={latestTelegram}
             />

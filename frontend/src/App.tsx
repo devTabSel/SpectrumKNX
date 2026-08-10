@@ -185,11 +185,11 @@ const NavDropdown = ({ activeTab, isSettingsOpen, isDatabaseOpen, onChange }: { 
 type MainPanel = 'list' | 'visualizer' | 'statistics' | 'building' | 'lastseen';
 
 const MAIN_PANELS: { id: MainPanel; label: string; icon: typeof List }[] = [
+  { id: 'building', label: 'Building Structure', icon: Building2 },
   { id: 'list', label: 'Telegram List', icon: List },
   { id: 'visualizer', label: 'Visualization', icon: LineChart },
-  { id: 'statistics', label: 'Statistics', icon: BarChart2 },
-  { id: 'building', label: 'Building Structure', icon: Building2 },
   { id: 'lastseen', label: 'Last Seen Values', icon: Clock },
+  { id: 'statistics', label: 'Statistics', icon: BarChart2 },
 ];
 
 // Segmented switch across the five main panels, marking the active one (#374).
@@ -262,7 +262,7 @@ function App() {
     initialView ? 'history' : initialWorkspace?.tab ?? 'live',
   );
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isFilterOpen, setIsFilterOpen] = useState(initialWorkspace?.filterOpen ?? true);
+  const [isFilterOpen, setIsFilterOpen] = useState(initialWorkspace?.filterOpen ?? false);
   // The active main panel within Group Monitor (#374). Replaces the former
   // isVisualizerOpen/isLastSeenOpen/isStatisticsOpen/isBuildingOpen booleans with
   // one selector so exactly one panel is active and every close returns to 'list'.
@@ -856,12 +856,9 @@ function App() {
     ? activeFilters.sources.length + activeFilters.targets.length + activeFilters.types.length + activeFilters.directions.length + activeFilters.dpts.length
     : 0;
 
-  // The Focus pane is global across all main panels; the toolbar toggle simply
-  // opens/closes it and panel switches do not implicitly close it.
+  // The Focus pane remains layout-driven by its persisted state; only the
+  // toolbar toggle is temporarily disabled.
   const showFilterPane = isFilterOpen;
-  const handleToolbarFilterToggle = () => {
-    setIsFilterOpen(o => !o);
-  };
 
   // The buffer holds at most `loadLimit` (newest) telegrams; once it is at
   // capacity there is no room to load older history (#313).
@@ -997,15 +994,17 @@ function App() {
                     list; the Building opener also clears any drilled-in device. */}
                 <button
                   className="icon-button"
-                  onClick={handleToolbarFilterToggle}
-                  title="toggle Focus panel"
+                  disabled
+                  title="Focus panel toggle temporarily disabled"
                   style={{
                     position: 'relative',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     padding: '0.4rem', borderRadius: '8px',
                     border: '1px solid var(--border-color)',
                     background: 'var(--bg-subtle)',
-                    color: showFilterPane || (hasActiveFilters(activeFilters) && filtersEnabled) ? 'var(--accent-primary)' : 'var(--text-dim)',
+                    color: 'var(--text-dim)',
+                    opacity: 0.45,
+                    cursor: 'default',
                   }}
                 >
                   <Search size={18} />

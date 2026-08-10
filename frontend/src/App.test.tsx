@@ -27,11 +27,11 @@ test('shows the five main-panel tabs with Telegram List active by default (#374)
   render(<App />);
   const tabs = await screen.findAllByRole('tab');
   expect(tabs.map(t => t.getAttribute('title'))).toEqual([
+    'Building Structure',
     'Telegram List',
     'Visualization',
-    'Statistics',
-    'Building Structure',
     'Last Seen Values',
+    'Statistics',
   ]);
   // 'list' is the default; every panel's close returns here.
   const list = screen.getByRole('tab', { name: 'Telegram List' });
@@ -40,7 +40,7 @@ test('shows the five main-panel tabs with Telegram List active by default (#374)
 
 test('play/pause and the filter toggle live with the Telegram List (#374)', async () => {
   render(<App />);
-  // The live toolbar owns the focus-panel toggle and play/pause.
-  expect(await screen.findByRole('button', { name: 'toggle Focus panel' })).toBeInTheDocument();
+  // The live toolbar owns the disabled focus-panel toggle and play/pause.
+  expect(await screen.findByRole('button', { name: 'Focus panel toggle temporarily disabled' })).toBeDisabled();
   expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument();
 });
