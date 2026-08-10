@@ -397,6 +397,66 @@ test('quick info bar (#311): toggled via the header button and summarizes the vi
   expect(screen.getByText(/Newest:/)).toBeInTheDocument();
 });
 
+test('quick info still shows filtered summaries when every visible row is filtered out', () => {
+  render(
+    <TelegramTable
+      telegrams={[
+        makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', source_address: '1.1.1', target_address: '1/1/1', simplified_type: 'Write', direction: 'Incoming', raw_hex: '0xA1' }),
+        makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', source_address: '1.1.2', target_address: '1/1/2', simplified_type: 'Read', direction: 'Outgoing', raw_hex: '0xA2' }),
+      ]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ source: { top: '9.9.9', bottom: '' } }}
+      allBufferSourceCount={2}
+      projectSourceCount={7}
+      allBufferTargetCount={2}
+      projectTargetCount={11}
+      allBufferTypes={['Write', 'Read']}
+      allBufferDirections={['Incoming', 'Outgoing']}
+      allBufferMessageCount={2}
+      bufferCapacity={100000}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getByText('buffer: 2 / 7')).toBeInTheDocument();
+  expect(screen.getByText('buffer: 2 / 11')).toBeInTheDocument();
+  expect(screen.getByText('types: W, R / dirs: In, Out')).toBeInTheDocument();
+  expect(screen.queryByText(/filtered/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Oldest:/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Newest:/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Min Δt:/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Max Δt:/)).not.toBeInTheDocument();
+  expect(screen.getByText('msg: 2 / buf: 100000, marks:')).toBeInTheDocument();
+});
+
+test('quick info bar stays toggleable when there are no telegrams to summarize', () => {
+  render(
+    <TelegramTable
+      telegrams={[]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+
+  expect(screen.queryByTitle('Hide info bar')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByTitle('Show info bar'));
+  expect(screen.getByTitle('Hide info bar')).toBeInTheDocument();
+  fireEvent.click(screen.getByTitle('Hide info bar'));
+  expect(screen.getByTitle('Show info bar')).toBeInTheDocument();
+});
+
 test('quick info oldest/newest clicks only add marks and never remove them', () => {
   const { container } = render(
     <TelegramTable

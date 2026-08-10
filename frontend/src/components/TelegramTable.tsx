@@ -653,6 +653,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     effectiveOnInfoBarOpenChange?.(next);
   }, [infoOpen, effectiveOnInfoBarOpenChange]);
 
+  const showInfoBarToggle = quickInfoEnabled && !infoOpen;
+
   // ── Row marks (#310) ─────────────────────────────────────────────────────
   // Controlled when App lifts them (so marks survive navigation), otherwise a
   // local fallback. `lastMarkedKey` may legitimately be null, so distinguish
@@ -1083,7 +1085,32 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // Summarizes the currently visible (sorted + filtered) rows; oldest/newest
   // and min/max Δt jump to their row via gotoIndex regardless of sort order.
   const infoMetrics = useMemo(() => {
-    if (telegramRows.length === 0) return null;
+    if (telegramRows.length === 0) {
+      return {
+        count: 0,
+        oldestIdx: -1,
+        newestIdx: -1,
+        minDeltaIdx: -1,
+        maxDeltaIdx: -1,
+        displayedSourceCount: 0,
+        matchedSourceCount: 0,
+        contextualOnlySourceCount: 0,
+        displayedTargetCount: 0,
+        matchedTargetCount: 0,
+        contextualOnlyTargetCount: 0,
+        displayedTypeValues: [],
+        matchedTypeValues: [],
+        displayedDirectionValues: [],
+        matchedDirectionValues: [],
+        displayedDptMainValues: [],
+        matchedDptMainValues: [],
+        displayedDptMainSubValues: [],
+        matchedDptMainSubValues: [],
+        contextCount: 0,
+        markedVisibleCount: 0,
+        flaggedVisibleCount: 0,
+      };
+    }
     let oldestIdx = 0, newestIdx = 0;
     let minDeltaIdx = -1, maxDeltaIdx = -1;
     const displayedSources = new Set<string>();
@@ -1915,7 +1942,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Quick info bar (#311): collapsible summary directly above the header. */}
-      {quickInfoEnabled && infoOpen && infoMetrics && (
+      {quickInfoEnabled && infoOpen && (
         <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', background: 'var(--bg-subtle)', flexShrink: 0 }}>
           {/* Left icon rail (#341): two rows matching the quick-info grid rows. */}
           <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
@@ -1942,186 +1969,194 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             }}
           >
             {visibleCols.map((c) => {
-              let topNode: React.ReactNode = <span style={infoChipStyle}>-</span>;
-              let bottomNode: React.ReactNode = <span style={infoChipBottomStyle}>-</span>;
+              let topNode: React.ReactNode = <span style={infoChipStyle} />;
+              let bottomNode: React.ReactNode = <span style={infoChipBottomStyle} />;
 
-              if (c.id === 'time') {
-                topNode = (
-                  <button
-                    style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
-                    title="Jump to the oldest telegram in the current view"
-                    onClick={() => {
-                      markSingleRowByIndex(infoMetrics.oldestIdx);
-                      gotoIndex(infoMetrics.oldestIdx);
-                    }}
-                  >
-                    Oldest: {format(new Date(telegramRows[infoMetrics.oldestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
-                  </button>
-                );
-                bottomNode = (
-                  <button
-                    style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
-                    title="Jump to the newest telegram in the current view"
-                    onClick={() => {
-                      markSingleRowByIndex(infoMetrics.newestIdx);
-                      gotoIndex(infoMetrics.newestIdx);
-                    }}
-                  >
-                    Newest: {format(new Date(telegramRows[infoMetrics.newestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
-                  </button>
-                );
-              } else if (c.id === 'delta') {
-                topNode = infoMetrics.minDeltaIdx !== -1 ? (
-                  <button
-                    style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
-                    title="Jump to the smallest time gap in the current view"
-                    onClick={() => {
-                      markSingleRowByIndex(infoMetrics.minDeltaIdx);
-                      gotoIndex(infoMetrics.minDeltaIdx);
-                    }}
-                  >
-                    Min Δt: {telegramRows[infoMetrics.minDeltaIdx].deltaStr}
-                  </button>
-                ) : <span style={infoChipStyle}>Min Δt: -</span>;
-                bottomNode = infoMetrics.maxDeltaIdx !== -1 ? (
-                  <button
-                    style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
-                    title="Jump to the largest time gap in the current view"
-                    onClick={() => {
-                      markSingleRowByIndex(infoMetrics.maxDeltaIdx);
-                      gotoIndex(infoMetrics.maxDeltaIdx);
-                    }}
-                  >
-                    Max Δt: {telegramRows[infoMetrics.maxDeltaIdx].deltaStr}
-                  </button>
-                ) : <span style={infoChipStyle}>Max Δt: -</span>;
-              } else if (c.id === 'source') {
-                const allSourcesInBuffer = allBufferSourceCount ?? infoMetrics.displayedSourceCount;
-                const showFilteredSourceContent = infoMetrics.matchedSourceCount !== allSourcesInBuffer;
-                topNode = <span style={infoChipStyle}>buffer: {allSourcesInBuffer} / {projectSourceCount ?? '-'}</span>;
-                bottomNode = showFilteredSourceContent
-                  ? (
-                    <span style={infoChipBottomStyle}>
-                      <button
-                        style={infoCountBtnBottomStyle}
-                        title="Filtered source-device count"
-                        onClick={() => {}}
-                      >
-                        {infoMetrics.matchedSourceCount}
-                      </button>
-                      <span>filtered</span>
-                      {infoMetrics.contextualOnlySourceCount > 0 && (
-                        <>
-                          <span>(</span>
-                          <button
-                            style={infoCountBtnBottomStyle}
-                            title="Contextual source-device count"
-                            onClick={() => {}}
-                          >
-                            {infoMetrics.contextualOnlySourceCount}
-                          </button>
-                          <span>)</span>
-                        </>
-                      )}
-                    </span>
-                  )
-                  : <span style={infoChipBottomStyle} />;
-              } else if (c.id === 'target') {
-                const allTargetsInBuffer = allBufferTargetCount ?? infoMetrics.displayedTargetCount;
-                const showFilteredTargetContent = infoMetrics.matchedTargetCount !== allTargetsInBuffer;
-                topNode = <span style={infoChipStyle}>buffer: {allTargetsInBuffer} / {projectTargetCount ?? '-'}</span>;
-                bottomNode = showFilteredTargetContent
-                  ? (
-                    <span style={infoChipBottomStyle}>
-                      <button
-                        style={infoCountBtnBottomStyle}
-                        title="Filtered target-device count"
-                        onClick={() => {}}
-                      >
-                        {infoMetrics.matchedTargetCount}
-                      </button>
-                      <span>filtered</span>
-                      {infoMetrics.contextualOnlyTargetCount > 0 && (
-                        <>
-                          <span>(</span>
-                          <button
-                            style={infoCountBtnBottomStyle}
-                            title="Contextual target-device count"
-                            onClick={() => {}}
-                          >
-                            {infoMetrics.contextualOnlyTargetCount}
-                          </button>
-                          <span>)</span>
-                        </>
-                      )}
-                    </span>
-                  )
-                  : <span style={infoChipBottomStyle} />;
-              } else if (c.id === 'type') {
-                const totalTypeSummary = summarizeAbbreviatedValues(allBufferTypes ?? infoMetrics.displayedTypeValues, TYPE_ABBREVIATIONS);
-                const totalDirectionSummary = summarizeAbbreviatedValues(allBufferDirections ?? infoMetrics.displayedDirectionValues, DIRECTION_ABBREVIATIONS);
-                const filteredTypeSummary = summarizeAbbreviatedValues(infoMetrics.matchedTypeValues, TYPE_ABBREVIATIONS);
-                const filteredDirectionSummary = summarizeAbbreviatedValues(infoMetrics.matchedDirectionValues, DIRECTION_ABBREVIATIONS);
-                const bottomParts: string[] = [];
-                if (filteredTypeSummary !== totalTypeSummary || quickFilterFiltersOutAnyMessage) bottomParts.push(`types: ${filteredTypeSummary}`);
-                if (filteredDirectionSummary !== totalDirectionSummary || quickFilterFiltersOutAnyMessage) bottomParts.push(`dirs: ${filteredDirectionSummary}`);
-                topNode = <span style={infoChipStyle}>types: {totalTypeSummary} / dirs: {totalDirectionSummary}</span>;
-                bottomNode = <span style={infoChipBottomStyle}>{bottomParts.join(' / ')}</span>;
-              } else if (c.id === 'dpt') {
-                const totalMainCount = countDistinctValues(allBufferDptMains ?? infoMetrics.displayedDptMainValues);
-                const totalMainSubCount = countDistinctValues(allBufferDptMainSubs ?? infoMetrics.displayedDptMainSubValues);
-                const filteredMainCount = countDistinctValues(infoMetrics.matchedDptMainValues);
-                const filteredMainSubCount = countDistinctValues(infoMetrics.matchedDptMainSubValues);
-                const bottomParts: string[] = [];
-                if (filteredMainCount !== totalMainCount || quickFilterFiltersOutAnyMessage) bottomParts.push(`main: ${filteredMainCount}`);
-                if (filteredMainSubCount !== totalMainSubCount || quickFilterFiltersOutAnyMessage) bottomParts.push(`DPT: ${filteredMainSubCount}`);
-                topNode = <span style={infoChipStyle}>main: {totalMainCount} / DPT: {totalMainSubCount}</span>;
-                bottomNode = <span style={infoChipBottomStyle}>{bottomParts.join(' / ')}</span>;
-              } else if (c.id === 'value') {
-                const totalInBuffer = allBufferMessageCount ?? infoMetrics.count;
-                const filteredMessageCount = Math.max(0, infoMetrics.count - infoMetrics.contextCount);
-                const showFilteredMessageCount = filteredMessageCount !== totalInBuffer;
-                topNode = (
-                  <span style={infoChipStyle}>
-                    <span>msg: {totalInBuffer} / buf: {bufferCapacity ?? '-'}, marks:</span>
+              if (infoMetrics) {
+                if (c.id === 'time' && infoMetrics.count > 0) {
+                  topNode = (
                     <button
-                      style={markedToggleCount > 0
-                        ? (valueRowFilter === 'marked' ? infoCountBtnActiveStyle : infoCountBtnStyle)
-                        : infoCountBtnDisabledStyle}
-                      title="Marked message count"
-                      disabled={markedToggleCount === 0}
-                      aria-pressed={valueRowFilter === 'marked'}
+                      style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
+                      title="Jump to the oldest telegram in the current view"
                       onClick={() => {
-                        if (markedToggleCount === 0) return;
-                        setValueRowFilter(prev => (prev === 'marked' ? 'none' : 'marked'));
+                        markSingleRowByIndex(infoMetrics.oldestIdx);
+                        gotoIndex(infoMetrics.oldestIdx);
                       }}
                     >
-                      {markedToggleCount}
+                      Oldest: {format(new Date(telegramRows[infoMetrics.oldestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
                     </button>
-                    <span>context marks:</span>
+                  );
+                  bottomNode = (
                     <button
-                      style={flaggedToggleCount > 0
-                        ? (valueRowFilter === 'flagged' ? infoCountBtnActiveStyle : infoCountBtnStyle)
-                        : infoCountBtnDisabledStyle}
-                      title="Context-marked message count"
-                      disabled={flaggedToggleCount === 0}
-                      aria-pressed={valueRowFilter === 'flagged'}
+                      style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
+                      title="Jump to the newest telegram in the current view"
                       onClick={() => {
-                        if (flaggedToggleCount === 0) return;
-                        setValueRowFilter(prev => (prev === 'flagged' ? 'none' : 'flagged'));
+                        markSingleRowByIndex(infoMetrics.newestIdx);
+                        gotoIndex(infoMetrics.newestIdx);
                       }}
                     >
-                      {flaggedToggleCount}
+                      Newest: {format(new Date(telegramRows[infoMetrics.newestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
                     </button>
-                  </span>
-                );
-                bottomNode = (
-                  <span style={infoChipBottomStyle}>
-                    {showFilteredMessageCount
-                      ? `${filteredMessageCount} filtered${infoMetrics.contextCount > 0 ? ` (${infoMetrics.contextCount})` : ''}`
-                      : ''}
-                  </span>
-                );
+                  );
+                } else if (c.id === 'delta' && infoMetrics.count > 0) {
+                  topNode = infoMetrics.minDeltaIdx !== -1 ? (
+                    <button
+                      style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
+                      title="Jump to the smallest time gap in the current view"
+                      onClick={() => {
+                        markSingleRowByIndex(infoMetrics.minDeltaIdx);
+                        gotoIndex(infoMetrics.minDeltaIdx);
+                      }}
+                    >
+                      Min Δt: {telegramRows[infoMetrics.minDeltaIdx].deltaStr}
+                    </button>
+                  ) : <span style={infoChipStyle}>Min Δt: -</span>;
+                  bottomNode = infoMetrics.maxDeltaIdx !== -1 ? (
+                    <button
+                      style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
+                      title="Jump to the largest time gap in the current view"
+                      onClick={() => {
+                        markSingleRowByIndex(infoMetrics.maxDeltaIdx);
+                        gotoIndex(infoMetrics.maxDeltaIdx);
+                      }}
+                    >
+                      Max Δt: {telegramRows[infoMetrics.maxDeltaIdx].deltaStr}
+                    </button>
+                  ) : <span style={infoChipStyle}>Max Δt: -</span>;
+                } else if (c.id === 'source') {
+                  const allSourcesInBuffer = allBufferSourceCount ?? infoMetrics.displayedSourceCount;
+                  const showFilteredSourceContent = infoMetrics.matchedSourceCount !== allSourcesInBuffer;
+                  topNode = <span style={infoChipStyle}>buffer: {allSourcesInBuffer} / {projectSourceCount ?? '-'}</span>;
+                  bottomNode = infoMetrics.count === 0 || !showFilteredSourceContent
+                    ? <span style={infoChipBottomStyle} />
+                    : (
+                      <span style={infoChipBottomStyle}>
+                        <button
+                          style={infoCountBtnBottomStyle}
+                          title="Filtered source-device count"
+                          onClick={() => {}}
+                        >
+                          {infoMetrics.matchedSourceCount}
+                        </button>
+                        <span>filtered</span>
+                        {infoMetrics.contextualOnlySourceCount > 0 && (
+                          <>
+                            <span>(</span>
+                            <button
+                              style={infoCountBtnBottomStyle}
+                              title="Contextual source-device count"
+                              onClick={() => {}}
+                            >
+                              {infoMetrics.contextualOnlySourceCount}
+                            </button>
+                            <span>)</span>
+                          </>
+                        )}
+                      </span>
+                    );
+                } else if (c.id === 'target') {
+                  const allTargetsInBuffer = allBufferTargetCount ?? infoMetrics.displayedTargetCount;
+                  const showFilteredTargetContent = infoMetrics.matchedTargetCount !== allTargetsInBuffer;
+                  topNode = <span style={infoChipStyle}>buffer: {allTargetsInBuffer} / {projectTargetCount ?? '-'}</span>;
+                  bottomNode = infoMetrics.count === 0 || !showFilteredTargetContent
+                    ? <span style={infoChipBottomStyle} />
+                    : (
+                      <span style={infoChipBottomStyle}>
+                        <button
+                          style={infoCountBtnBottomStyle}
+                          title="Filtered target-device count"
+                          onClick={() => {}}
+                        >
+                          {infoMetrics.matchedTargetCount}
+                        </button>
+                        <span>filtered</span>
+                        {infoMetrics.contextualOnlyTargetCount > 0 && (
+                          <>
+                            <span>(</span>
+                            <button
+                              style={infoCountBtnBottomStyle}
+                              title="Contextual target-device count"
+                              onClick={() => {}}
+                            >
+                              {infoMetrics.contextualOnlyTargetCount}
+                            </button>
+                            <span>)</span>
+                          </>
+                        )}
+                      </span>
+                    );
+                } else if (c.id === 'type') {
+                  const totalTypeSummary = summarizeAbbreviatedValues(allBufferTypes ?? infoMetrics.displayedTypeValues, TYPE_ABBREVIATIONS);
+                  const totalDirectionSummary = summarizeAbbreviatedValues(allBufferDirections ?? infoMetrics.displayedDirectionValues, DIRECTION_ABBREVIATIONS);
+                  const filteredTypeSummary = summarizeAbbreviatedValues(infoMetrics.matchedTypeValues, TYPE_ABBREVIATIONS);
+                  const filteredDirectionSummary = summarizeAbbreviatedValues(infoMetrics.matchedDirectionValues, DIRECTION_ABBREVIATIONS);
+                  const bottomParts: string[] = [];
+                  if (filteredTypeSummary !== totalTypeSummary || quickFilterFiltersOutAnyMessage) bottomParts.push(`types: ${filteredTypeSummary}`);
+                  if (filteredDirectionSummary !== totalDirectionSummary || quickFilterFiltersOutAnyMessage) bottomParts.push(`dirs: ${filteredDirectionSummary}`);
+                  topNode = <span style={infoChipStyle}>types: {totalTypeSummary} / dirs: {totalDirectionSummary}</span>;
+                  bottomNode = infoMetrics.count === 0
+                    ? <span style={infoChipBottomStyle} />
+                    : <span style={infoChipBottomStyle}>{bottomParts.join(' / ')}</span>;
+                } else if (c.id === 'dpt') {
+                  const totalMainCount = countDistinctValues(allBufferDptMains ?? infoMetrics.displayedDptMainValues);
+                  const totalMainSubCount = countDistinctValues(allBufferDptMainSubs ?? infoMetrics.displayedDptMainSubValues);
+                  const filteredMainCount = countDistinctValues(infoMetrics.matchedDptMainValues);
+                  const filteredMainSubCount = countDistinctValues(infoMetrics.matchedDptMainSubValues);
+                  const bottomParts: string[] = [];
+                  if (filteredMainCount !== totalMainCount || quickFilterFiltersOutAnyMessage) bottomParts.push(`main: ${filteredMainCount}`);
+                  if (filteredMainSubCount !== totalMainSubCount || quickFilterFiltersOutAnyMessage) bottomParts.push(`DPT: ${filteredMainSubCount}`);
+                  topNode = <span style={infoChipStyle}>main: {totalMainCount} / DPT: {totalMainSubCount}</span>;
+                  bottomNode = infoMetrics.count === 0
+                    ? <span style={infoChipBottomStyle} />
+                    : <span style={infoChipBottomStyle}>{bottomParts.join(' / ')}</span>;
+                } else if (c.id === 'value') {
+                  const totalInBuffer = allBufferMessageCount ?? infoMetrics.count;
+                  const filteredMessageCount = Math.max(0, infoMetrics.count - infoMetrics.contextCount);
+                  const showFilteredMessageCount = filteredMessageCount !== totalInBuffer;
+                  topNode = (
+                    <span style={infoChipStyle}>
+                      <span>msg: {totalInBuffer} / buf: {bufferCapacity ?? '-'}, marks:</span>
+                      <button
+                        style={markedToggleCount > 0
+                          ? (valueRowFilter === 'marked' ? infoCountBtnActiveStyle : infoCountBtnStyle)
+                          : infoCountBtnDisabledStyle}
+                        title="Marked message count"
+                        disabled={markedToggleCount === 0}
+                        aria-pressed={valueRowFilter === 'marked'}
+                        onClick={() => {
+                          if (markedToggleCount === 0) return;
+                          setValueRowFilter(prev => (prev === 'marked' ? 'none' : 'marked'));
+                        }}
+                      >
+                        {markedToggleCount}
+                      </button>
+                      <span>context marks:</span>
+                      <button
+                        style={flaggedToggleCount > 0
+                          ? (valueRowFilter === 'flagged' ? infoCountBtnActiveStyle : infoCountBtnStyle)
+                          : infoCountBtnDisabledStyle}
+                        title="Context-marked message count"
+                        disabled={flaggedToggleCount === 0}
+                        aria-pressed={valueRowFilter === 'flagged'}
+                        onClick={() => {
+                          if (flaggedToggleCount === 0) return;
+                          setValueRowFilter(prev => (prev === 'flagged' ? 'none' : 'flagged'));
+                        }}
+                      >
+                        {flaggedToggleCount}
+                      </button>
+                    </span>
+                  );
+                  bottomNode = infoMetrics.count === 0
+                    ? <span style={infoChipBottomStyle} />
+                    : (
+                      <span style={infoChipBottomStyle}>
+                        {showFilteredMessageCount
+                          ? `${filteredMessageCount} filtered${infoMetrics.contextCount > 0 ? ` (${infoMetrics.contextCount})` : ''}`
+                          : ''}
+                      </span>
+                    );
+                }
               }
 
               return (
@@ -2161,7 +2196,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             rows — top row top-aligned, middle row centered, bottom row bottom-aligned. */}
         <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', gap: '0.15rem' }}>
-            {quickInfoEnabled && !infoOpen && (
+            {showInfoBarToggle && (
               <button
                 className="quick-filter-bar-toggle"
                 onClick={toggleInfoOpen}
