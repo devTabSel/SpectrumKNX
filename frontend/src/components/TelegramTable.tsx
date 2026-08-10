@@ -8,9 +8,14 @@ import { SendToGaPopover } from './SendToGaPopover';
 import { GotoTimeControl } from './GotoTimeControl';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
-import { makeAddressPatternMatcher } from '../utils/addressPattern';
-import { makeValueMatcher } from '../utils/valuePattern';
 import { anchorKey } from '../utils/anchorKey';
+import {
+  compileQuickFilters,
+  DEFAULT_QUICK_FILTER_COLUMN_ENABLED,
+  type ColId,
+  type QuickCellValue,
+  type QuickFilterColumnEnabled,
+} from '../utils/quickFilter';
 
 export type { SortKey, SortLevel, SortConfig };
 
@@ -29,6 +34,8 @@ export interface TelegramTableQuickFilterConfig {
   onEnabledChange?: (enabled: boolean) => void;
   patterns?: Partial<Record<ColId, QuickCellValue>>;
   onPatternsChange?: (patterns: Partial<Record<ColId, QuickCellValue>>) => void;
+  columnEnabled?: QuickFilterColumnEnabled;
+  onColumnEnabledChange?: (enabled: QuickFilterColumnEnabled) => void;
 }
 
 export interface TelegramTableRowMarksConfig {
@@ -105,6 +112,8 @@ interface TelegramTableProps {
   onQuickFilterEnabledChange?: (enabled: boolean) => void;
   quickPatterns?: Partial<Record<ColId, QuickCellValue>>;
   onQuickPatternsChange?: (patterns: Partial<Record<ColId, QuickCellValue>>) => void;
+  quickFilterColumnEnabled?: QuickFilterColumnEnabled;
+  onQuickFilterColumnEnabledChange?: (enabled: QuickFilterColumnEnabled) => void;
   /** Edits the Time-Delta-Context window (#309, #371) — moved here from the
    * filter pane; current values come from `activeFilters.deltaBeforeMs/deltaAfterMs`. */
   onDeltaContextChange?: (deltaBeforeMs: number, deltaAfterMs: number) => void;
@@ -139,16 +148,6 @@ interface TelegramTableProps {
   contextKeys?: ReadonlySet<string>;
 }
 
-type ColId = 'time' | 'delta' | 'source' | 'target' | 'type' | 'dpt' | 'value';
-
-// A quick-filter cell's two input rows (#309). Most columns use both (address/DPT
-// pattern + name regex on source/target/dpt; from/to on time/value); TYPE only
-// uses `top` (a comma-separated fixed-value list); `delta` isn't matched through
-// this pipeline at all — its two rows edit the Time-Delta-Context window instead.
-interface QuickCellValue {
-  top: string;
-  bottom: string;
-}
 const EMPTY_CELL: QuickCellValue = { top: '', bottom: '' };
 
 interface ColumnDef {
@@ -256,94 +255,13 @@ const ROW_ESTIMATE = 85; // matches the virtualizer's estimateSize
 // comma-separated fixed-value list); DELTA doesn't participate here at all —
 // it edits the Time-Delta-Context window instead (#371).
 
-/** Case-insensitive regex matcher; an invalid pattern degrades to a literal substring match. */
-const makeTextMatcher = (pattern: string): ((s: string) => boolean) => {
-  try {
-    const re = new RegExp(pattern, 'i');
-    return s => re.test(s);
-  } catch {
-    const lower = pattern.toLowerCase();
-    return s => s.toLowerCase().includes(lower);
-  }
-};
-
-/** Builds one combined predicate from all active quick-filter cells, so
- * patterns are compiled once per change rather than per telegram. */
-const compileQuickFilters = (
-  patterns: Partial<Record<ColId, QuickCellValue>>,
-  enabledColumns: Record<ColId, boolean>,
-): ((t: Telegram) => boolean) => {
-  const checks: ((t: Telegram) => boolean)[] = [];
-
-  const time = patterns.time;
-  if (enabledColumns.time !== false && (time?.top || time?.bottom)) {
-    const from = time.top ? new Date(time.top).getTime() : null;
-    const to = time.bottom ? new Date(time.bottom).getTime() : null;
-    checks.push(t => {
-      const ts = new Date(t.timestamp).getTime();
-      if (from != null && !Number.isNaN(from) && ts < from) return false;
-      if (to != null && !Number.isNaN(to) && ts > to) return false;
-      return true;
-    });
-  }
-
-  const source = patterns.source;
-  if (enabledColumns.source !== false && source?.top) {
-    const m = makeAddressPatternMatcher(source.top);
-    checks.push(t => m(t.source_address));
-  }
-  if (enabledColumns.source !== false && source?.bottom) {
-    const m = makeTextMatcher(source.bottom);
-    checks.push(t => m(t.source_name ?? ''));
-  }
-
-  const target = patterns.target;
-  if (enabledColumns.target !== false && target?.top) {
-    const m = makeAddressPatternMatcher(target.top);
-    checks.push(t => m(t.target_address));
-  }
-  if (enabledColumns.target !== false && target?.bottom) {
-    const m = makeTextMatcher(target.bottom);
-    checks.push(t => m(t.target_name ?? ''));
-  }
-
-  const type = patterns.type;
-  if (enabledColumns.type !== false && type?.top) {
-    const values = type.top.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-    if (values.length > 0) {
-      checks.push(t => {
-        const typeVal = (t.simplified_type || t.telegram_type || '').toLowerCase();
-        const dirVal = (t.direction ?? '').toLowerCase();
-        return values.some(v => v === typeVal || v === dirVal);
-      });
-    }
-  }
-
-  const dpt = patterns.dpt;
-  if (enabledColumns.dpt !== false && dpt?.top) {
-    const m = makeAddressPatternMatcher(dpt.top);
-    checks.push(t => t.dpt_main != null && m(dptKey(t.dpt_main, t.dpt_sub)));
-  }
-  if (enabledColumns.dpt !== false && dpt?.bottom) {
-    const m = makeTextMatcher(dpt.bottom);
-    checks.push(t => m(t.dpt_name ?? ''));
-  }
-
-  const value = patterns.value;
-  if (enabledColumns.value !== false && (value?.top || value?.bottom)) {
-    const m = makeValueMatcher(value.top ?? '', value.bottom ?? '');
-    checks.push(m);
-  }
-
-  if (checks.length === 0) return () => true;
-  return t => checks.every(check => check(t));
-};
 
 export const TelegramTable: React.FC<TelegramTableProps> = ({
   instanceId = 'default',
   tableConfig,
   telegrams, visibleColumns, sortConfig, onSort, activeFilters, onQuickFilter, onQuickVisualize, onQuickLastSeen, canSend,
   quickFilterOpen, onQuickFilterOpenChange, quickFilterEnabled, onQuickFilterEnabledChange, quickPatterns, onQuickPatternsChange,
+  quickFilterColumnEnabled, onQuickFilterColumnEnabledChange,
   onDeltaContextChange, onDeltaContextEnabledChange,
   listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
   markedKeys, onMarkedKeysChange, lastMarkedKey, onLastMarkedKeyChange,
@@ -369,6 +287,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const effectiveOnQuickFilterEnabledChange = tableConfig?.quickFilter?.onEnabledChange ?? onQuickFilterEnabledChange;
   const effectiveQuickPatterns = tableConfig?.quickFilter?.patterns ?? quickPatterns;
   const effectiveOnQuickPatternsChange = tableConfig?.quickFilter?.onPatternsChange ?? onQuickPatternsChange;
+  const effectiveQuickFilterColumnEnabled = tableConfig?.quickFilter?.columnEnabled ?? quickFilterColumnEnabled;
+  const effectiveOnQuickFilterColumnEnabledChange = tableConfig?.quickFilter?.onColumnEnabledChange ?? onQuickFilterColumnEnabledChange;
 
   const effectiveMarkedKeys = tableConfig?.rowMarks?.markedKeys ?? markedKeys;
   const effectiveOnMarkedKeysChange = tableConfig?.rowMarks?.onMarkedKeysChange ?? onMarkedKeysChange;
@@ -454,15 +374,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const [internalQuickOpen, setInternalQuickOpen] = useState(false);
   const [internalQuickEnabled, setInternalQuickEnabled] = useState(false);
   const [internalQuickPatterns, setInternalQuickPatterns] = useState<Partial<Record<ColId, QuickCellValue>>>({});
-  const [quickColumnEnabled, setQuickColumnEnabled] = useState<Record<ColId, boolean>>({
-    time: true,
-    delta: true,
-    source: true,
-    target: true,
-    type: true,
-    dpt: true,
-    value: true,
-  });
+  const [internalQuickColumnEnabled, setInternalQuickColumnEnabled] = useState<QuickFilterColumnEnabled>(DEFAULT_QUICK_FILTER_COLUMN_ENABLED);
 
   const quickOpen = effectiveQuickFilterOpen ?? internalQuickOpen;
   const setQuickOpen = useCallback((val: boolean | ((prev: boolean) => boolean)) => {
@@ -484,16 +396,56 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     setInternalQuickPatterns(next);
     effectiveOnQuickPatternsChange?.(next);
   }, [currentPatterns, effectiveOnQuickPatternsChange]);
+  const currentQuickColumnEnabled = effectiveQuickFilterColumnEnabled ?? internalQuickColumnEnabled;
+  const setQuickColumnEnabled = useCallback((val: QuickFilterColumnEnabled | ((prev: QuickFilterColumnEnabled) => QuickFilterColumnEnabled)) => {
+    const next = typeof val === 'function' ? val(currentQuickColumnEnabled) : val;
+    setInternalQuickColumnEnabled(next);
+    effectiveOnQuickFilterColumnEnabledChange?.(next);
+  }, [currentQuickColumnEnabled, effectiveOnQuickFilterColumnEnabledChange]);
 
   /** Updates one row (top/bottom) of a quick-filter cell, preserving the other row. */
   const setQuickCell = useCallback((id: ColId, row: 'top' | 'bottom', text: string) => {
     setQuickPatterns(prev => ({ ...prev, [id]: { ...(prev[id] ?? EMPTY_CELL), [row]: text } }));
   }, [setQuickPatterns]);
 
-  const isQuickColumnEnabled = useCallback((id: ColId) => quickColumnEnabled[id] !== false, [quickColumnEnabled]);
+  const clearQuickColumnInputs = useCallback((id: ColId) => {
+    if (id === 'delta') {
+      onDeltaContextChange?.(0, 0);
+      return;
+    }
+    setQuickPatterns(prev => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, [onDeltaContextChange, setQuickPatterns]);
+
+  const clearAllQuickInputs = useCallback(() => {
+    setQuickPatterns({});
+    onDeltaContextChange?.(0, 0);
+  }, [onDeltaContextChange, setQuickPatterns]);
+
+  const isQuickColumnEnabled = useCallback((id: ColId) => currentQuickColumnEnabled[id] !== false, [currentQuickColumnEnabled]);
   const toggleQuickColumnEnabled = useCallback((id: ColId) => {
     setQuickColumnEnabled(prev => ({ ...prev, [id]: prev[id] === false }));
-  }, []);
+  }, [setQuickColumnEnabled]);
+
+  const handleQuickColumnToggleClick = useCallback((e: React.MouseEvent, id: ColId) => {
+    if (e.ctrlKey || e.metaKey) {
+      clearQuickColumnInputs(id);
+      return;
+    }
+    toggleQuickColumnEnabled(id);
+  }, [clearQuickColumnInputs, toggleQuickColumnEnabled]);
+
+  const handleQuickEnabledToggleClick = useCallback((e: React.MouseEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+      clearAllQuickInputs();
+      return;
+    }
+    setQuickEnabled(prev => !prev);
+  }, [clearAllQuickInputs, setQuickEnabled]);
 
   const toggleQuickOpen = () => {
     const nextOpen = !quickOpen;
@@ -544,26 +496,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     effectiveOnFlaggedKeysChange?.(val);
   }, [effectiveOnFlaggedKeysChange]);
   const flaggedSet = useMemo(() => new Set(flaggedKeysList), [flaggedKeysList]);
-
-  // Toggles one row's flag; ctrl/cmd-click applies the new state to every
-  // currently marked row too (#310's marks, reused as a multi-select basis).
-  const handleFlagClick = useCallback((e: React.MouseEvent, key: string) => {
-    if (!rowFlagsEnabled) return;
-    e.stopPropagation();
-    const nextOn = !flaggedSet.has(key);
-    const targets = (e.ctrlKey || e.metaKey) ? new Set([...markedKeysList, key]) : new Set([key]);
-    setFlaggedKeysList(
-      nextOn
-        ? [...new Set([...flaggedKeysList, ...targets])]
-        : flaggedKeysList.filter(k => !targets.has(k))
-    );
-  }, [flaggedSet, flaggedKeysList, markedKeysList, setFlaggedKeysList, rowFlagsEnabled]);
+  const lastFlaggedKeyRef = useRef<string | null>(null);
 
   const quickFiltered = useMemo(() => {
     if (!quickFilterFeatureEnabled || !quickOpen || !quickEnabled) return telegrams;
-    const matches = compileQuickFilters(currentPatterns, quickColumnEnabled);
-    return telegrams.filter(matches);
-  }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, currentPatterns, quickColumnEnabled]);
+    const matches = compileQuickFilters(currentPatterns, currentQuickColumnEnabled);
+    return telegrams.filter(t => matches(t) || !!contextKeys?.has(anchorKey(t)));
+  }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, currentPatterns, currentQuickColumnEnabled, contextKeys]);
 
   const timeSortDirection: 'asc' | 'desc' | null =
     effectiveSortConfig[0]?.key === 'timestamp' ? effectiveSortConfig[0].direction : null;
@@ -641,6 +580,97 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   }, [exitDeltaSort, effectiveOnSort]);
 
   const telegramRows = deltaSortActive && deltaFrozenRows ? deltaFrozenRows : naturalTelegramRows;
+
+  const applyRowMarkSelection = useCallback((e: React.MouseEvent, key: string, index: number) => {
+    if (!rowMarksEnabled) return;
+    const additive = e.ctrlKey || e.metaKey;
+    const range = e.shiftKey;
+    if (additive || range) {
+      e.preventDefault();
+      window.getSelection()?.removeAllRanges();
+    }
+
+    let nextKeys: string[];
+    if (range) {
+      const anchorIdx = lastMarked ? telegramRows.findIndex(r => anchorKey(r) === lastMarked) : -1;
+      let rangeKeys: string[];
+      if (anchorIdx === -1) {
+        rangeKeys = [key];
+      } else {
+        const lo = Math.min(anchorIdx, index);
+        const hi = Math.max(anchorIdx, index);
+        rangeKeys = telegramRows.slice(lo, hi + 1).map(r => anchorKey(r));
+      }
+      nextKeys = additive ? [...new Set([...markedKeysList, ...rangeKeys])] : rangeKeys;
+    } else if (additive) {
+      nextKeys = markedSet.has(key) ? markedKeysList.filter(markedKey => markedKey !== key) : [...markedKeysList, key];
+    } else {
+      nextKeys = [key];
+    }
+
+    setMarkedKeysList(nextKeys);
+    setLastMarked(key);
+  }, [lastMarked, markedKeysList, markedSet, rowMarksEnabled, setLastMarked, setMarkedKeysList, telegramRows]);
+
+  // Message-context flags follow the row-click semantics: plain click sets only
+  // this row, ctrl/cmd toggles just this row, shift sets a range, and
+  // ctrl/cmd+shift applies the range-begin flag state to the whole range.
+  const handleFlagClick = useCallback((e: React.MouseEvent, key: string) => {
+    if (!rowFlagsEnabled) return;
+    e.stopPropagation();
+    const additive = e.ctrlKey || e.metaKey;
+    const range = e.shiftKey;
+    if (additive || range) {
+      e.preventDefault();
+      window.getSelection()?.removeAllRanges();
+    }
+    const el = parentRef.current;
+    const row = el?.querySelector<HTMLElement>(`[data-akey="${CSS.escape(key)}"]`);
+    if (el && row) {
+      anchorRef.current = {
+        key,
+        offset: row.getBoundingClientRect().top - el.getBoundingClientRect().top,
+      };
+      atEdgeRef.current = false;
+      onListFollowChange?.(false);
+      onListAnchorKeyChange?.(key);
+      setNewSinceAnchor(0);
+    }
+    const currentIdx = telegramRows.findIndex(r => anchorKey(r) === key);
+    if (currentIdx !== -1) {
+      applyRowMarkSelection(e, key, currentIdx);
+    }
+
+    let nextKeys: string[];
+    if (range) {
+      const anchorKeyForRange = lastFlaggedKeyRef.current;
+      const anchorIdx = anchorKeyForRange ? telegramRows.findIndex(r => anchorKey(r) === anchorKeyForRange) : -1;
+      const currentIdx = telegramRows.findIndex(r => anchorKey(r) === key);
+      const rangeKeys = anchorIdx === -1 || currentIdx === -1
+        ? [key]
+        : telegramRows
+          .slice(Math.min(anchorIdx, currentIdx), Math.max(anchorIdx, currentIdx) + 1)
+          .map(r => anchorKey(r));
+
+      if (additive) {
+        const anchorFlagState = anchorKeyForRange ? flaggedSet.has(anchorKeyForRange) : flaggedSet.has(key);
+        nextKeys = anchorFlagState
+          ? [...new Set([...flaggedKeysList, ...rangeKeys])]
+          : flaggedKeysList.filter(flaggedKey => !rangeKeys.includes(flaggedKey));
+      } else {
+        nextKeys = [...new Set(rangeKeys)];
+      }
+    } else if (additive) {
+      nextKeys = flaggedSet.has(key)
+        ? flaggedKeysList.filter(flaggedKey => flaggedKey !== key)
+        : [...flaggedKeysList, key];
+    } else {
+      nextKeys = [key];
+    }
+
+    setFlaggedKeysList(nextKeys);
+    lastFlaggedKeyRef.current = key;
+  }, [applyRowMarkSelection, flaggedSet, flaggedKeysList, onListAnchorKeyChange, onListFollowChange, rowFlagsEnabled, setFlaggedKeysList, telegramRows]);
 
   // ── Global Time-Delta-Context tristate (#318, #319) ─────────────────────────
   // Reflects the per-message flags among the currently visible rows: none set,
@@ -821,39 +851,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // scrolling away (#266) — the row being read must not move. The jump-to-live
   // pill is the way back.
   const handleRowClick = (e: React.MouseEvent, key: string, index: number) => {
-    if (rowMarksEnabled) {
-    // ── Marks (#310) ──
-    const additive = e.ctrlKey || e.metaKey;
-    const range = e.shiftKey;
-    if (additive || range) {
-      // A modified click must not also start a native text selection.
-      e.preventDefault();
-      window.getSelection()?.removeAllRanges();
-    }
-
-    let nextKeys: string[];
-    if (range) {
-      // Range over the current visible order, from the last-clicked row to here.
-      const anchorIdx = lastMarked ? telegramRows.findIndex(r => anchorKey(r) === lastMarked) : -1;
-      let rangeKeys: string[];
-      if (anchorIdx === -1) {
-        rangeKeys = [key]; // no usable anchor → just this row
-      } else {
-        const lo = Math.min(anchorIdx, index);
-        const hi = Math.max(anchorIdx, index);
-        rangeKeys = telegramRows.slice(lo, hi + 1).map(r => anchorKey(r));
-      }
-      nextKeys = additive ? [...new Set([...markedKeysList, ...rangeKeys])] : rangeKeys;
-    } else if (additive) {
-      // Toggle this row, keeping the rest.
-      nextKeys = markedSet.has(key) ? markedKeysList.filter(k => k !== key) : [...markedKeysList, key];
-    } else {
-      // Plain click replaces the whole set.
-      nextKeys = [key];
-    }
-    setMarkedKeysList(nextKeys);
-    setLastMarked(key);
-    }
+    applyRowMarkSelection(e, key, index);
 
     // ── Pause live-following on an edge click (#266), unchanged ──
     if (!isTimeSort || !atEdgeRef.current) return;
@@ -1416,8 +1414,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               quickOpen ? (
                 <button
                   className={`quick-filter-bar-toggle ${quickEnabled ? 'open' : ''}`}
-                  onClick={() => setQuickEnabled(e => !e)}
-                  title={quickEnabled ? 'Disable quick filter (keeps patterns)' : 'Enable quick filter'}
+                  onClick={handleQuickEnabledToggleClick}
+                  title={quickEnabled
+                    ? 'Disable quick filter (keeps patterns) · ctrl/cmd-click clears all quick-filter cells'
+                    : 'Enable quick filter · ctrl/cmd-click clears all quick-filter cells'}
                 >
                   <Filter size={13} />
                 </button>
@@ -1480,10 +1480,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               {quickOpen && quickEnabled && (
                 <button
                   className={`quick-filter-bar-toggle ${quickEnabled && isQuickColumnEnabled(c.id) ? 'open' : ''}`}
-                  onClick={() => toggleQuickColumnEnabled(c.id)}
+                  onClick={(e) => handleQuickColumnToggleClick(e, c.id)}
                   title={isQuickColumnEnabled(c.id)
-                    ? `Disable quick filter for ${c.label}`
-                    : `Enable quick filter for ${c.label}`}
+                    ? `Disable quick filter for ${c.label} · ctrl/cmd-click clears this column's quick-filter cells`
+                    : `Enable quick filter for ${c.label} · ctrl/cmd-click clears this column's quick-filter cells`}
                 >
                   <Filter size={12} />
                 </button>
@@ -1507,10 +1507,30 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           before/after, #371) which don't go through the pattern pipeline. */}
       {quickFilterFeatureEnabled && quickOpen && (
         <div style={{ display: 'flex', background: 'var(--bg-subtle)', borderBottom: '1px solid var(--border-color)', flexShrink: 0, opacity: quickEnabled ? 1 : 0.5 }}>
-          {/* Left icon rail (#341): two rows — first row empty, hide-arrow on
-              the second row. */}
+          {/* Left icon rail (#341): DELTA window toggle on the first row,
+              hide-arrow on the second row. */}
           <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
-            <div style={{ flex: 1, display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }} />
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              {rowFlagsEnabled && (
+                <button
+                  className={`quick-filter-bar-toggle ${deltaFlagState !== 'none' ? 'open' : ''}`}
+                  onClick={handleDeltaToggleClick}
+                  title={[
+                    `Time-Delta-Context: ${deltaFlagState} messages flagged.`,
+                    deltaFlagState === 'some' ? 'Click to clear all flags.' : deltaFlagState === 'all' ? 'Click to clear all flags.' : 'Click to flag every visible message.',
+                    activeFilters.deltaContextEnabled
+                      ? 'Ctrl/cmd-click to disable the window (keeps flags and values).'
+                      : 'Ctrl/cmd-click to re-enable the window.',
+                  ].join(' ')}
+                  style={{
+                    opacity: activeFilters.deltaContextEnabled ? 1 : 0.5,
+                    color: deltaFlagState === 'all' ? 'var(--accent-primary)' : undefined,
+                  }}
+                >
+                  <Power size={12} />
+                </button>
+              )}
+            </div>
             <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
               <button
                 className="quick-filter-bar-toggle open"
@@ -1542,27 +1562,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', minWidth: 0, flex: 1 }}>
                 {c.id === 'delta' ? (
                   <>
-                    {rowFlagsEnabled && (
-                      <button
-                        className={`quick-filter-bar-toggle ${deltaFlagState !== 'none' ? 'open' : ''}`}
-                        onClick={handleDeltaToggleClick}
-                        title={[
-                          `Time-Delta-Context: ${deltaFlagState} messages flagged.`,
-                          deltaFlagState === 'some' ? 'Click to clear all flags.' : deltaFlagState === 'all' ? 'Click to clear all flags.' : 'Click to flag every visible message.',
-                          activeFilters.deltaContextEnabled
-                            ? 'Ctrl/cmd-click to disable the window (keeps flags and values).'
-                            : 'Ctrl/cmd-click to re-enable the window.',
-                        ].join(' ')}
-                        style={{
-                          width: 'fit-content',
-                          opacity: isQuickColumnEnabled(c.id) ? (activeFilters.deltaContextEnabled ? 1 : 0.5) : 0.45,
-                          color: deltaFlagState === 'all' ? 'var(--accent-primary)' : undefined,
-                        }}
-                        disabled={!isQuickColumnEnabled(c.id)}
-                      >
-                        <Power size={12} />
-                      </button>
-                    )}
                     <input
                       className="quick-filter-bar-input"
                       type="number" min={0} step={10}
@@ -1725,7 +1724,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               const latest = marked && key === lastMarked;
               // Present only as unfiltered Time-Delta-Context, not a real filter
               // match (#343) — a distinct wash, but marks still take priority.
-              const isContext = !marked && !!contextKeys?.has(key);
+              const hasContext = !!contextKeys?.has(key);
+              const isContext = !marked && hasContext;
               const flagged = flaggedSet.has(key);
               return (
                 <div
@@ -1764,7 +1764,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   {/* Left icon rail (#341): single row, vertically centered —
                       the message-context (Time-Delta-Context) flag toggle. */}
                   <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    {rowFlagsEnabled && (
+                    {rowFlagsEnabled && !hasContext && (
                       <button
                         style={{
                           background: 'transparent', border: 'none', cursor: 'pointer', padding: '0.15rem',

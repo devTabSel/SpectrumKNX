@@ -16,7 +16,13 @@ import {
   DEFAULT_UI_STATE,
 } from './utils/uiState';
 import { DeviceStatusOverlay } from './components/DeviceStatusOverlay';
-import { TelegramTable, type SortConfig, type SortKey, type TelegramTableConfig } from './components/TelegramTable';
+import {
+  TelegramTable,
+  type SortConfig,
+  type SortKey,
+  type TelegramTableConfig,
+} from './components/TelegramTable';
+import { compileQuickFilters, DEFAULT_QUICK_FILTER_COLUMN_ENABLED, type QuickFilterColumnEnabled } from './utils/quickFilter';
 import { expandWithDeltaContext } from './utils/deltaContextExpansion';
 import { anchorKey } from './utils/anchorKey';
 import { readSortConfigPref, writeScopedSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
@@ -228,6 +234,7 @@ function App() {
   const [quickFilterOpen, setQuickFilterOpen] = useState(initialUiState.quickFilter.open);
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(initialUiState.quickFilter.enabled);
   const [quickPatterns, setQuickPatterns] = useState(initialUiState.quickFilter.patterns);
+  const [quickFilterColumnEnabled, setQuickFilterColumnEnabled] = useState<QuickFilterColumnEnabled>(DEFAULT_QUICK_FILTER_COLUMN_ENABLED);
   const [listFollow, setListFollow] = useState(initialUiState.listFollow);
   const [listAnchorKey, setListAnchorKey] = useState<string | null>(initialUiState.listAnchorKey);
   const [infoBarOpen, setInfoBarOpen] = useState(initialUiState.infoBarOpen);
@@ -672,6 +679,8 @@ function App() {
       onEnabledChange: setQuickFilterEnabled,
       patterns: quickPatterns,
       onPatternsChange: setQuickPatterns,
+      columnEnabled: quickFilterColumnEnabled,
+      onColumnEnabledChange: setQuickFilterColumnEnabled,
     },
     rowMarks: {
       markedKeys: markedTelegramKeys,
@@ -692,6 +701,7 @@ function App() {
     quickFilterOpen,
     quickFilterEnabled,
     quickPatterns,
+    quickFilterColumnEnabled,
     markedTelegramKeys,
     lastMarkedTelegramKey,
     flaggedTelegramKeys,
@@ -715,17 +725,25 @@ function App() {
       f.directions.length === 0 &&
       f.dpts.length === 0);
 
-    const matches = sortedLiveTelegrams.map(t =>
-      noFilter ? true : matchesTelegram(t, f)
-    );
+    const quickMatches = (!quickFilterOpen || !quickFilterEnabled)
+      ? null
+      : compileQuickFilters(quickPatterns, quickFilterColumnEnabled);
+    const matches = sortedLiveTelegrams.map(t => {
+      const baseMatch = noFilter ? true : matchesTelegram(t, f);
+      if (!baseMatch) return false;
+      return quickMatches ? quickMatches(t) : true;
+    });
 
-    const { before: deltaBeforeMs, after: deltaAfterMs } = effectiveDeltaContext(f);
+    const { before: rawDeltaBeforeMs, after: rawDeltaAfterMs } = effectiveDeltaContext(f);
+    const deltaColumnEnabled = !quickFilterOpen || !quickFilterEnabled || quickFilterColumnEnabled.delta !== false;
+    const deltaBeforeMs = deltaColumnEnabled ? rawDeltaBeforeMs : 0;
+    const deltaAfterMs = deltaColumnEnabled ? rawDeltaAfterMs : 0;
     // The global toggle off (#318) suppresses per-message flags too, per its
     // "preserving all per-message flags" — inert, not cleared, while off.
     const flags = f.deltaContextEnabled ? new Set(flaggedTelegramKeys) : EMPTY_KEY_SET;
 
     return expandWithDeltaContext(sortedLiveTelegrams, matches, anchorKey, flags, deltaBeforeMs, deltaAfterMs);
-  }, [sortedLiveTelegrams, activeFilters, filtersEnabled, flaggedTelegramKeys]);
+  }, [sortedLiveTelegrams, activeFilters, filtersEnabled, flaggedTelegramKeys, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled]);
   const filteredLiveTelegrams = deltaExpandedLive.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = deltaExpandedLive.contextKeys;

@@ -17,15 +17,15 @@ describe('expandWithDeltaContext', () => {
     expect(out.contextKeys).toEqual(new Set());
   });
 
-  it('pulls in non-matching items within the before/after window of a match, tagged as context (#343)', () => {
+  it('does not pull in context rows around a plain filter match without a message-context flag', () => {
     const items = [
       item('a', '2024-01-01T10:00:00.000Z'),
       item('b', '2024-01-01T10:00:00.500Z'), // +500ms of a, not matching
       item('c', '2024-01-01T10:00:05.000Z'), // +5s of a, outside window
     ];
     const out = expandWithDeltaContext(items, [true, false, false], keyOf, new Set(), 0, 1000);
-    expect(out.items.map(keyOf)).toEqual(['a', 'b']);
-    expect(out.contextKeys).toEqual(new Set(['b']));
+    expect(out.items.map(keyOf)).toEqual(['a']);
+    expect(out.contextKeys).toEqual(new Set());
   });
 
   it('a flagged item anchors its own window even when it does not match the filter, and is not itself context', () => {
@@ -37,6 +37,17 @@ describe('expandWithDeltaContext', () => {
     const out = expandWithDeltaContext(items, [false, false, false], keyOf, new Set(['a']), 0, 1000);
     expect(out.items.map(keyOf)).toEqual(['a', 'b']);
     expect(out.contextKeys).toEqual(new Set(['b'])); // 'a' is flagged, not context
+  });
+
+  it('a context message can have its own flag and still remain context when another flagged message pulls it in', () => {
+    const items = [
+      item('a', '2024-01-01T10:00:00.000Z'),
+      item('b', '2024-01-01T10:00:00.500Z'),
+      item('c', '2024-01-01T10:00:10.000Z'),
+    ];
+    const out = expandWithDeltaContext(items, [false, false, false], keyOf, new Set(['a', 'b']), 1000, 1000);
+    expect(out.items.map(keyOf)).toEqual(['a', 'b']);
+    expect(out.contextKeys).toEqual(new Set(['a', 'b']));
   });
 
   it('a flagged item is shown even with no window at all (before=after=0)', () => {
@@ -60,11 +71,21 @@ describe('expandWithDeltaContext', () => {
       item('after', '2024-01-01T10:00:00.500Z'), // +500ms
     ];
     const onlyAfter = expandWithDeltaContext(items, [false, true, false], keyOf, new Set(), 0, 1000);
-    expect(onlyAfter.items.map(keyOf)).toEqual(['anchor', 'after']);
-    expect(onlyAfter.contextKeys).toEqual(new Set(['after']));
+    expect(onlyAfter.items.map(keyOf)).toEqual(['anchor']);
+    expect(onlyAfter.contextKeys).toEqual(new Set());
 
     const onlyBefore = expandWithDeltaContext(items, [false, true, false], keyOf, new Set(), 1000, 0);
-    expect(onlyBefore.items.map(keyOf)).toEqual(['before', 'anchor']);
-    expect(onlyBefore.contextKeys).toEqual(new Set(['before']));
+    expect(onlyBefore.items.map(keyOf)).toEqual(['anchor']);
+    expect(onlyBefore.contextKeys).toEqual(new Set());
+  });
+
+  it('keeps normal matches visible even when no message-context flag anchors a window', () => {
+    const items = [
+      item('a', '2024-01-01T10:00:00.000Z'),
+      item('b', '2024-01-01T10:00:00.500Z'),
+    ];
+    const out = expandWithDeltaContext(items, [false, true], keyOf, new Set(), 1000, 1000);
+    expect(out.items.map(keyOf)).toEqual(['b']);
+    expect(out.contextKeys).toEqual(new Set());
   });
 });

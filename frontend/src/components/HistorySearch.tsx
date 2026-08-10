@@ -1,5 +1,11 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { TelegramTable, type SortConfig, type SortKey, type TelegramTableConfig } from './TelegramTable';
+import {
+  TelegramTable,
+  type SortConfig,
+  type SortKey,
+  type TelegramTableConfig,
+} from './TelegramTable';
+import { compileQuickFilters, DEFAULT_QUICK_FILTER_COLUMN_ENABLED, type ColId, type QuickFilterColumnEnabled } from '../utils/quickFilter';
 import { readSortConfigPref, writeScopedSortConfigPref, toggleSortLevel, sortTelegrams } from '../utils/sortConfig';
 import { readVisibleColumnsPref } from '../utils/tablePrefs';
 import { expandWithDeltaContext } from '../utils/deltaContextExpansion';
@@ -70,6 +76,10 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   );
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [isVisualizerOpen, setIsVisualizerOpen] = useState(false);
+  const [quickFilterOpen, setQuickFilterOpen] = useState(false);
+  const [quickFilterEnabled, setQuickFilterEnabled] = useState(false);
+  const [quickPatterns, setQuickPatterns] = useState<Partial<Record<ColId, { top: string; bottom: string }>>>({});
+  const [quickFilterColumnEnabled, setQuickFilterColumnEnabled] = useState<QuickFilterColumnEnabled>(DEFAULT_QUICK_FILTER_COLUMN_ENABLED);
 
   // Persisted time range — survives HistoryLoader open/close cycles
   const [timeRange, setTimeRange] = useState<LoaderTimeRange>({
@@ -153,11 +163,21 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
       rowMarks: true,
       rowFlags: true,
     },
+    quickFilter: {
+      open: quickFilterOpen,
+      onOpenChange: setQuickFilterOpen,
+      enabled: quickFilterEnabled,
+      onEnabledChange: setQuickFilterEnabled,
+      patterns: quickPatterns,
+      onPatternsChange: setQuickPatterns,
+      columnEnabled: quickFilterColumnEnabled,
+      onColumnEnabledChange: setQuickFilterColumnEnabled,
+    },
     rowFlags: {
       flaggedKeys,
       onFlaggedKeysChange: setFlaggedKeys,
     },
-  }), [sortConfig, handleSort, visibleColumns, flaggedKeys]);
+  }), [sortConfig, handleSort, visibleColumns, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled, flaggedKeys]);
 
   const sortedTelegrams = useMemo(
     () => sortTelegrams(telegrams, sortConfig),
@@ -189,11 +209,21 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   // per-message flags are set after the historical load already happened.
   const deltaExpandedHistory = useMemo(() => {
     const noFilter = !hasActiveFilters(activeFilters);
-    const matches = sortedTelegrams.map(t => noFilter || matchesTelegram(t, activeFilters));
-    const { before, after } = effectiveDeltaContext(activeFilters);
+    const quickMatches = (!quickFilterOpen || !quickFilterEnabled)
+      ? null
+      : compileQuickFilters(quickPatterns, quickFilterColumnEnabled);
+    const matches = sortedTelegrams.map(t => {
+      const baseMatch = noFilter || matchesTelegram(t, activeFilters);
+      if (!baseMatch) return false;
+      return quickMatches ? quickMatches(t) : true;
+    });
+    const { before: rawBefore, after: rawAfter } = effectiveDeltaContext(activeFilters);
+    const deltaColumnEnabled = !quickFilterOpen || !quickFilterEnabled || quickFilterColumnEnabled.delta !== false;
+    const before = deltaColumnEnabled ? rawBefore : 0;
+    const after = deltaColumnEnabled ? rawAfter : 0;
     const flags = activeFilters.deltaContextEnabled ? new Set(flaggedKeys) : EMPTY_FLAG_SET;
     return expandWithDeltaContext(sortedTelegrams, matches, anchorKey, flags, before, after);
-  }, [sortedTelegrams, activeFilters, flaggedKeys]);
+  }, [sortedTelegrams, activeFilters, flaggedKeys, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled]);
   const filteredSortedTelegrams = deltaExpandedHistory.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = deltaExpandedHistory.contextKeys;
