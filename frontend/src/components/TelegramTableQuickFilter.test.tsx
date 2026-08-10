@@ -689,9 +689,8 @@ test('quick-filter divider uses upstream exclusion signal for prefiltered table 
   expect(screen.getByTestId('quick-filter-divider')).toHaveStyle({ background: '#f59e0b' });
 });
 
-test('ctrl/cmd-click on the DELTA TIME toggle disables/enables the window without losing the entered values (#318)', () => {
+test('ctrl/cmd-click on the DELTA TIME toggle applies to all displayed messages', () => {
   const onDeltaContextChange = vi.fn();
-  const onDeltaContextEnabledChange = vi.fn();
   render(
     <TelegramTable
       telegrams={TELEGRAMS}
@@ -702,7 +701,6 @@ test('ctrl/cmd-click on the DELTA TIME toggle disables/enables the window withou
       onQuickFilter={vi.fn()}
       onQuickVisualize={vi.fn()}
       onDeltaContextChange={onDeltaContextChange}
-      onDeltaContextEnabledChange={onDeltaContextEnabledChange}
     />,
   );
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
@@ -713,9 +711,12 @@ test('ctrl/cmd-click on the DELTA TIME toggle disables/enables the window withou
 
   const toggleBtn = screen.getByTitle(/Time-Delta-Context:/);
   fireEvent.click(toggleBtn, { ctrlKey: true });
-  expect(onDeltaContextEnabledChange).toHaveBeenCalledWith(false);
+  expect(screen.getByTitle(/all messages flagged/)).toBeInTheDocument();
 
-  // Editing a value while enabled still goes through onDeltaContextChange, preserving the other field.
+  fireEvent.click(toggleBtn, { ctrlKey: true });
+  expect(screen.getByTitle(/none messages flagged/)).toBeInTheDocument();
+
+  // Editing a value still goes through onDeltaContextChange, preserving the other field.
   fireEvent.change(screen.getByLabelText('Time-Delta-Context before (ms)'), { target: { value: '750' } });
   expect(onDeltaContextChange).toHaveBeenCalledWith(750, 250);
 });
@@ -742,6 +743,78 @@ test('flagging a single row reports the tristate as "some" (#319)', () => {
   fireEvent.click(row.querySelector('button[title*="Always show context"]')!);
 
   expect(screen.getByTitle(/some messages flagged/)).toBeInTheDocument();
+});
+
+test('delta tristate scopes to marked rows when more than one row is marked', () => {
+  const { container } = renderTable();
+  fireEvent.click(screen.getByTitle('Show quick filter bar'));
+
+  const rows = [...container.querySelectorAll('.log-row')];
+  fireEvent.click(rows[0]);
+  fireEvent.click(rows[1], { ctrlKey: true });
+
+  // With >1 marked rows, plain toggle flags only marked rows.
+  fireEvent.click(screen.getByTitle(/none messages flagged/));
+  expect(screen.getByTitle(/all messages flagged/)).toBeInTheDocument();
+  expect(container.querySelectorAll('.log-row button[title*="click to unflag"]')).toHaveLength(2);
+});
+
+test('delta tristate considers only visible non-context rows', () => {
+  const anchorTelegram = makeTelegram({
+    timestamp: '2024-01-01T10:00:03.000Z',
+    target_address: '1/2/3',
+    target_name: 'Licht Küche',
+    raw_hex: '0x03',
+  });
+  const contextTelegram = makeTelegram({
+    timestamp: '2024-01-01T10:00:02.500Z',
+    target_address: '9/9/9',
+    target_name: 'Context Only',
+    raw_hex: '0x09',
+  });
+  const farTelegram = makeTelegram({
+    timestamp: '2024-01-01T09:59:00.000Z',
+    target_address: '2/0/1',
+    target_name: 'Far Away',
+    raw_hex: '0x01',
+  });
+  const telegrams = [anchorTelegram, contextTelegram, farTelegram];
+  const quickPatterns = { target: { top: '', bottom: 'küche' } };
+  const quickMatches = compileQuickFilters(quickPatterns, DEFAULT_QUICK_FILTER_COLUMN_ENABLED);
+  const expanded = expandWithDeltaContext(
+    telegrams,
+    telegrams.map(t => quickMatches(t)),
+    anchorKey,
+    new Set([anchorKey(anchorTelegram)]),
+    1000,
+    0,
+  );
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={expanded.items}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={quickPatterns}
+      quickFilterColumnEnabled={DEFAULT_QUICK_FILTER_COLUMN_ENABLED}
+      contextKeys={expanded.contextKeys}
+      flaggedKeys={[anchorKey(contextTelegram)]}
+    />,
+  );
+
+  // One context-only row is present and already flagged, but the only
+  // non-context row is not — tristate should still read "none".
+  expect(container.querySelectorAll('.log-row.context')).toHaveLength(1);
+  expect(screen.getByTitle(/none messages flagged/)).toBeInTheDocument();
+
+  // Scope check only: context-only flags do not affect the tristate.
+  expect(screen.queryByTitle(/all messages flagged/)).not.toBeInTheDocument();
 });
 
 test('row message-context controls are hidden when delta window is initial (before=after=0)', () => {

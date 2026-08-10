@@ -296,15 +296,493 @@ test('quick info bar (#311): toggled via the header button and summarizes the vi
     />,
   );
 
-  expect(screen.queryByText(/4 telegrams/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/types:\s*W\s*\/\s*dirs:\s*In/i)).not.toBeInTheDocument();
   fireEvent.click(screen.getByTitle('Show info bar'));
-  expect(screen.getByText(/4 telegrams/)).toBeInTheDocument();
+  expect(screen.getByText(/types:\s*W\s*\/\s*dirs:\s*In/i)).toBeInTheDocument();
   expect(screen.getByText(/Oldest:/)).toBeInTheDocument();
   expect(screen.getByText(/Newest:/)).toBeInTheDocument();
 });
 
+test('quick info oldest/newest clicks only add marks and never remove them', () => {
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(4, 3)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  fireEvent.click(screen.getByText(/Oldest:/));
+  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(1);
+  expect(container.querySelector('.log-row.latest')).toBeTruthy();
+
+  fireEvent.click(screen.getByText(/Newest:/));
+  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(2);
+  expect(container.querySelector('.log-row.latest')).toBeTruthy();
+
+  // Repeating the same target keeps marks set (no unmarking).
+  fireEvent.click(screen.getByText(/Newest:/));
+  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(2);
+  expect(container.querySelector('.log-row.latest')).toBeTruthy();
+});
+
+test('quick info source shows all-buffer source count and filtered/context source counts', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', source_address: '1.1.1', raw_hex: '0x31' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', source_address: '1.1.2', raw_hex: '0x32' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', source_address: '1.1.3', raw_hex: '0x33' }),
+  ];
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ source: { top: '1.1.1', bottom: '' } }}
+      allBufferSourceCount={3}
+      projectSourceCount={7}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getByText('buffer: 3 / 7')).toBeInTheDocument();
+  expect(screen.getByTitle('Filtered source-device count')).toBeInTheDocument();
+  expect(screen.getByText('filtered')).toBeInTheDocument();
+});
+
+test('quick info source hides filtered buffer count when all devices are shown', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', source_address: '1.1.1', raw_hex: '0x41' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', source_address: '1.1.2', raw_hex: '0x42' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', source_address: '1.1.3', raw_hex: '0x43' }),
+  ];
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      allBufferSourceCount={3}
+      projectSourceCount={7}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getByText('buffer: 3 / 7')).toBeInTheDocument();
+  expect(screen.queryByText('3 filtered')).not.toBeInTheDocument();
+});
+
+test('quick info source bottom line includes contextual source count in parentheses', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', source_address: '1.1.1', raw_hex: '0x51' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', source_address: '1.1.2', raw_hex: '0x52' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', source_address: '1.1.3', raw_hex: '0x53' }),
+  ];
+  const context = new Set([anchorKey(rows[1])]);
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      allBufferSourceCount={3}
+      projectSourceCount={7}
+      contextKeys={context}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getByText('buffer: 3 / 7')).toBeInTheDocument();
+  expect(screen.getByTitle('Filtered source-device count')).toBeInTheDocument();
+  expect(screen.getByTitle('Contextual source-device count')).toBeInTheDocument();
+});
+
+test('quick info target shows all-buffer/project counts and filtered target count', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', target_address: '1/1/1', raw_hex: '0x61' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', target_address: '1/1/2', raw_hex: '0x62' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', target_address: '1/1/3', raw_hex: '0x63' }),
+  ];
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ target: { top: '1/1/1', bottom: '' } }}
+      allBufferTargetCount={3}
+      projectTargetCount={11}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getByText('buffer: 3 / 11')).toBeInTheDocument();
+  expect(screen.getByTitle('Filtered target-device count')).toBeInTheDocument();
+  expect(screen.getByText('filtered')).toBeInTheDocument();
+});
+
+test('quick info target bottom line includes contextual target count only when > 0', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', target_address: '1/2/1', raw_hex: '0x71' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', target_address: '1/2/2', raw_hex: '0x72' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', target_address: '1/2/3', raw_hex: '0x73' }),
+  ];
+  const context = new Set([anchorKey(rows[1])]);
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      allBufferTargetCount={3}
+      projectTargetCount={11}
+      contextKeys={context}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getByText('buffer: 3 / 11')).toBeInTheDocument();
+  expect(screen.getByTitle('Filtered target-device count')).toBeInTheDocument();
+  expect(screen.getByTitle('Contextual target-device count')).toBeInTheDocument();
+});
+
+test('quick info type shows types/directions for total buffer on top and filtered set on bottom', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', simplified_type: 'Write', direction: 'Incoming', raw_hex: '0x81' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', simplified_type: 'Read', direction: 'Outgoing', raw_hex: '0x82' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', simplified_type: 'Response', direction: 'Incoming', raw_hex: '0x83' }),
+  ];
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ type: { top: 'Write', bottom: '' } }}
+      allBufferTypes={['Write', 'Read', 'Response']}
+      allBufferDirections={['Incoming', 'Outgoing']}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getByText('types: W, R, Rsp / dirs: In, Out')).toBeInTheDocument();
+  expect(screen.getByText('types: W / dirs: In')).toBeInTheDocument();
+});
+
+test('quick info type bottom line shows only differing segment(s) versus top line', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', simplified_type: 'Write', direction: 'Outgoing', raw_hex: '0x84' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', simplified_type: 'Write', direction: 'Incoming', raw_hex: '0x85' }),
+  ];
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ type: { top: 'Write', bottom: 'Outgoing' } }}
+      allBufferTypes={['Write']}
+      allBufferDirections={['Incoming', 'Outgoing']}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getByText('types: W / dirs: In, Out')).toBeInTheDocument();
+  expect(screen.getByText('types: W / dirs: Out')).toBeInTheDocument();
+  expect(screen.queryByText('dirs: Out')).not.toBeInTheDocument();
+});
+
+test('quick info type bottom line is shown when messages are filtered out even with same summaries', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', simplified_type: 'Write', direction: 'Incoming', source_address: '1.1.1', raw_hex: '0x86' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', simplified_type: 'Write', direction: 'Incoming', source_address: '1.1.2', raw_hex: '0x87' }),
+  ];
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ source: { top: '1.1.1', bottom: '' } }}
+      allBufferTypes={['Write']}
+      allBufferDirections={['Incoming']}
+      quickFilterFiltersOutAny
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getAllByText('types: W / dirs: In')).toHaveLength(2);
+});
+
+test('quick info dpt shows main/main.sub values for total buffer and filtered set', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', dpt_main: 1, dpt_sub: 1, dpt_name: 'Switch', raw_hex: '0x91' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', dpt_main: 5, dpt_sub: 1, dpt_name: 'Percent', raw_hex: '0x92' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', dpt_main: 1, dpt_sub: 2, dpt_name: 'Boolean', raw_hex: '0x93' }),
+  ];
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ dpt: { top: '1.*', bottom: '' } }}
+      allBufferDptMains={['1', '5']}
+      allBufferDptMainSubs={['1.001', '5.001', '1.002']}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getByText('main: 2 / DPT: 3')).toBeInTheDocument();
+  expect(screen.getByText('main: 1 / DPT: 2')).toBeInTheDocument();
+});
+
+test('quick info value shows buffer/msg totals and filtered/context/marked/context-active counts', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', raw_hex: '0xA1' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', raw_hex: '0xA2' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', raw_hex: '0xA3' }),
+  ];
+  const contextKeys = new Set([anchorKey(rows[1])]);
+  const marked = [anchorKey(rows[0]), anchorKey(rows[1])];
+  const flagged = [anchorKey(rows[2])];
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      contextKeys={contextKeys}
+      markedKeys={marked}
+      flaggedKeys={flagged}
+      bufferCapacity={100000}
+      allBufferMessageCount={3}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getByText('msg: 3 / buf: 100000, marks:')).toBeInTheDocument();
+  expect(screen.getByTitle('Marked message count')).toHaveTextContent('2');
+  expect(screen.getByText('context marks:')).toBeInTheDocument();
+  expect(screen.getByTitle('Context-marked message count')).toHaveTextContent('1');
+  expect(screen.getByText('2 filtered (1)')).toBeInTheDocument();
+});
+
+test('quick info value mark/context-mark buttons toggle row filtering', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', raw_hex: '0xB1' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', raw_hex: '0xB2' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', raw_hex: '0xB3' }),
+  ];
+  const marked = [anchorKey(rows[0]), anchorKey(rows[2])];
+  const flagged = [anchorKey(rows[1])];
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      markedKeys={marked}
+      flaggedKeys={flagged}
+      bufferCapacity={100000}
+      allBufferMessageCount={3}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(3);
+
+  fireEvent.click(screen.getByTitle('Marked message count'));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(2);
+
+  fireEvent.click(screen.getByTitle('Context-marked message count'));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(1);
+
+  fireEvent.click(screen.getByTitle('Context-marked message count'));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(3);
+});
+
+test('quick info value mark/context-mark filters keep contextual rows visible', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', raw_hex: '0xD1' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', raw_hex: '0xD2' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', raw_hex: '0xD3' }),
+  ];
+  const marked = [anchorKey(rows[0])];
+  const flagged = [anchorKey(rows[0])];
+  const contextKeys = new Set([anchorKey(rows[1])]);
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      markedKeys={marked}
+      flaggedKeys={flagged}
+      contextKeys={contextKeys}
+      bufferCapacity={100000}
+      allBufferMessageCount={3}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  fireEvent.click(screen.getByTitle('Marked message count'));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(2);
+
+  fireEvent.click(screen.getByTitle('Context-marked message count'));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(2);
+});
+
+test('quick info value mark/context-mark toggles are disabled when count is zero', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', raw_hex: '0xC1' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', raw_hex: '0xC2' }),
+  ];
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      bufferCapacity={100000}
+      allBufferMessageCount={2}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  const marksBtn = screen.getByTitle('Marked message count');
+  const ctxBtn = screen.getByTitle('Context-marked message count');
+  expect(marksBtn).toBeDisabled();
+  expect(ctxBtn).toBeDisabled();
+
+  fireEvent.click(marksBtn);
+  fireEvent.click(ctxBtn);
+  expect(container.querySelectorAll('.log-row')).toHaveLength(2);
+});
+
+test('quick info delta min/max clicks only add marks and never remove them', () => {
+  const base = new Date('2024-01-01T10:00:00.000Z').getTime();
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: new Date(base + 10_000).toISOString(), raw_hex: '0x10' }),
+    makeTelegram({ timestamp: new Date(base + 9_000).toISOString(), raw_hex: '0x09' }),
+    makeTelegram({ timestamp: new Date(base + 5_000).toISOString(), raw_hex: '0x05' }),
+    makeTelegram({ timestamp: new Date(base + 0).toISOString(), raw_hex: '0x00' }),
+  ];
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  fireEvent.click(screen.getByText(/Min Δt:/));
+  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(1);
+  expect(container.querySelector('.log-row.latest')).toBeTruthy();
+
+  fireEvent.click(screen.getByText(/Max Δt:/));
+  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(2);
+  expect(container.querySelector('.log-row.latest')).toBeTruthy();
+
+  fireEvent.click(screen.getByText(/Max Δt:/));
+  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(2);
+  expect(container.querySelector('.log-row.latest')).toBeTruthy();
+});
+
 test('context rows (#343): marked with a distinct class/tooltip and counted in the info bar', () => {
   const rows = makeList(3, 2);
+  rows[0] = { ...rows[0], target_address: '1/1/1' };
+  rows[1] = { ...rows[1], target_address: '1/1/2' };
+  rows[2] = { ...rows[2], target_address: '1/1/1' };
   const contextKeys = new Set([anchorKey(rows[1])]); // the middle row is context-only
 
   const { container } = render(
@@ -327,7 +805,8 @@ test('context rows (#343): marked with a distinct class/tooltip and counted in t
   );
 
   fireEvent.click(screen.getByTitle('Show info bar'));
-  expect(screen.getByText(/1 context/)).toBeInTheDocument();
+  expect(screen.getByTitle('Filtered target-device count')).toBeInTheDocument();
+  expect(screen.getByTitle('Contextual target-device count')).toBeInTheDocument();
 });
 
 test('context rows (#343): marking a context row hides the context styling in favor of the mark', () => {

@@ -183,6 +183,34 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     () => sortTelegrams(telegrams, sortConfig),
     [telegrams, sortConfig]
   );
+  const allBufferSourceCount = useMemo(
+    () => new Set(sortedTelegrams.map(t => t.source_address)).size,
+    [sortedTelegrams],
+  );
+  const allBufferTargetCount = useMemo(
+    () => new Set(sortedTelegrams.map(t => t.target_address)).size,
+    [sortedTelegrams],
+  );
+  const allBufferTypes = useMemo(
+    () => [...new Set(sortedTelegrams.map(t => t.simplified_type || t.telegram_type))],
+    [sortedTelegrams],
+  );
+  const allBufferDirections = useMemo(
+    () => [...new Set(sortedTelegrams.map(t => t.direction ?? 'unknown'))],
+    [sortedTelegrams],
+  );
+  const allBufferDptMains = useMemo(
+    () => [...new Set(sortedTelegrams
+      .filter(t => t.dpt_main != null)
+      .map(t => String(t.dpt_main)))],
+    [sortedTelegrams],
+  );
+  const allBufferDptMainSubs = useMemo(
+    () => [...new Set(sortedTelegrams
+      .filter(t => t.dpt_main != null && t.dpt_sub != null)
+      .map(t => `${t.dpt_main}.${String(t.dpt_sub).padStart(3, '0')}`))],
+    [sortedTelegrams],
+  );
 
   const handleLoad = (loaded: Telegram[], meta?: { total_count: number; limit_reached: boolean }, range?: LoadedRange) => {
     setTelegrams(prev => {
@@ -434,6 +462,16 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               flaggedKeys={flaggedKeys}
               onFlaggedKeysChange={setFlaggedKeys}
               contextKeys={contextTelegramKeys}
+              allBufferSourceCount={allBufferSourceCount}
+              bufferCapacity={loadLimit}
+              allBufferMessageCount={sortedTelegrams.length}
+              allBufferTargetCount={allBufferTargetCount}
+              allBufferTypes={allBufferTypes}
+              allBufferDirections={allBufferDirections}
+              allBufferDptMains={allBufferDptMains}
+              allBufferDptMainSubs={allBufferDptMainSubs}
+              projectSourceCount={projectLoaded ? filterOptions.sources.length : null}
+              projectTargetCount={projectLoaded ? filterOptions.targets.length : null}
             />
           )}
         </div>

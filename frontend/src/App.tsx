@@ -712,6 +712,34 @@ function App() {
     () => sortTelegrams(liveTelegrams, sortConfig),
     [liveTelegrams, sortConfig]
   );
+  const liveAllBufferSourceCount = useMemo(
+    () => new Set(sortedLiveTelegrams.map(t => t.source_address)).size,
+    [sortedLiveTelegrams],
+  );
+  const liveAllBufferTargetCount = useMemo(
+    () => new Set(sortedLiveTelegrams.map(t => t.target_address)).size,
+    [sortedLiveTelegrams],
+  );
+  const liveAllBufferTypes = useMemo(
+    () => [...new Set(sortedLiveTelegrams.map(t => t.simplified_type || t.telegram_type))],
+    [sortedLiveTelegrams],
+  );
+  const liveAllBufferDirections = useMemo(
+    () => [...new Set(sortedLiveTelegrams.map(t => t.direction ?? 'unknown'))],
+    [sortedLiveTelegrams],
+  );
+  const liveAllBufferDptMains = useMemo(
+    () => [...new Set(sortedLiveTelegrams
+      .filter(t => t.dpt_main != null)
+      .map(t => String(t.dpt_main)))],
+    [sortedLiveTelegrams],
+  );
+  const liveAllBufferDptMainSubs = useMemo(
+    () => [...new Set(sortedLiveTelegrams
+      .filter(t => t.dpt_main != null && t.dpt_sub != null)
+      .map(t => `${t.dpt_main}.${String(t.dpt_sub).padStart(3, '0')}`))],
+    [sortedLiveTelegrams],
+  );
 
   // ── In-memory filtering (live view) ────────────────────────────────────────
   const deltaExpandedLive = useMemo(() => {
@@ -1361,6 +1389,16 @@ function App() {
                     flaggedKeys={flaggedTelegramKeys}
                     onFlaggedKeysChange={setFlaggedTelegramKeys}
                     contextKeys={contextTelegramKeys}
+                    allBufferSourceCount={liveAllBufferSourceCount}
+                    bufferCapacity={loadLimit}
+                    allBufferMessageCount={sortedLiveTelegrams.length}
+                    allBufferTargetCount={liveAllBufferTargetCount}
+                    allBufferTypes={liveAllBufferTypes}
+                    allBufferDirections={liveAllBufferDirections}
+                    allBufferDptMains={liveAllBufferDptMains}
+                    allBufferDptMainSubs={liveAllBufferDptMainSubs}
+                    projectSourceCount={projectStatus?.project_loaded ? filterOptions.sources.length : null}
+                    projectTargetCount={projectStatus?.project_loaded ? filterOptions.targets.length : null}
                     infoBarOpen={infoBarOpen}
                     onInfoBarOpenChange={setInfoBarOpen}
                   />

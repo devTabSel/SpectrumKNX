@@ -157,6 +157,26 @@ interface TelegramTableProps {
    * Time-Delta-Context around a match/flag, not because they matched the
    * active filters themselves — marked with a distinct background (#343). */
   contextKeys?: ReadonlySet<string>;
+  /** Number of unique source devices across all telegrams in the current buffer. */
+  allBufferSourceCount?: number | null;
+  /** Configured message-buffer capacity (max telegram count). */
+  bufferCapacity?: number | null;
+  /** Current message count in the full buffer (before list filtering/context projection). */
+  allBufferMessageCount?: number | null;
+  /** Number of unique target devices across all telegrams in the current buffer. */
+  allBufferTargetCount?: number | null;
+  /** Distinct telegram types across all telegrams in the current buffer. */
+  allBufferTypes?: string[] | null;
+  /** Distinct directions across all telegrams in the current buffer. */
+  allBufferDirections?: string[] | null;
+  /** Distinct DPT main values across all telegrams in the current buffer. */
+  allBufferDptMains?: string[] | null;
+  /** Distinct DPT main.sub values across all telegrams in the current buffer. */
+  allBufferDptMainSubs?: string[] | null;
+  /** Total source-device count from the loaded xknxproj catalog. */
+  projectSourceCount?: number | null;
+  /** Total target-device count from the loaded xknxproj catalog. */
+  projectTargetCount?: number | null;
 }
 
 const EMPTY_CELL: QuickCellValue = { top: '', bottom: '' };
@@ -225,6 +245,55 @@ const dptDescriptionLabel = (dptName: string | null, unit: string | null | undef
   return unit ? `${base} (${unit})` : base;
 };
 
+const TYPE_ABBREVIATIONS: Record<string, string> = {
+  write: 'W',
+  read: 'R',
+  response: 'Rsp',
+  groupvaluewrite: 'W',
+  groupvalueread: 'R',
+  groupvalueresponse: 'Rsp',
+};
+
+const DIRECTION_ABBREVIATIONS: Record<string, string> = {
+  incoming: 'In',
+  outgoing: 'Out',
+  unknown: 'Unk',
+};
+
+const abbreviateValue = (value: string, mapping: Record<string, string>): string => {
+  const trimmed = (value || 'unknown').trim();
+  const mapped = mapping[trimmed.toLowerCase()];
+  if (mapped) return mapped;
+
+  // Fallback: keep unusual values compact while still readable.
+  if (trimmed.length <= 4) return trimmed;
+  return trimmed.slice(0, 4);
+};
+
+const summarizeAbbreviatedValues = (values: readonly string[] | null | undefined, mapping: Record<string, string>): string => {
+  if (!values || values.length === 0) return '-';
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of values) {
+    const short = abbreviateValue(raw, mapping);
+    if (seen.has(short)) continue;
+    seen.add(short);
+    out.push(short);
+  }
+  return out.length > 0 ? out.join(', ') : '-';
+};
+
+const countDistinctValues = (values: readonly string[] | null | undefined): number => {
+  if (!values || values.length === 0) return 0;
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const val = (raw || '').trim();
+    if (val.length === 0) continue;
+    seen.add(val);
+  }
+  return seen.size;
+};
+
 type TelegramRow = Telegram & { deltaStr: string | null; deltaNextStr: string | null; deltaMs: number | null };
 
 const formatDeltaMs = (diffMs: number, sign: '+' | '-'): string => {
@@ -291,12 +360,22 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   quickFilterOpen, onQuickFilterOpenChange, quickFilterEnabled, onQuickFilterEnabledChange, quickPatterns, onQuickPatternsChange,
   quickFilterColumnEnabled, onQuickFilterColumnEnabledChange,
   quickFilterFiltersOutAny,
-  onDeltaContextChange, onDeltaContextEnabledChange,
+  onDeltaContextChange,
   listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
   markedKeys, onMarkedKeysChange, lastMarkedKey, onLastMarkedKeyChange,
   infoBarOpen, onInfoBarOpenChange,
   flaggedKeys, onFlaggedKeysChange,
   contextKeys,
+  allBufferSourceCount,
+  bufferCapacity,
+  allBufferMessageCount,
+  allBufferTargetCount,
+  allBufferTypes,
+  allBufferDirections,
+  allBufferDptMains,
+  allBufferDptMainSubs,
+  projectSourceCount,
+  projectTargetCount,
 }) => {
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -634,6 +713,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const [deltaSortActive, setDeltaSortActive] = useState(false);
   const [deltaSortDirection, setDeltaSortDirection] = useState<'asc' | 'desc'>('desc');
   const [deltaFrozenRows, setDeltaFrozenRows] = useState<TelegramRow[] | null>(null);
+  const [valueRowFilter, setValueRowFilter] = useState<'none' | 'marked' | 'flagged'>('none');
   const preDeltaSortFollowRef = useRef<boolean | null>(null);
 
   const sortByDelta = useCallback((rows: TelegramRow[], direction: 'asc' | 'desc') =>
@@ -676,7 +756,57 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     effectiveOnSort(key, opts);
   }, [exitDeltaSort, effectiveOnSort]);
 
-  const telegramRows = deltaSortActive && deltaFrozenRows ? deltaFrozenRows : naturalTelegramRows;
+  const preValueFilterRows = deltaSortActive && deltaFrozenRows ? deltaFrozenRows : naturalTelegramRows;
+  const telegramRows = useMemo(() => {
+    const contextRelatedToSeedKeys = (seedKeys: Set<string>): Set<string> => {
+      if (!contextKeys || contextKeys.size === 0 || seedKeys.size === 0) return new Set<string>();
+      const beforeMs = Math.max(0, activeFilters.deltaBeforeMs);
+      const afterMs = Math.max(0, activeFilters.deltaAfterMs);
+      if (beforeMs <= 0 && afterMs <= 0) return new Set<string>();
+
+      const seedTimes = preValueFilterRows
+        .filter(t => seedKeys.has(anchorKey(t)))
+        .map(t => new Date(t.timestamp).getTime());
+      if (seedTimes.length === 0) return new Set<string>();
+
+      const related = new Set<string>();
+      for (const t of preValueFilterRows) {
+        const key = anchorKey(t);
+        if (!contextKeys.has(key)) continue;
+        const ts = new Date(t.timestamp).getTime();
+        if (seedTimes.some(seedTs => ts >= seedTs - beforeMs && ts <= seedTs + afterMs)) {
+          related.add(key);
+        }
+      }
+      return related;
+    };
+
+    if (valueRowFilter === 'marked') {
+      const markedKeys = new Set(preValueFilterRows.filter(t => markedSet.has(anchorKey(t))).map(t => anchorKey(t)));
+      const relatedContext = contextRelatedToSeedKeys(markedKeys);
+      return preValueFilterRows.filter(t => {
+        const key = anchorKey(t);
+        return markedSet.has(key) || relatedContext.has(key);
+      });
+    }
+    if (valueRowFilter === 'flagged') {
+      const flaggedKeys = new Set(preValueFilterRows.filter(t => flaggedSet.has(anchorKey(t))).map(t => anchorKey(t)));
+      const relatedContext = contextRelatedToSeedKeys(flaggedKeys);
+      return preValueFilterRows.filter(t => {
+        const key = anchorKey(t);
+        return flaggedSet.has(key) || relatedContext.has(key);
+      });
+    }
+    return preValueFilterRows;
+  }, [preValueFilterRows, valueRowFilter, markedSet, flaggedSet, contextKeys, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs]);
+  const markedToggleCount = useMemo(
+    () => preValueFilterRows.reduce((n, t) => n + (markedSet.has(anchorKey(t)) ? 1 : 0), 0),
+    [preValueFilterRows, markedSet],
+  );
+  const flaggedToggleCount = useMemo(
+    () => preValueFilterRows.reduce((n, t) => n + (flaggedSet.has(anchorKey(t)) ? 1 : 0), 0),
+    [preValueFilterRows, flaggedSet],
+  );
 
   const applyRowMarkSelection = useCallback((e: React.MouseEvent, key: string, index: number) => {
     if (!rowMarksEnabled) return;
@@ -771,23 +901,42 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   // ── Global Time-Delta-Context tristate (#318, #319) ─────────────────────────
   // Reflects the per-message flags among the currently visible rows: none set,
-  // all set, or some. Plain click cycles the flags (none/some -> flag every
-  // visible row is "all", i.e. none<->all, some->none); ctrl/cmd-click instead
-  // toggles the window fully on/off (#318), preserving flags and values.
+  // all set, or some. Plain click cycles flags using the scoped rule (marked
+  // rows when >1 row is marked, otherwise visible non-context rows). Ctrl/cmd
+  // click always applies to all currently displayed rows.
   const deltaFlagState: 'none' | 'some' | 'all' = useMemo(() => {
-    if (telegramRows.length === 0 || flaggedSet.size === 0) return 'none';
-    const flaggedCount = telegramRows.reduce((n, t) => n + (flaggedSet.has(anchorKey(t)) ? 1 : 0), 0);
+    const markedRows = telegramRows.filter(t => markedSet.has(anchorKey(t)));
+    const eligibleRows = markedRows.length > 1
+      ? markedRows
+      : telegramRows.filter(t => !contextKeys?.has(anchorKey(t)));
+    if (eligibleRows.length === 0 || flaggedSet.size === 0) return 'none';
+    const flaggedCount = eligibleRows.reduce((n, t) => n + (flaggedSet.has(anchorKey(t)) ? 1 : 0), 0);
     if (flaggedCount === 0) return 'none';
-    return flaggedCount === telegramRows.length ? 'all' : 'some';
-  }, [telegramRows, flaggedSet]);
+    return flaggedCount === eligibleRows.length ? 'all' : 'some';
+  }, [telegramRows, markedSet, flaggedSet, contextKeys]);
 
   const handleDeltaToggleClick = useCallback((e: React.MouseEvent) => {
     if (e.ctrlKey || e.metaKey) {
-      onDeltaContextEnabledChange?.(!activeFilters.deltaContextEnabled);
+      const displayedKeys = telegramRows.map(t => anchorKey(t));
+      const displayedKeySet = new Set(displayedKeys);
+      const allDisplayedFlagged = displayedKeys.length > 0 && displayedKeys.every(key => flaggedSet.has(key));
+      const nextKeys = allDisplayedFlagged
+        ? flaggedKeysList.filter(key => !displayedKeySet.has(key))
+        : [...new Set([...flaggedKeysList, ...displayedKeys])];
+      setFlaggedKeysList(nextKeys);
       return;
     }
-    setFlaggedKeysList(deltaFlagState === 'none' ? telegramRows.map(t => anchorKey(t)) : []);
-  }, [deltaFlagState, telegramRows, activeFilters.deltaContextEnabled, onDeltaContextEnabledChange, setFlaggedKeysList]);
+    const markedRows = telegramRows.filter(t => markedSet.has(anchorKey(t)));
+    const eligibleRows = markedRows.length > 1
+      ? markedRows
+      : telegramRows.filter(t => !contextKeys?.has(anchorKey(t)));
+    const eligibleKeys = eligibleRows.map(t => anchorKey(t));
+    const eligibleKeySet = new Set(eligibleKeys);
+    const nextKeys = deltaFlagState === 'none'
+      ? [...new Set([...flaggedKeysList, ...eligibleKeys])]
+      : flaggedKeysList.filter(key => !eligibleKeySet.has(key));
+    setFlaggedKeysList(nextKeys);
+  }, [deltaFlagState, telegramRows, markedSet, contextKeys, flaggedSet, flaggedKeysList, setFlaggedKeysList]);
 
   // ── Quick info bar metrics (#311) ───────────────────────────────────────────
   // Summarizes the currently visible (sorted + filtered) rows; oldest/newest
@@ -796,36 +945,85 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     if (telegramRows.length === 0) return null;
     let oldestIdx = 0, newestIdx = 0;
     let minDeltaIdx = -1, maxDeltaIdx = -1;
-    const sources = new Set<string>();
-    const targets = new Set<string>();
-    const dpts = new Set<string>();
-    const typeCounts = new Map<string, number>();
+    const displayedSources = new Set<string>();
+    const matchedSources = new Set<string>();
+    const contextualSources = new Set<string>();
+    const displayedTargets = new Set<string>();
+    const matchedTargets = new Set<string>();
+    const contextualTargets = new Set<string>();
+    const displayedDptMains = new Set<string>();
+    const matchedDptMains = new Set<string>();
+    const displayedDptMainSubs = new Set<string>();
+    const matchedDptMainSubs = new Set<string>();
+    const displayedTypes = new Set<string>();
+    const matchedTypes = new Set<string>();
+    const displayedDirections = new Set<string>();
+    const matchedDirections = new Set<string>();
     let contextCount = 0;
     telegramRows.forEach((t, i) => {
+      const isContextOnly = !!contextKeys?.has(anchorKey(t));
       if (new Date(t.timestamp) < new Date(telegramRows[oldestIdx].timestamp)) oldestIdx = i;
       if (new Date(t.timestamp) > new Date(telegramRows[newestIdx].timestamp)) newestIdx = i;
       if (t.deltaMs != null) {
         if (minDeltaIdx === -1 || t.deltaMs < telegramRows[minDeltaIdx].deltaMs!) minDeltaIdx = i;
         if (maxDeltaIdx === -1 || t.deltaMs > telegramRows[maxDeltaIdx].deltaMs!) maxDeltaIdx = i;
       }
-      sources.add(t.source_address);
-      targets.add(t.target_address);
-      dpts.add(t.dpt_name ?? (t.dpt_main != null ? `DPT ${t.dpt_main}` : 'unknown'));
+      displayedSources.add(t.source_address);
+      if (isContextOnly) {
+        contextualSources.add(t.source_address);
+        contextualTargets.add(t.target_address);
+      } else {
+        matchedSources.add(t.source_address);
+        matchedTargets.add(t.target_address);
+      }
+      displayedTargets.add(t.target_address);
+      if (t.dpt_main != null) {
+        const main = String(t.dpt_main);
+        displayedDptMains.add(main);
+        if (!isContextOnly) matchedDptMains.add(main);
+        if (t.dpt_sub != null) {
+          const full = `${t.dpt_main}.${String(t.dpt_sub).padStart(3, '0')}`;
+          displayedDptMainSubs.add(full);
+          if (!isContextOnly) matchedDptMainSubs.add(full);
+        }
+      }
       const type = t.simplified_type || t.telegram_type;
-      typeCounts.set(type, (typeCounts.get(type) ?? 0) + 1);
-      if (contextKeys?.has(anchorKey(t))) contextCount++;
+      const direction = t.direction ?? 'unknown';
+      displayedTypes.add(type);
+      displayedDirections.add(direction);
+      if (!isContextOnly) {
+        matchedTypes.add(type);
+        matchedDirections.add(direction);
+      }
+      if (isContextOnly) contextCount++;
     });
+    const contextualOnlySourceCount = [...contextualSources].filter(src => !matchedSources.has(src)).length;
+    const contextualOnlyTargetCount = [...contextualTargets].filter(tgt => !matchedTargets.has(tgt)).length;
+    const markedVisibleCount = telegramRows.reduce((n, t) => n + (markedSet.has(anchorKey(t)) ? 1 : 0), 0);
+    const flaggedVisibleCount = telegramRows.reduce((n, t) => n + (flaggedSet.has(anchorKey(t)) ? 1 : 0), 0);
     return {
       count: telegramRows.length,
       oldestIdx, newestIdx,
       minDeltaIdx, maxDeltaIdx,
-      sourceCount: sources.size,
-      targetCount: targets.size,
-      dptCount: dpts.size,
-      typeCounts: [...typeCounts.entries()].sort((a, b) => b[1] - a[1]),
+      displayedSourceCount: displayedSources.size,
+      matchedSourceCount: matchedSources.size,
+      contextualOnlySourceCount,
+      displayedTargetCount: displayedTargets.size,
+      matchedTargetCount: matchedTargets.size,
+      contextualOnlyTargetCount,
+      displayedTypeValues: [...displayedTypes],
+      matchedTypeValues: [...matchedTypes],
+      displayedDirectionValues: [...displayedDirections],
+      matchedDirectionValues: [...matchedDirections],
+      displayedDptMainValues: [...displayedDptMains],
+      matchedDptMainValues: [...matchedDptMains],
+      displayedDptMainSubValues: [...displayedDptMainSubs],
+      matchedDptMainSubValues: [...matchedDptMainSubs],
       contextCount,
+      markedVisibleCount,
+      flaggedVisibleCount,
     };
-  }, [telegramRows, contextKeys]);
+  }, [telegramRows, contextKeys, markedSet, flaggedSet]);
 
   const virtualizer = useVirtualizer({
     count: telegramRows.length,
@@ -989,6 +1187,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       onListFollowChange?.(false);
     }));
   };
+
+  const markSingleRowByIndex = useCallback((idx: number) => {
+    if (!rowMarksEnabled || idx < 0 || idx >= telegramRows.length) return;
+    const key = anchorKey(telegramRows[idx]);
+    const nextKeys = markedSet.has(key)
+      ? markedKeysList
+      : [...markedKeysList, key];
+    setMarkedKeysList(nextKeys);
+    setLastMarked(key);
+  }, [rowMarksEnabled, telegramRows, markedSet, markedKeysList, setMarkedKeysList, setLastMarked]);
 
   // "Quick goto time" (#282): jump to the telegram nearest a given time. Only
   // meaningful for the timestamp sort, where rows are ordered by time — the
@@ -1400,12 +1608,56 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   };
 
   const infoChipStyle: React.CSSProperties = {
-    display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
-    background: 'var(--bg-tag)', border: '1px solid var(--border-subtle)', borderRadius: '4px',
-    padding: '0.15rem 0.45rem', fontSize: '0.68rem', color: 'var(--text-dim)',
+    display: 'flex', alignItems: 'center', gap: '0.3rem',
+    width: '100%',
+    minHeight: '1.65rem',
+    background: 'var(--bg-tag)',
+    border: '1px solid var(--border-color)',
+    borderRadius: '5px',
+    padding: '0.25rem 0.45rem',
+    fontSize: '0.68rem',
+    color: 'var(--text-dim)',
+    fontFamily: 'var(--font-mono, monospace)',
   };
   const infoChipBtnStyle: React.CSSProperties = {
-    ...infoChipStyle, cursor: 'pointer', background: 'transparent',
+    ...infoChipStyle, cursor: 'pointer',
+  };
+  const infoChipBottomStyle: React.CSSProperties = {
+    ...infoChipStyle,
+    color: '#f59e0b',
+  };
+  const infoCountBtnStyle: React.CSSProperties = {
+    border: '1px solid var(--border-color)',
+    borderRadius: '4px',
+    background: 'transparent',
+    color: 'var(--text-main)',
+    fontFamily: 'var(--font-mono, monospace)',
+    fontSize: '0.68rem',
+    lineHeight: 1,
+    minWidth: '1.6rem',
+    height: '1.25rem',
+    padding: '0 0.35rem',
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  };
+  const infoCountBtnBottomStyle: React.CSSProperties = {
+    ...infoCountBtnStyle,
+    color: '#f59e0b',
+    borderColor: 'color-mix(in srgb, #f59e0b 45%, var(--border-color))',
+  };
+  const infoCountBtnDisabledStyle: React.CSSProperties = {
+    ...infoCountBtnStyle,
+    opacity: 0.45,
+    cursor: 'default',
+  };
+  const infoCountBtnActiveStyle: React.CSSProperties = {
+    ...infoCountBtnStyle,
+    borderColor: 'var(--accent-primary)',
+    background: 'color-mix(in srgb, var(--accent-primary) 22%, transparent)',
+    color: 'var(--text-main)',
+    boxShadow: '0 0 0 1px color-mix(in srgb, var(--accent-primary) 35%, transparent) inset',
   };
 
   return (
@@ -1413,8 +1665,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       {/* Quick info bar (#311): collapsible summary directly above the header. */}
       {quickInfoEnabled && infoOpen && infoMetrics && (
         <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', background: 'var(--bg-subtle)', flexShrink: 0 }}>
-          {/* Left icon rail (#341): flush with the outermost edge, two rows
-              matching the two chip rows — top row top-aligned, bottom row centered. */}
+          {/* Left icon rail (#341): two rows matching the quick-info grid rows. */}
           <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
             <div style={{ flex: 1, display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }}>
               {quickInfoEnabled && (
@@ -1429,54 +1680,216 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             </div>
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }} />
           </div>
-          <div style={{
-            flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '0.3rem',
-            padding: '0.4rem 0.75rem',
-          }}>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
-            <button
-              style={infoChipBtnStyle} title="Jump to the oldest telegram in the current view"
-              onClick={() => gotoIndex(infoMetrics.oldestIdx)}
-            >
-              Oldest: {format(new Date(telegramRows[infoMetrics.oldestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
-            </button>
-            <button
-              style={infoChipBtnStyle} title="Jump to the newest telegram in the current view"
-              onClick={() => gotoIndex(infoMetrics.newestIdx)}
-            >
-              Newest: {format(new Date(telegramRows[infoMetrics.newestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
-            </button>
-            {infoMetrics.minDeltaIdx !== -1 && (
-              <button
-                style={infoChipBtnStyle} title="Jump to the smallest time gap in the current view"
-                onClick={() => gotoIndex(infoMetrics.minDeltaIdx)}
-              >
-                Min Δt: {telegramRows[infoMetrics.minDeltaIdx].deltaStr}
-              </button>
-            )}
-            {infoMetrics.maxDeltaIdx !== -1 && (
-              <button
-                style={infoChipBtnStyle} title="Jump to the largest time gap in the current view"
-                onClick={() => gotoIndex(infoMetrics.maxDeltaIdx)}
-              >
-                Max Δt: {telegramRows[infoMetrics.maxDeltaIdx].deltaStr}
-              </button>
-            )}
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
-            <span style={infoChipStyle}>{infoMetrics.count} telegram{infoMetrics.count !== 1 ? 's' : ''}</span>
-            <span style={infoChipStyle}>{infoMetrics.sourceCount} source{infoMetrics.sourceCount !== 1 ? 's' : ''}</span>
-            <span style={infoChipStyle}>{infoMetrics.targetCount} target{infoMetrics.targetCount !== 1 ? 's' : ''}</span>
-            <span style={infoChipStyle}>{infoMetrics.dptCount} DPT{infoMetrics.dptCount !== 1 ? 's' : ''}</span>
-            {infoMetrics.typeCounts.map(([type, n]) => (
-              <span key={type} style={infoChipStyle}>{type}: {n}</span>
-            ))}
-            {infoMetrics.contextCount > 0 && (
-              <span style={infoChipStyle} title="Rows shown only as unfiltered Time-Delta-Context, not real filter matches (#343)">
-                {infoMetrics.contextCount} context
-              </span>
-            )}
-          </div>
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+              display: 'grid',
+              gridTemplateColumns: gridTemplate,
+              paddingRight: '8px', // align with header/QF scrollbar compensation
+            }}
+          >
+            {visibleCols.map((c) => {
+              let topNode: React.ReactNode = <span style={infoChipStyle}>-</span>;
+              let bottomNode: React.ReactNode = <span style={infoChipBottomStyle}>-</span>;
+
+              if (c.id === 'time') {
+                topNode = (
+                  <button
+                    style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
+                    title="Jump to the oldest telegram in the current view"
+                    onClick={() => {
+                      markSingleRowByIndex(infoMetrics.oldestIdx);
+                      gotoIndex(infoMetrics.oldestIdx);
+                    }}
+                  >
+                    Oldest: {format(new Date(telegramRows[infoMetrics.oldestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
+                  </button>
+                );
+                bottomNode = (
+                  <button
+                    style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
+                    title="Jump to the newest telegram in the current view"
+                    onClick={() => {
+                      markSingleRowByIndex(infoMetrics.newestIdx);
+                      gotoIndex(infoMetrics.newestIdx);
+                    }}
+                  >
+                    Newest: {format(new Date(telegramRows[infoMetrics.newestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
+                  </button>
+                );
+              } else if (c.id === 'delta') {
+                topNode = infoMetrics.minDeltaIdx !== -1 ? (
+                  <button
+                    style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
+                    title="Jump to the smallest time gap in the current view"
+                    onClick={() => {
+                      markSingleRowByIndex(infoMetrics.minDeltaIdx);
+                      gotoIndex(infoMetrics.minDeltaIdx);
+                    }}
+                  >
+                    Min Δt: {telegramRows[infoMetrics.minDeltaIdx].deltaStr}
+                  </button>
+                ) : <span style={infoChipStyle}>Min Δt: -</span>;
+                bottomNode = infoMetrics.maxDeltaIdx !== -1 ? (
+                  <button
+                    style={{ ...infoChipBtnStyle, width: '100%', justifyContent: 'flex-start' }}
+                    title="Jump to the largest time gap in the current view"
+                    onClick={() => {
+                      markSingleRowByIndex(infoMetrics.maxDeltaIdx);
+                      gotoIndex(infoMetrics.maxDeltaIdx);
+                    }}
+                  >
+                    Max Δt: {telegramRows[infoMetrics.maxDeltaIdx].deltaStr}
+                  </button>
+                ) : <span style={infoChipStyle}>Max Δt: -</span>;
+              } else if (c.id === 'source') {
+                const allSourcesInBuffer = allBufferSourceCount ?? infoMetrics.displayedSourceCount;
+                const showFilteredSourceContent = infoMetrics.matchedSourceCount !== allSourcesInBuffer;
+                topNode = <span style={infoChipStyle}>buffer: {allSourcesInBuffer} / {projectSourceCount ?? '-'}</span>;
+                bottomNode = showFilteredSourceContent
+                  ? (
+                    <span style={infoChipBottomStyle}>
+                      <button
+                        style={infoCountBtnBottomStyle}
+                        title="Filtered source-device count"
+                        onClick={() => {}}
+                      >
+                        {infoMetrics.matchedSourceCount}
+                      </button>
+                      <span>filtered</span>
+                      {infoMetrics.contextualOnlySourceCount > 0 && (
+                        <>
+                          <span>(</span>
+                          <button
+                            style={infoCountBtnBottomStyle}
+                            title="Contextual source-device count"
+                            onClick={() => {}}
+                          >
+                            {infoMetrics.contextualOnlySourceCount}
+                          </button>
+                          <span>)</span>
+                        </>
+                      )}
+                    </span>
+                  )
+                  : <span style={infoChipBottomStyle} />;
+              } else if (c.id === 'target') {
+                const allTargetsInBuffer = allBufferTargetCount ?? infoMetrics.displayedTargetCount;
+                const showFilteredTargetContent = infoMetrics.matchedTargetCount !== allTargetsInBuffer;
+                topNode = <span style={infoChipStyle}>buffer: {allTargetsInBuffer} / {projectTargetCount ?? '-'}</span>;
+                bottomNode = showFilteredTargetContent
+                  ? (
+                    <span style={infoChipBottomStyle}>
+                      <button
+                        style={infoCountBtnBottomStyle}
+                        title="Filtered target-device count"
+                        onClick={() => {}}
+                      >
+                        {infoMetrics.matchedTargetCount}
+                      </button>
+                      <span>filtered</span>
+                      {infoMetrics.contextualOnlyTargetCount > 0 && (
+                        <>
+                          <span>(</span>
+                          <button
+                            style={infoCountBtnBottomStyle}
+                            title="Contextual target-device count"
+                            onClick={() => {}}
+                          >
+                            {infoMetrics.contextualOnlyTargetCount}
+                          </button>
+                          <span>)</span>
+                        </>
+                      )}
+                    </span>
+                  )
+                  : <span style={infoChipBottomStyle} />;
+              } else if (c.id === 'type') {
+                const totalTypeSummary = summarizeAbbreviatedValues(allBufferTypes ?? infoMetrics.displayedTypeValues, TYPE_ABBREVIATIONS);
+                const totalDirectionSummary = summarizeAbbreviatedValues(allBufferDirections ?? infoMetrics.displayedDirectionValues, DIRECTION_ABBREVIATIONS);
+                const filteredTypeSummary = summarizeAbbreviatedValues(infoMetrics.matchedTypeValues, TYPE_ABBREVIATIONS);
+                const filteredDirectionSummary = summarizeAbbreviatedValues(infoMetrics.matchedDirectionValues, DIRECTION_ABBREVIATIONS);
+                const bottomParts: string[] = [];
+                if (filteredTypeSummary !== totalTypeSummary || quickFilterFiltersOutAnyMessage) bottomParts.push(`types: ${filteredTypeSummary}`);
+                if (filteredDirectionSummary !== totalDirectionSummary || quickFilterFiltersOutAnyMessage) bottomParts.push(`dirs: ${filteredDirectionSummary}`);
+                topNode = <span style={infoChipStyle}>types: {totalTypeSummary} / dirs: {totalDirectionSummary}</span>;
+                bottomNode = <span style={infoChipBottomStyle}>{bottomParts.join(' / ')}</span>;
+              } else if (c.id === 'dpt') {
+                const totalMainCount = countDistinctValues(allBufferDptMains ?? infoMetrics.displayedDptMainValues);
+                const totalMainSubCount = countDistinctValues(allBufferDptMainSubs ?? infoMetrics.displayedDptMainSubValues);
+                const filteredMainCount = countDistinctValues(infoMetrics.matchedDptMainValues);
+                const filteredMainSubCount = countDistinctValues(infoMetrics.matchedDptMainSubValues);
+                const bottomParts: string[] = [];
+                if (filteredMainCount !== totalMainCount || quickFilterFiltersOutAnyMessage) bottomParts.push(`main: ${filteredMainCount}`);
+                if (filteredMainSubCount !== totalMainSubCount || quickFilterFiltersOutAnyMessage) bottomParts.push(`DPT: ${filteredMainSubCount}`);
+                topNode = <span style={infoChipStyle}>main: {totalMainCount} / DPT: {totalMainSubCount}</span>;
+                bottomNode = <span style={infoChipBottomStyle}>{bottomParts.join(' / ')}</span>;
+              } else if (c.id === 'value') {
+                const totalInBuffer = allBufferMessageCount ?? infoMetrics.count;
+                const filteredMessageCount = Math.max(0, infoMetrics.count - infoMetrics.contextCount);
+                const showFilteredMessageCount = filteredMessageCount !== totalInBuffer;
+                topNode = (
+                  <span style={infoChipStyle}>
+                    <span>msg: {totalInBuffer} / buf: {bufferCapacity ?? '-'}, marks:</span>
+                    <button
+                      style={markedToggleCount > 0
+                        ? (valueRowFilter === 'marked' ? infoCountBtnActiveStyle : infoCountBtnStyle)
+                        : infoCountBtnDisabledStyle}
+                      title="Marked message count"
+                      disabled={markedToggleCount === 0}
+                      aria-pressed={valueRowFilter === 'marked'}
+                      onClick={() => {
+                        if (markedToggleCount === 0) return;
+                        setValueRowFilter(prev => (prev === 'marked' ? 'none' : 'marked'));
+                      }}
+                    >
+                      {markedToggleCount}
+                    </button>
+                    <span>context marks:</span>
+                    <button
+                      style={flaggedToggleCount > 0
+                        ? (valueRowFilter === 'flagged' ? infoCountBtnActiveStyle : infoCountBtnStyle)
+                        : infoCountBtnDisabledStyle}
+                      title="Context-marked message count"
+                      disabled={flaggedToggleCount === 0}
+                      aria-pressed={valueRowFilter === 'flagged'}
+                      onClick={() => {
+                        if (flaggedToggleCount === 0) return;
+                        setValueRowFilter(prev => (prev === 'flagged' ? 'none' : 'flagged'));
+                      }}
+                    >
+                      {flaggedToggleCount}
+                    </button>
+                  </span>
+                );
+                bottomNode = (
+                  <span style={infoChipBottomStyle}>
+                    {showFilteredMessageCount
+                      ? `${filteredMessageCount} filtered${infoMetrics.contextCount > 0 ? ` (${infoMetrics.contextCount})` : ''}`
+                      : ''}
+                  </span>
+                );
+              }
+
+              return (
+                <div
+                  key={c.id}
+                  style={{
+                    padding: '0.35rem 0.5rem',
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '0.35rem',
+                    minWidth: 0,
+                  }}
+                >
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', minWidth: 0, flex: 1 }}>
+                    {topNode}
+                    {bottomNode}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1541,8 +1954,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             minWidth: 0,
             display: 'grid',
             gridTemplateColumns: gridTemplate,
-            color: 'var(--text-dim)',
-            fontSize: '0.65rem',
+            color: '#fff',
+            fontSize: '0.8rem',
             textTransform: 'uppercase',
             letterSpacing: '0.05em',
             fontWeight: 700,
