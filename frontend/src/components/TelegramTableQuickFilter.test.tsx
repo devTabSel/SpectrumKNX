@@ -192,6 +192,15 @@ test('an invalid regex: expression in the name row falls back to a literal subst
   expect(rowCount(container)).toBe(1);
 });
 
+test('the delta-context icon in the quick filter bar uses the same row-control glyph', () => {
+  renderTable();
+  fireEvent.click(screen.getByTitle('Show quick filter bar'));
+
+  const deltaButton = screen.getByTitle(/Time-Delta-Context:/);
+  expect(deltaButton).toBeInTheDocument();
+  expect(deltaButton.querySelector('svg')).toBeInTheDocument();
+});
+
 test('the toggle disables filtering without losing patterns; collapsing restores all rows', () => {
   const { container } = renderTable();
   fireEvent.click(screen.getByTitle('Show quick filter bar'));

@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useEffect, useLayoutEffect, useState, useCallba
 import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
-import { ChevronUp, ChevronDown, Filter, Search, LineChart, X, Clock, Power, Circle, CircleDot } from 'lucide-react';
+import { ChevronUp, ChevronDown, Filter, Search, LineChart, X, Clock, Circle, CircleDot } from 'lucide-react';
 import { type ActiveFilters } from '../types/filters';
 import { SendToGaPopover } from './SendToGaPopover';
 import { GotoTimeControl } from './GotoTimeControl';
@@ -2287,7 +2287,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 <span>{c.label}</span>
               )}
             </div>
-            <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '0.4rem' }}>
+            <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-start', gap: '0.4rem' }}>
               {quickOpen && quickEnabled && (
                 <button
                   className={`quick-filter-bar-toggle ${quickEnabled && isQuickColumnEnabled(c.id) ? 'open' : ''}`}
@@ -2340,7 +2340,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     color: deltaFlagState === 'all' ? 'var(--accent-primary)' : undefined,
                   }}
                 >
-                  <Power size={12} />
+                  {deltaFlagState === 'all' ? <CircleDot size={12} /> : <Circle size={12} />}
                 </button>
               )}
             </div>
