@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useLayoutEffect, useState, useMemo } from 're
 import UplotReact from 'uplot-react';
 import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
+import { LockOpen } from 'lucide-react';
 import type { ChartBucket } from '../hooks/useChartData';
 import { useThemeTick } from '../hooks/useTheme';
 import { seriesColor } from '../utils/seriesColors';
@@ -251,14 +252,16 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
             // Keep the delayed single-click so double-click zoom reset wins.
             let clickTimer: ReturnType<typeof setTimeout> | null = null;
             let down: { x: number; y: number } | null = null;
+            const clearSelection = () => {
+              if (Math.abs(u.select.width) < 0.5 && Math.abs(u.select.height) < 0.5) return;
+              window.requestAnimationFrame(() => {
+                u.setSelect({ left: 0, width: 0, top: 0, height: 0 }, false);
+              });
+            };
             u.root.addEventListener('mousedown', (e) => { down = { x: e.clientX, y: e.clientY }; });
+            window.addEventListener('mouseup', clearSelection);
             u.root.addEventListener('mouseup', (e) => {
-              const hadSelection = Math.abs(u.select.width) >= 0.5;
-              if (hadSelection) {
-                window.requestAnimationFrame(() => {
-                  u.setSelect({ left: 0, width: 0, top: 0, height: 0 }, false);
-                });
-              }
+              clearSelection();
               const start = down;
               down = null;
               if (!start) return;
@@ -386,7 +389,7 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
       },
       axes: [
         {
-          space: multiDay ? 95 : 55,
+          space: multiDay ? 92 : 52,
           stroke: axisStroke,
           grid: { stroke: gridStroke },
           values: (_u, splits) => splits.map(v => formatAxisTime(v * 1000, multiDay))
@@ -434,9 +437,23 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
 
   return (
     <div style={{ marginBottom: '2rem', background: 'var(--bg-inset)', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border-color)', overflow: 'visible' }}>
-      <h4 style={{ margin: '0 0 1rem', fontSize: '0.9rem', color: 'var(--text-main)' }}>
-        Events (unchartable values)
-      </h4>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
+        <h4 style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-main)' }}>
+          Events (unchartable values)
+        </h4>
+        <button
+          type="button"
+          title="Lock"
+          onClick={(e) => { e.stopPropagation(); }}
+          style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'transparent',
+            border: '1px solid var(--border-color)', borderRadius: '6px', width: 28, height: 28, padding: 0,
+            cursor: 'pointer', color: 'var(--text-dim)',
+          }}
+        >
+          <LockOpen size={12} />
+        </button>
+      </div>
       <div style={{ position: 'relative', width: '100%' }}>
         {/* HTML Legend Overlay on the left */}
         <div style={{
@@ -540,7 +557,7 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
             style={{
               position: 'absolute',
               left: 0,
-              bottom: '18px',
+              bottom: '6px',
               width: `${Math.max(0, LEFT_GUTTER - 4)}px`,
               paddingRight: '4px',
               textAlign: 'right',
@@ -561,7 +578,7 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
             style={{
               position: 'absolute',
               left: `calc(100% - ${rightRulerPad}px)`,
-              bottom: '18px',
+              bottom: '6px',
               paddingLeft: '4px',
               textAlign: 'left',
               fontSize: '0.68rem',

@@ -321,14 +321,16 @@ export const MixedChart: React.FC<MixedChartProps> = ({
             // Keep the delayed single-click so double-click zoom reset wins.
             let clickTimer: ReturnType<typeof setTimeout> | null = null;
             let down: { x: number; y: number } | null = null;
+            const clearSelection = () => {
+              if (Math.abs(u.select.width) < 0.5 && Math.abs(u.select.height) < 0.5) return;
+              window.requestAnimationFrame(() => {
+                u.setSelect({ left: 0, width: 0, top: 0, height: 0 }, false);
+              });
+            };
             u.root.addEventListener('mousedown', (e) => { down = { x: e.clientX, y: e.clientY }; });
+            window.addEventListener('mouseup', clearSelection);
             u.root.addEventListener('mouseup', (e) => {
-              const hadSelection = Math.abs(u.select.width) >= 0.5;
-              if (hadSelection) {
-                window.requestAnimationFrame(() => {
-                  u.setSelect({ left: 0, width: 0, top: 0, height: 0 }, false);
-                });
-              }
+              clearSelection();
               const start = down;
               down = null;
               if (!start) return;
@@ -460,7 +462,7 @@ export const MixedChart: React.FC<MixedChartProps> = ({
         {
           // Wider minimum tick spacing when labels carry a date, so the
           // "MM-DD HH:mm" ticks don't overlap into an unreadable ruler (#314).
-          space: multiDay ? 95 : 55,
+          space: multiDay ? 92 : 52,
           grid: { stroke: gridStroke, width: 1 },
           stroke: axisStroke,
           values: (_u, splits) => splits.map(v => formatAxisTime(v * 1000, multiDay))
@@ -537,14 +539,13 @@ export const MixedChart: React.FC<MixedChartProps> = ({
               ? 'Unlock: further selected GAs of this metric will join this chart again'
               : 'Lock: prevent further selected GAs of this metric from crowding this chart — they start a new one instead'}
             style={{
-              display: 'flex', alignItems: 'center', gap: '0.3rem', background: 'transparent',
-              border: '1px solid var(--border-color)', borderRadius: '6px', padding: '0.25rem 0.5rem',
-              fontSize: '0.7rem', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'transparent',
+              border: '1px solid var(--border-color)', borderRadius: '6px', width: 28, height: 28, padding: 0,
+              cursor: 'pointer',
               color: locked ? 'var(--accent-primary)' : 'var(--text-dim)',
             }}
           >
             {locked ? <Lock size={12} /> : <LockOpen size={12} />}
-            {locked ? 'Locked' : 'Lock'}
           </button>
         )}
       </div>
@@ -639,7 +640,7 @@ export const MixedChart: React.FC<MixedChartProps> = ({
             style={{
               position: 'absolute',
               left: 0,
-              bottom: '18px',
+              bottom: '6px',
               width: `${Math.max(0, leftGutter - 4)}px`,
               paddingRight: '4px',
               textAlign: 'right',
@@ -660,7 +661,7 @@ export const MixedChart: React.FC<MixedChartProps> = ({
             style={{
               position: 'absolute',
               left: `calc(100% - ${rightRulerPad}px)`,
-              bottom: '18px',
+              bottom: '6px',
               paddingLeft: '4px',
               textAlign: 'left',
               fontSize: '0.68rem',
