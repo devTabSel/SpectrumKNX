@@ -222,7 +222,7 @@ test('filters combine across columns (AND)', () => {
   expect(rowCount(container)).toBe(1);
 });
 
-test('delta-context rows are filtered out again by the quick filter', () => {
+test('delta-context rows are remixed after the quick filter', () => {
   const contextTelegram = makeTelegram({
     timestamp: '2024-01-01T10:00:00.000Z',
     target_address: '9/9/9',
@@ -245,8 +245,8 @@ test('delta-context rows are filtered out again by the quick filter', () => {
     />,
   );
 
-  expect(rowCount(container)).toBe(1);
-  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(false);
+  expect(rowCount(container)).toBe(2);
+  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(true);
 });
 
 test('non-delta contextual rows are remixed after quick filter', () => {
@@ -279,7 +279,7 @@ test('non-delta contextual rows are remixed after quick filter', () => {
   expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Marked Context'))).toBe(true);
 });
 
-test('delta-context rows are hidden when quick filter excludes every message', () => {
+test('delta-context rows still appear when quick filter excludes every matched message', () => {
   const contextTelegram = makeTelegram({
     timestamp: '2024-01-01T10:00:00.000Z',
     target_address: '9/9/9',
@@ -302,8 +302,8 @@ test('delta-context rows are hidden when quick filter excludes every message', (
     />,
   );
 
-  expect(rowCount(container)).toBe(0);
-  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(false);
+  expect(rowCount(container)).toBe(1);
+  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(true);
 });
 
 test('context-only rows do not show a message-context flag control, even when marked', () => {
@@ -422,7 +422,7 @@ test('a non-delta contextual row keeps its colored bar even when it passes the q
   expect(contextRow?.style.boxShadow).toContain('var(--accent-primary)');
 });
 
-test('changing delta before/after re-evaluates and updates contextual rows', () => {
+test('changing delta before/after re-evaluates and keeps contextual rows remixed', () => {
   const anchorTelegram = makeTelegram({
     timestamp: '2024-01-01T10:00:03.000Z',
     target_address: '1/2/3',
@@ -481,8 +481,8 @@ test('changing delta before/after re-evaluates and updates contextual rows', () 
     />,
   );
 
-  expect(rowCount(container)).toBe(1);
-  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(false);
+  expect(rowCount(container)).toBe(2);
+  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(true);
 });
 
 test('enabling or disabling a quick-filter column re-evaluates which rows are contextual', () => {
@@ -515,7 +515,7 @@ test('enabling or disabling a quick-filter column re-evaluates which rows are co
     flaggedKeys,
   });
   const contextRowBefore = [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Context Only'));
-  expect(contextRowBefore).toBeUndefined();
+  expect(contextRowBefore).toBeDefined();
 
   const disabledTarget = { ...DEFAULT_QUICK_FILTER_COLUMN_ENABLED, target: false };
   const quickMatches = compileQuickFilters(quickPatterns, disabledTarget);
@@ -578,7 +578,7 @@ test('disabling the DELTA quick-filter column re-evaluates contextual rows as if
     deltaAfterMs: 0,
     flaggedKeys,
   });
-  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(false);
+  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(true);
 
   const disabledDelta = { ...DEFAULT_QUICK_FILTER_COLUMN_ENABLED, delta: false };
   const quickPatterns = { target: { top: '', bottom: 'küche' } };

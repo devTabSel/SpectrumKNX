@@ -683,11 +683,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   );
   const forcedAfterQuickFilterKeys = useMemo(() => {
     if (!contextKeys) return new Set<string>();
-    const forced = new Set<string>();
-    for (const [key, reason] of contextKeys.entries()) {
-      if (reason !== 'delta') forced.add(key);
-    }
-    return forced;
+    return new Set<string>(contextKeys.keys());
   }, [contextKeys]);
   const quickFiltered = useMemo(() => {
     if (!quickFilterFeatureEnabled || !quickOpen || !quickEnabled) return telegrams;

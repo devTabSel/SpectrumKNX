@@ -275,18 +275,24 @@ export const MixedChart: React.FC<MixedChartProps> = ({
         ],
         setSelect: [
           (u) => {
-            if (u.select.width > 0) {
-              const plotWidth = u.bbox.width;
-              const rawLeft = u.select.left;
-              const rawRight = u.select.left + u.select.width;
-              const selLeft = Math.min(rawLeft, rawRight);
-              const selRight = Math.max(rawLeft, rawRight);
-              const leftPx = Math.max(0, Math.min(plotWidth, selLeft));
-              const rightPx = Math.max(leftPx, Math.min(plotWidth, selRight));
-              const min = u.posToVal(leftPx, 'x');
-              const max = u.posToVal(rightPx, 'x');
-              onZoomRangeChange?.([min * 1000, max * 1000]);
+            if (Math.abs(u.select.width) < 0.5) return;
+            const plotLeft = u.bbox.left;
+            const plotWidth = u.bbox.width;
+            if (plotWidth <= 0) return;
+            const plotRight = plotLeft + plotWidth;
+            const rawA = u.select.left;
+            const rawB = u.select.left + u.select.width;
+            const unclampedLeft = Math.min(rawA, rawB);
+            const unclampedRight = Math.max(rawA, rawB);
+            const leftPx = Math.max(plotLeft, Math.min(plotRight, unclampedLeft));
+            const rightPx = Math.max(leftPx, Math.min(plotRight, unclampedRight));
+            const selectWidth = rightPx - leftPx;
+            if (Math.abs(u.select.left - leftPx) > 0.5 || Math.abs(u.select.width - selectWidth) > 0.5) {
+              u.setSelect({ left: leftPx, width: selectWidth, top: u.select.top, height: u.select.height }, false);
             }
+            const min = u.posToVal(leftPx - plotLeft, 'x');
+            const max = u.posToVal(rightPx - plotLeft, 'x');
+            onZoomRangeChange?.([min * 1000, max * 1000]);
           }
         ],
         ready: [
@@ -317,6 +323,12 @@ export const MixedChart: React.FC<MixedChartProps> = ({
             let down: { x: number; y: number } | null = null;
             u.root.addEventListener('mousedown', (e) => { down = { x: e.clientX, y: e.clientY }; });
             u.root.addEventListener('mouseup', (e) => {
+              const hadSelection = Math.abs(u.select.width) >= 0.5;
+              if (hadSelection) {
+                window.requestAnimationFrame(() => {
+                  u.setSelect({ left: 0, width: 0, top: 0, height: 0 }, false);
+                });
+              }
               const start = down;
               down = null;
               if (!start) return;

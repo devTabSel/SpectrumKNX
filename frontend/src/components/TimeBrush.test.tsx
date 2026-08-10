@@ -19,8 +19,8 @@ test('renders TimeBrush, handles middle click and drags to pan', () => {
     />
   );
 
-  // Find container div that has clientWidth/getBoundingClientRect mocked
-  const track = container.querySelector('div[style*="position: relative"]');
+  // Find the actual ruler track div (not the outer wrapper)
+  const track = container.querySelector('div[style*="position: relative"][style*="height: 30px"]');
   expect(track).toBeTruthy();
 
   // Mock bounding rect
@@ -77,4 +77,23 @@ test('double-clicking a handle snaps that limit to min/max (#267)', () => {
 
   fireEvent.doubleClick(rightHandle);
   expect(onChangeMock).toHaveBeenLastCalledWith([initialVal[0], maxTime]);
+});
+
+test('renders right-side AutoFollow toggle and triggers callback', () => {
+  const onToggle = vi.fn();
+
+  render(
+    <TimeBrush
+      minTime={minTime}
+      maxTime={maxTime}
+      value={initialVal}
+      onChange={vi.fn()}
+      telegrams={[]}
+      autoFollowRight={false}
+      onToggleAutoFollowRight={onToggle}
+    />
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: 'Enable auto-follow' }));
+  expect(onToggle).toHaveBeenCalledTimes(1);
 });

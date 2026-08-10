@@ -1,4 +1,5 @@
 import React, { useRef, useMemo, useEffect, useState } from 'react';
+import { FastForward, Square } from 'lucide-react';
 import type { Telegram } from '../hooks/useWebSocket';
 
 interface TimeBrushProps {
@@ -17,6 +18,9 @@ interface TimeBrushProps {
   rightInset?: number;
   /** Compact inline mode for embedding the ruler into the Visualizer header row. */
   compact?: boolean;
+  /** Optional right-side toggle: ON keeps the right handle pinned to live edge. */
+  autoFollowRight?: boolean;
+  onToggleAutoFollowRight?: () => void;
 }
 
 export const TimeBrush: React.FC<TimeBrushProps> = ({
@@ -30,6 +34,8 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
   leftInset = 24,
   rightInset = 24,
   compact = false,
+  autoFollowRight,
+  onToggleAutoFollowRight,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragMode, setDragMode] = useState<'left' | 'right' | 'middle' | null>(null);
@@ -137,6 +143,7 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
       borderTop: compact ? 'none' : '1px solid var(--border-color)',
       background: compact ? 'transparent' : 'var(--bg-panel)',
       flexShrink: 0,
+      position: 'relative',
     }}>
       <div
         ref={containerRef}
@@ -266,6 +273,37 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
           />
         </div>
       </div>
+      {onToggleAutoFollowRight && (
+        <button
+          type="button"
+          onClick={onToggleAutoFollowRight}
+          aria-label={autoFollowRight ? 'Stop auto-follow' : 'Enable auto-follow'}
+          title={autoFollowRight
+            ? 'Stop: freeze right edge at current timestamp'
+            : 'AutoFollow: pin right edge to live edge'}
+          style={{
+            position: 'absolute',
+            left: `calc(100% - ${rightInset}px + ${compact ? 6 : 10}px)`,
+            top: '50%',
+            transform: 'translateY(-50%)',
+            height: 28,
+            width: 28,
+            minWidth: 28,
+            padding: 0,
+            border: 'none',
+            borderRadius: 4,
+            background: 'transparent',
+            color: autoFollowRight ? 'var(--accent-primary)' : 'var(--text-dim)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            zIndex: 20,
+          }}
+        >
+          {autoFollowRight ? <Square size={14} /> : <FastForward size={15} />}
+        </button>
+      )}
     </div>
   );
 };

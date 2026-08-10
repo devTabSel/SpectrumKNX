@@ -132,16 +132,24 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     return () => window.clearInterval(id);
   }, [edgePinned.right]);
 
-  const setZoomRange = (val: [number, number] | null | ((prev: [number, number] | null) => [number, number] | null)) => {
-    const next = typeof val === 'function' ? val(currentZoomRange) : val;
+  const applyZoomRange = (next: [number, number] | null, pinOverride?: { left: boolean; right: boolean }) => {
     setInternalZoomRange(next);
     onZoomRangeChange?.(next);
     if (next && minTime !== null && maxTime !== null) {
+      if (pinOverride) {
+        setEdgePinned(pinOverride);
+        return;
+      }
       const eps = Math.max(1000, (maxTime - minTime) * 0.005);
       setEdgePinned({ left: next[0] <= minTime + eps, right: next[1] >= maxTime - eps });
     } else {
       setEdgePinned({ left: false, right: false });
     }
+  };
+
+  const setZoomRange = (val: [number, number] | null | ((prev: [number, number] | null) => [number, number] | null)) => {
+    const next = typeof val === 'function' ? val(currentZoomRange) : val;
+    applyZoomRange(next);
   };
 
   const activeRange = useMemo<[number, number]>(() => {
@@ -155,6 +163,19 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     if (edgePinned.right) return Math.max(activeRange[1], liveNowMs);
     return activeRange[1];
   }, [activeRange, edgePinned.right, liveNowMs]);
+
+  const toggleRightAutoFollow = () => {
+    if (minTime === null || maxTime === null) return;
+    if (edgePinned.right) {
+      const frozenRange: [number, number] = [activeRange[0], activeRange[1]];
+      applyZoomRange(frozenRange, { left: edgePinned.left, right: false });
+      return;
+    }
+
+    const nextRange: [number, number] = [activeRange[0], maxTime];
+    const eps = Math.max(1000, (maxTime - minTime) * 0.005);
+    applyZoomRange(nextRange, { left: nextRange[0] <= minTime + eps, right: true });
+  };
 
   // Align the TimeBrush ruler's ends with each chart's left gutter / right
   // ruler-pad vertical marker lines (#358): both sit CHART_OUTER_INSET (the
@@ -256,6 +277,8 @@ export const Visualizer: React.FC<VisualizerProps> = ({
             rightPinned={edgePinned.right}
             leftInset={rulerLeftInset}
             rightInset={rulerRightInset}
+            autoFollowRight={edgePinned.right}
+            onToggleAutoFollowRight={toggleRightAutoFollow}
           />
         )}
         {charts}
@@ -303,18 +326,30 @@ export const Visualizer: React.FC<VisualizerProps> = ({
                     rightPinned={edgePinned.right}
                     leftInset={rulerLeftInset}
                     rightInset={rulerRightInset}
+                    autoFollowRight={edgePinned.right}
+                    onToggleAutoFollowRight={toggleRightAutoFollow}
                     compact
                   />
                 </div>
               </div>
             )}
 
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.9rem', position: 'relative', zIndex: 2 }}>
-              <div style={{ flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.9rem', position: 'relative', zIndex: 2, pointerEvents: 'none' }}>
+              <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: '0.45rem', pointerEvents: 'auto' }}>
                 <h3 style={{ fontSize: '1rem', margin: 0 }}>Visualization</h3>
+                {buckets.length > 0 && (
+                  <button
+                    className="icon-button"
+                    onClick={exportPng}
+                    title="Print / PDF Export"
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, border: '1px solid var(--border-color)', borderRadius: '7px' }}
+                  >
+                    <Download size={15} />
+                  </button>
+                )}
               </div>
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexShrink: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexShrink: 0, pointerEvents: 'auto' }}>
               {buckets.length > 0 && (
                 <>
                 <button
@@ -357,14 +392,6 @@ export const Visualizer: React.FC<VisualizerProps> = ({
                     {linkCopied ? <><Check size={16} /> Copied</> : <><Link2 size={16} /> Copy link</>}
                   </button>
                 )}
-                <button
-                  className="icon-button"
-                  onClick={exportPng}
-                  title="Print / PDF Export"
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, border: '1px solid var(--border-color)', borderRadius: '7px' }}
-                >
-                  <Download size={15} />
-                </button>
                 </>
               )}
               {/* Close X in the panel header, like every other main panel (#347). */}
