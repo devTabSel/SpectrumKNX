@@ -504,6 +504,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     return telegrams.filter(t => matches(t) || !!contextKeys?.has(anchorKey(t)));
   }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, currentPatterns, currentQuickColumnEnabled, contextKeys]);
 
+  const hasNonInitialDeltaWindow = activeFilters.deltaBeforeMs !== 0 || activeFilters.deltaAfterMs !== 0;
+  const showRowMessageContextControl =
+    rowFlagsEnabled &&
+    quickEnabled &&
+    isQuickColumnEnabled('delta') &&
+    hasNonInitialDeltaWindow;
+
   const timeSortDirection: 'asc' | 'desc' | null =
     effectiveSortConfig[0]?.key === 'timestamp' ? effectiveSortConfig[0].direction : null;
 
@@ -1764,7 +1771,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   {/* Left icon rail (#341): single row, vertically centered —
                       the message-context (Time-Delta-Context) flag toggle. */}
                   <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    {rowFlagsEnabled && !hasContext && (
+                    {showRowMessageContextControl && !hasContext && (
                       <button
                         style={{
                           background: 'transparent', border: 'none', cursor: 'pointer', padding: '0.15rem',

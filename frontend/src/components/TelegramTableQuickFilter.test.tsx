@@ -56,7 +56,7 @@ const renderTable = () =>
       visibleColumns={visibleColumns}
       sortConfig={sortConfig}
       onSort={vi.fn()}
-      activeFilters={DEFAULT_FILTERS}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
       onQuickFilter={vi.fn()}
       onQuickVisualize={vi.fn()}
     />,
@@ -547,6 +547,44 @@ test('flagging a single row reports the tristate as "some" (#319)', () => {
   expect(screen.getByTitle(/some messages flagged/)).toBeInTheDocument();
 });
 
+test('row message-context controls are hidden when delta window is initial (before=after=0)', () => {
+  const { container } = render(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 0, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+  fireEvent.click(screen.getByTitle('Show quick filter bar'));
+
+  expect(container.querySelector('button[title*="Always show context"]')).toBeFalsy();
+  expect(container.querySelector('button[title*="click to unflag"]')).toBeFalsy();
+});
+
+test('row message-context controls are hidden when DELTA quick-filter column is disabled', () => {
+  const { container } = render(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickFilterColumnEnabled={{ ...DEFAULT_QUICK_FILTER_COLUMN_ENABLED, delta: false }}
+    />,
+  );
+
+  expect(container.querySelector('button[title*="Always show context"]')).toBeFalsy();
+  expect(container.querySelector('button[title*="click to unflag"]')).toBeFalsy();
+});
+
 test('plain click on a message-context flag keeps only that row flagged', () => {
   const { container } = renderTable();
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
@@ -608,7 +646,7 @@ test('flagging a row pauses live-follow and anchors that row before list changes
       visibleColumns={visibleColumns}
       sortConfig={sortConfig}
       onSort={vi.fn()}
-      activeFilters={DEFAULT_FILTERS}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
       onQuickFilter={vi.fn()}
       onQuickVisualize={vi.fn()}
       listFollow={true}
