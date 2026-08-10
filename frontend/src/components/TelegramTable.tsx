@@ -9,6 +9,7 @@ import { GotoTimeControl } from './GotoTimeControl';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
 import { anchorKey } from '../utils/anchorKey';
+import type { ContextReason } from '../utils/deltaContextExpansion';
 import {
   compileQuickFilters,
   DEFAULT_QUICK_FILTER_COLUMN_ENABLED,
@@ -141,6 +142,8 @@ interface TelegramTableProps {
   onListFollowChange?: (follow: boolean) => void;
   listAnchorKey?: string | null;
   onListAnchorKeyChange?: (key: string | null) => void;
+  centerOnKey?: string | null;
+  onCenterOnKeyConsumed?: () => void;
 
   // Lifted row marks (#310): keys of marked telegrams + the most-recently
   // clicked one. Lifted so marks survive main-panel navigation.
@@ -158,10 +161,12 @@ interface TelegramTableProps {
   flaggedKeys?: string[];
   onFlaggedKeysChange?: (keys: string[]) => void;
 
-  /** Keys (via the same anchor identity) of rows present only as unfiltered
-   * Time-Delta-Context around a match/flag, not because they matched the
-   * active filters themselves — marked with a distinct background (#343). */
-  contextKeys?: ReadonlySet<string>;
+  /** Identity keys (via the same anchor identity) of rows present only as
+   * context, not because they matched the active filters themselves, mapped
+   * to the reason — a Time-Delta-Context window (#343) or being marked in any
+   * main panel (#380) — for distinct visual treatment. */
+  contextKeys?: ReadonlyMap<string, ContextReason>;
+  onVisualizationContextClear?: (key: string) => void;
   /** Number of unique source devices across all telegrams in the current buffer. */
   allBufferSourceCount?: number | null;
   /** Configured message-buffer capacity (max telegram count). */
@@ -367,10 +372,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   quickFilterFiltersOutAny,
   onDeltaContextChange,
   listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
+  centerOnKey, onCenterOnKeyConsumed,
   markedKeys, onMarkedKeysChange, lastMarkedKey, onLastMarkedKeyChange,
   infoBarOpen, onInfoBarOpenChange,
   flaggedKeys, onFlaggedKeysChange,
   contextKeys,
+  onVisualizationContextClear,
   allBufferSourceCount,
   bufferCapacity,
   allBufferMessageCount,
@@ -674,12 +681,20 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     () => compileQuickFilters(currentPatterns, currentQuickColumnEnabled),
     [currentPatterns, currentQuickColumnEnabled],
   );
+  const forcedAfterQuickFilterKeys = useMemo(() => {
+    if (!contextKeys) return new Set<string>();
+    const forced = new Set<string>();
+    for (const [key, reason] of contextKeys.entries()) {
+      if (reason !== 'delta') forced.add(key);
+    }
+    return forced;
+  }, [contextKeys]);
   const quickFiltered = useMemo(() => {
     if (!quickFilterFeatureEnabled || !quickOpen || !quickEnabled) return telegrams;
     const hasAnyQuickMatch = telegrams.some(t => quickMatches(t));
-    if (!hasAnyQuickMatch) return [];
-    return telegrams.filter(t => quickMatches(t) || !!contextKeys?.has(anchorKey(t)));
-  }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, quickMatches, contextKeys]);
+    if (!hasAnyQuickMatch && forcedAfterQuickFilterKeys.size === 0) return [];
+    return telegrams.filter(t => quickMatches(t) || forcedAfterQuickFilterKeys.has(anchorKey(t)));
+  }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, quickMatches, forcedAfterQuickFilterKeys]);
 
   const anyQuickColumnEnabled = useMemo(
     () => Object.values(currentQuickColumnEnabled).some(Boolean),
@@ -706,28 +721,36 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // computed regardless of sort column, respecting whatever hierarchy is
   // active (#311).
   const naturalTelegramRows = useMemo<TelegramRow[]>(() => {
+    if (quickFiltered.length === 0) return [];
+    const timestamps = quickFiltered.map(t => new Date(t.timestamp).getTime());
+    const minTs = Math.min(...timestamps);
+    const maxTs = Math.max(...timestamps);
+
     return quickFiltered.map((t, idx) => {
       let deltaStr: string | null = null;
       let deltaNextStr: string | null = null;
       let deltaMs: number | null = null;
+      const currTs = timestamps[idx];
+      const hasOlderInList = currTs > minTs;
+      const hasYoungerInList = currTs < maxTs;
       if (idx > 0) {
-        const curr = new Date(t.timestamp).getTime();
-        const prev = new Date(quickFiltered[idx - 1].timestamp).getTime();
-        const rawDiff = curr - prev;
+        const prev = timestamps[idx - 1];
+        const rawDiff = currTs - prev;
         deltaMs = Math.abs(rawDiff);
         const sign: '+' | '-' = timeSortDirection
           ? (timeSortDirection === 'asc' ? '+' : '-')
           : (rawDiff >= 0 ? '+' : '-');
-        deltaStr = formatDeltaMs(deltaMs, sign);
+        const hasRequiredNeighbor = sign === '+' ? hasOlderInList : hasYoungerInList;
+        deltaStr = hasRequiredNeighbor ? formatDeltaMs(deltaMs, sign) : null;
       }
       if (idx < quickFiltered.length - 1) {
-        const curr = new Date(t.timestamp).getTime();
-        const next = new Date(quickFiltered[idx + 1].timestamp).getTime();
-        const rawDiffToNext = next - curr;
+        const next = timestamps[idx + 1];
+        const rawDiffToNext = next - currTs;
         const nextSign: '+' | '-' = timeSortDirection
           ? (timeSortDirection === 'asc' ? '-' : '+')
           : (rawDiffToNext >= 0 ? '-' : '+');
-        deltaNextStr = formatDeltaMs(Math.abs(rawDiffToNext), nextSign);
+        const hasRequiredNeighbor = nextSign === '+' ? hasOlderInList : hasYoungerInList;
+        deltaNextStr = hasRequiredNeighbor ? formatDeltaMs(Math.abs(rawDiffToNext), nextSign) : null;
       }
       return { ...t, deltaStr, deltaNextStr, deltaMs };
     });
@@ -791,6 +814,45 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     effectiveOnSort(key, opts);
   }, [exitDeltaSort, effectiveOnSort]);
 
+  const applyVisibleDeltas = useCallback((rows: TelegramRow[]): TelegramRow[] => {
+    if (rows.length === 0) return [];
+    const timestamps = rows.map(t => new Date(t.timestamp).getTime());
+    const minTs = Math.min(...timestamps);
+    const maxTs = Math.max(...timestamps);
+
+    return rows.map((t, idx) => {
+      let deltaStr: string | null = null;
+      let deltaNextStr: string | null = null;
+      let deltaMs: number | null = null;
+      const currTs = timestamps[idx];
+      const hasOlderInList = currTs > minTs;
+      const hasYoungerInList = currTs < maxTs;
+
+      if (idx > 0) {
+        const prevTs = timestamps[idx - 1];
+        const rawDiff = currTs - prevTs;
+        deltaMs = Math.abs(rawDiff);
+        const sign: '+' | '-' = timeSortDirection
+          ? (timeSortDirection === 'asc' ? '+' : '-')
+          : (rawDiff >= 0 ? '+' : '-');
+        const hasRequiredNeighbor = sign === '+' ? hasOlderInList : hasYoungerInList;
+        deltaStr = hasRequiredNeighbor ? formatDeltaMs(deltaMs, sign) : null;
+      }
+
+      if (idx < rows.length - 1) {
+        const nextTs = timestamps[idx + 1];
+        const rawDiffToNext = nextTs - currTs;
+        const nextSign: '+' | '-' = timeSortDirection
+          ? (timeSortDirection === 'asc' ? '-' : '+')
+          : (rawDiffToNext >= 0 ? '-' : '+');
+        const hasRequiredNeighbor = nextSign === '+' ? hasOlderInList : hasYoungerInList;
+        deltaNextStr = hasRequiredNeighbor ? formatDeltaMs(Math.abs(rawDiffToNext), nextSign) : null;
+      }
+
+      return { ...t, deltaStr, deltaNextStr, deltaMs };
+    });
+  }, [timeSortDirection]);
+
   const preValueFilterRows = deltaSortActive && deltaFrozenRows ? deltaFrozenRows : naturalTelegramRows;
   const telegramRows = useMemo(() => {
     const contextRelatedToSeedKeys = (seedKeys: Set<string>): Set<string> => {
@@ -819,21 +881,23 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     if (valueRowFilter === 'marked') {
       const markedKeys = new Set(preValueFilterRows.filter(t => markedSet.has(anchorKey(t))).map(t => anchorKey(t)));
       const relatedContext = contextRelatedToSeedKeys(markedKeys);
-      return preValueFilterRows.filter(t => {
+      const filtered = preValueFilterRows.filter(t => {
         const key = anchorKey(t);
         return markedSet.has(key) || relatedContext.has(key);
       });
+      return applyVisibleDeltas(filtered);
     }
     if (valueRowFilter === 'flagged') {
       const flaggedKeys = new Set(preValueFilterRows.filter(t => flaggedSet.has(anchorKey(t))).map(t => anchorKey(t)));
       const relatedContext = contextRelatedToSeedKeys(flaggedKeys);
-      return preValueFilterRows.filter(t => {
+      const filtered = preValueFilterRows.filter(t => {
         const key = anchorKey(t);
         return flaggedSet.has(key) || relatedContext.has(key);
       });
+      return applyVisibleDeltas(filtered);
     }
-    return preValueFilterRows;
-  }, [preValueFilterRows, valueRowFilter, markedSet, flaggedSet, contextKeys, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs]);
+    return applyVisibleDeltas(preValueFilterRows);
+  }, [preValueFilterRows, valueRowFilter, markedSet, flaggedSet, contextKeys, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs, applyVisibleDeltas]);
   const valueRowFilterFiltersOutAnyMessage = valueRowFilter !== 'none' && telegramRows.length < preValueFilterRows.length;
   const filterIndicatorFiltersOutAnyMessage = quickFilterFiltersOutAnyMessage || valueRowFilterFiltersOutAnyMessage;
   const quickFilterDividerColor = filterIndicatorFiltersOutAnyMessage
@@ -849,13 +913,23 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     [preValueFilterRows, flaggedSet],
   );
 
+  const isDeltaContextualKey = useCallback((rowKey: string) => contextKeys?.get(rowKey) === 'delta', [contextKeys]);
+
   const applyRowMarkSelection = useCallback((e: React.MouseEvent, key: string, index: number) => {
     if (!rowMarksEnabled) return;
     const additive = e.ctrlKey || e.metaKey;
     const range = e.shiftKey;
+    const contextReason = contextKeys?.get(key);
+    const clickedIsDeltaContext = isDeltaContextualKey(key);
     if (additive || range) {
       e.preventDefault();
       window.getSelection()?.removeAllRanges();
+    }
+
+    if (clickedIsDeltaContext && !range) return;
+    if (additive && !range && contextReason === 'visualization') {
+      onVisualizationContextClear?.(key);
+      return;
     }
 
     let nextKeys: string[];
@@ -863,12 +937,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       const anchorIdx = lastMarked ? telegramRows.findIndex(r => anchorKey(r) === lastMarked) : -1;
       let rangeKeys: string[];
       if (anchorIdx === -1) {
-        rangeKeys = [key];
+        rangeKeys = clickedIsDeltaContext ? [] : [key];
       } else {
         const lo = Math.min(anchorIdx, index);
         const hi = Math.max(anchorIdx, index);
-        rangeKeys = telegramRows.slice(lo, hi + 1).map(r => anchorKey(r));
+        rangeKeys = telegramRows
+          .slice(lo, hi + 1)
+          .map(r => anchorKey(r))
+          .filter(rowKey => !isDeltaContextualKey(rowKey));
       }
+      if (rangeKeys.length === 0) return;
       nextKeys = additive ? [...new Set([...markedKeysList, ...rangeKeys])] : rangeKeys;
     } else if (additive) {
       nextKeys = markedSet.has(key) ? markedKeysList.filter(markedKey => markedKey !== key) : [...markedKeysList, key];
@@ -880,8 +958,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     if (additive && valueRowFilter === 'marked' && nextKeys.length === 0) {
       setValueRowFilter('none');
     }
-    setLastMarked(key);
-  }, [lastMarked, markedKeysList, markedSet, rowMarksEnabled, setLastMarked, setMarkedKeysList, telegramRows, valueRowFilter]);
+    if (!clickedIsDeltaContext) {
+      setLastMarked(key);
+    }
+  }, [contextKeys, isDeltaContextualKey, lastMarked, markedKeysList, markedSet, onVisualizationContextClear, rowMarksEnabled, setLastMarked, setMarkedKeysList, telegramRows, valueRowFilter]);
 
   // Message-context flags follow the row-click semantics: plain click sets only
   // this row, ctrl/cmd toggles just this row, shift sets a range, and
@@ -1197,8 +1277,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   // Clicking a row (a) marks it (#310) and (b) pauses live-following just like
   // scrolling away (#266) — the row being read must not move. The jump-to-live
-  // pill is the way back.
-  const handleRowClick = (e: React.MouseEvent, key: string, index: number) => {
+  // pill is the way back. Rows present only as delta-time context stay
+  // protected from plain/ctrl clicks, while other context reasons can still be
+  // marked/unmarked.
+  const handleRowClick = (e: React.MouseEvent, key: string, index: number, isDeltaContextOnly: boolean) => {
+    if (isDeltaContextOnly && !e.shiftKey) return;
     applyRowMarkSelection(e, key, index);
 
     // ── Pause live-following on an edge click (#266), unchanged ──
@@ -1343,6 +1426,24 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [telegramRows.length]);
+
+  useEffect(() => {
+    if (!centerOnKey || telegramRows.length === 0) return;
+    const idx = telegramRows.findIndex(t => anchorKey(t) === centerOnKey);
+    if (idx === -1) return;
+
+    atEdgeRef.current = false;
+    onListFollowChange?.(false);
+    setNewSinceAnchor(0);
+    markProgrammatic();
+    virtualizer.scrollToIndex(idx, { align: 'center' });
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      captureAnchor();
+      atEdgeRef.current = false;
+      onListFollowChange?.(false);
+      onCenterOnKeyConsumed?.();
+    }));
+  }, [centerOnKey, telegramRows, virtualizer, onListFollowChange, onCenterOnKeyConsumed]);
 
   // React to list updates before paint: follow the live edge, or pin the
   // anchored row by correcting scrollTop by its real pixel shift.
@@ -2180,7 +2281,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               hide-arrow on the second row. */}
           <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              {rowFlagsEnabled && (
+              {showRowMessageContextControl && (
                 <button
                   className={`quick-filter-bar-toggle ${deltaFlagState !== 'none' ? 'open' : ''}`}
                   onClick={handleDeltaToggleClick}
@@ -2433,17 +2534,31 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               const marked = markedSet.has(key);
               // The most-recently-clicked row is the most prominent (#310).
               const latest = marked && key === lastMarked;
-              // Present only as unfiltered Time-Delta-Context, not a real filter
-              // match (#343) — a distinct wash, but marks still take priority.
-              const hasContext = !!contextKeys?.has(key);
-              const isContext = !marked && hasContext;
+              // Present only as context, not a real filter match — either a
+              // Time-Delta-Context window (#343) or marked in any main panel
+              // (#380). A stale 'delta' tag is superseded once the row is
+              // independently marked, but a 'marked' reason IS the mark, so
+              // its indicator is never suppressed by the mark itself.
+              const contextReason = contextKeys?.get(key);
+              const hasContext = !!contextReason;
+              const isContext = hasContext && (contextReason === 'marked' || contextReason === 'visualization' || !marked);
+              const isDeltaContextOnly = contextReason === 'delta' && !marked;
+              const contextBarColor = hasContext
+                ? (contextReason === 'delta'
+                    ? 'var(--warning, #f59e0b)'
+                    : contextReason === 'marked'
+                    ? 'var(--accent-primary)'
+                    : contextReason === 'visualization'
+                      ? '#22c55e'
+                      : undefined)
+                : undefined;
               const flagged = flaggedSet.has(key);
               return (
                 <div
                   key={virtualRow.key}
                   data-index={virtualRow.index}
                   data-akey={key}
-                  onClick={(e) => handleRowClick(e, key, virtualRow.index)}
+                  onClick={(e) => handleRowClick(e, key, virtualRow.index, isDeltaContextOnly)}
                   ref={virtualizer.measureElement}
                   style={{
                     position: 'absolute',
@@ -2466,15 +2581,23 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                         : isContext
                           ? 'color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent)'
                           : (virtualRow.index + stripeOffset) % 2 === 0 ? 'var(--bg-subtle)' : 'transparent',
+                    // A thin vertical bar tags context rows forced by marks.
+                    boxShadow: contextBarColor ? `inset 3px 0 0 0 ${contextBarColor}` : undefined,
                     minHeight: '60px' // Ensure a minimum touch/visual target
                   }}
-                  title={isContext ? 'Unfiltered Time-Delta-Context — this telegram did not match the active filters' : undefined}
-                  className={`log-row${marked ? ' marked' : ''}${latest ? ' latest' : ''}${isContext ? ' context' : ''}`}
+                  title={isContext
+                    ? (contextReason === 'marked'
+                        ? 'Marked message — shown despite not matching the active filters'
+                        : contextReason === 'visualization'
+                          ? 'Navigation target from the visualization'
+                          : 'Unfiltered Time-Delta-Context — this telegram did not match the active filters')
+                    : undefined}
+                  className={`log-row${marked ? ' marked' : ''}${latest ? ' latest' : ''}${isContext ? ` context context-${contextReason}` : ''}`}
                 >
                   {/* Left icon rail (#341): single row, vertically centered —
                       the message-context (Time-Delta-Context) flag toggle. */}
                   <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                    {showRowMessageContextControl && !hasContext && (
+                    {showRowMessageContextControl && contextReason !== 'delta' && (
                       <button
                         style={{
                           background: 'transparent', border: 'none', cursor: 'pointer', padding: '0.15rem',

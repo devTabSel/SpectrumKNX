@@ -280,6 +280,30 @@ test('delta column shows previous/next deltas with opposite signs and conditiona
   expect(plus.style.color).toBe('var(--text-dim)');
 });
 
+test('delta +/- stay empty when no older/younger telegram exists in displayed list', () => {
+  const sameTs = '2024-01-01T10:00:00.000Z';
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: sameTs, raw_hex: '0xE1' }),
+    makeTelegram({ timestamp: sameTs, raw_hex: '0xE2' }),
+  ];
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+
+  expect(container.querySelectorAll('.log-row .mono-addr')).not.toContainEqual(expect.objectContaining({ textContent: expect.stringMatching(/^\+ /) }));
+  expect(container.querySelectorAll('.log-row .mono-addr')).not.toContainEqual(expect.objectContaining({ textContent: expect.stringMatching(/^- /) }));
+  expect(screen.queryByText('+ 00:00.000')).not.toBeInTheDocument();
+  expect(screen.queryByText('- 00:00.000')).not.toBeInTheDocument();
+});
+
 test('delta-sort exclusive mode (#311): activates on click, pauses live-follow, and exits on another header click', () => {
   const onListFollowChange = vi.fn();
   const { rerender } = render(
@@ -434,7 +458,7 @@ test('quick info source bottom line includes contextual source count in parenthe
     makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', source_address: '1.1.2', raw_hex: '0x52' }),
     makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', source_address: '1.1.3', raw_hex: '0x53' }),
   ];
-  const context = new Set([anchorKey(rows[1])]);
+  const context = new Map([[anchorKey(rows[1]), 'delta' as const]]);
 
   render(
     <TelegramTable
@@ -495,7 +519,7 @@ test('quick info target bottom line includes contextual target count only when >
     makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', target_address: '1/2/2', raw_hex: '0x72' }),
     makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', target_address: '1/2/3', raw_hex: '0x73' }),
   ];
-  const context = new Set([anchorKey(rows[1])]);
+  const context = new Map([[anchorKey(rows[1]), 'delta' as const]]);
 
   render(
     <TelegramTable
@@ -644,7 +668,7 @@ test('quick info value shows buffer/msg totals and filtered/context/marked/conte
     makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', raw_hex: '0xA2' }),
     makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', raw_hex: '0xA3' }),
   ];
-  const contextKeys = new Set([anchorKey(rows[1])]);
+  const contextKeys = new Map([[anchorKey(rows[1]), 'delta' as const]]);
   const marked = [anchorKey(rows[0]), anchorKey(rows[1])];
   const flagged = [anchorKey(rows[2])];
 
@@ -712,6 +736,45 @@ test('quick info value mark/context-mark buttons toggle row filtering', () => {
   expect(container.querySelectorAll('.log-row')).toHaveLength(3);
 });
 
+test('delta +/- stay empty when marks/context-marks filter shows only one row', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', raw_hex: '0xF1' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', raw_hex: '0xF2' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', raw_hex: '0xF3' }),
+  ];
+  const marked = [anchorKey(rows[2])];
+  const flagged = [anchorKey(rows[1])];
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      markedKeys={marked}
+      flaggedKeys={flagged}
+      bufferCapacity={100000}
+      allBufferMessageCount={3}
+    />,
+  );
+
+  const hasDeltaToken = () => [...container.querySelectorAll('.log-row .mono-addr')]
+    .some(el => /[+-]\s\d{2}:\d{2}\.\d{3}/.test(el.textContent ?? ''));
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  fireEvent.click(screen.getByTitle('Marked message count'));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(1);
+  expect(hasDeltaToken()).toBe(false);
+
+  fireEvent.click(screen.getByTitle('Context-marked message count'));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(1);
+  expect(hasDeltaToken()).toBe(false);
+});
+
 test('quick info value mark/context-mark filters keep contextual rows visible', () => {
   const rows: Telegram[] = [
     makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', raw_hex: '0xD1' }),
@@ -720,7 +783,7 @@ test('quick info value mark/context-mark filters keep contextual rows visible', 
   ];
   const marked = [anchorKey(rows[0])];
   const flagged = [anchorKey(rows[0])];
-  const contextKeys = new Set([anchorKey(rows[1])]);
+  const contextKeys = new Map([[anchorKey(rows[1]), 'delta' as const]]);
 
   const { container } = render(
     <TelegramTable
@@ -911,7 +974,7 @@ test('context rows (#343): marked with a distinct class/tooltip and counted in t
   rows[0] = { ...rows[0], target_address: '1/1/1' };
   rows[1] = { ...rows[1], target_address: '1/1/2' };
   rows[2] = { ...rows[2], target_address: '1/1/1' };
-  const contextKeys = new Set([anchorKey(rows[1])]); // the middle row is context-only
+  const contextKeys = new Map([[anchorKey(rows[1]), 'delta' as const]]); // the middle row is context-only
 
   const { container } = render(
     <TelegramTable
@@ -937,9 +1000,9 @@ test('context rows (#343): marked with a distinct class/tooltip and counted in t
   expect(screen.getByTitle('Contextual target-device count')).toBeInTheDocument();
 });
 
-test('context rows (#343): marking a context row hides the context styling in favor of the mark', () => {
+test('context rows (#381): clicking a context row does not mark it — only real matches can be marked', () => {
   const rows = makeList(3, 2);
-  const contextKeys = new Set([anchorKey(rows[1])]);
+  const contextKeys = new Map([[anchorKey(rows[1]), 'delta' as const]]);
 
   const { container } = render(
     <TelegramTable
@@ -955,7 +1018,135 @@ test('context rows (#343): marking a context row hides the context styling in fa
   );
 
   const logRows = [...container.querySelectorAll('.log-row')];
-  fireEvent.click(logRows[1]); // mark the context row
-  expect(logRows[1].classList.contains('marked')).toBe(true);
-  expect(logRows[1].classList.contains('context')).toBe(false);
+  fireEvent.click(logRows[1]); // click the context row
+  expect(logRows[1].classList.contains('marked')).toBe(false);
+  expect(logRows[1].classList.contains('context')).toBe(true);
+});
+
+test('context rows: non-delta reasons can be marked and unmarked', () => {
+  const rows = makeList(3, 2);
+  const key = anchorKey(rows[1]);
+  const contextKeys = new Map([[key, 'marked' as const]]);
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      contextKeys={contextKeys}
+    />,
+  );
+
+  const row = container.querySelector(`[data-akey="${key}"]`)!;
+  fireEvent.click(row);
+  expect(row.classList.contains('marked')).toBe(true);
+
+  fireEvent.click(row, { ctrlKey: true });
+  expect(row.classList.contains('marked')).toBe(false);
+});
+
+test('context rows (#380): a "marked" reason keeps its blue context indicator even though the row is marked', () => {
+  const rows = makeList(3, 2);
+  const key = anchorKey(rows[1]);
+  // Simulates App-level forcing: this row failed the active filter but stays
+  // visible solely because it's marked (lifted, app-wide state).
+  const contextKeys = new Map([[key, 'marked' as const]]);
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      contextKeys={contextKeys}
+      markedKeys={[key]}
+    />,
+  );
+
+  const row = container.querySelector(`[data-akey="${key}"]`)!;
+  expect(row.classList.contains('marked')).toBe(true);
+  expect(row.classList.contains('context')).toBe(true);
+  expect(row.classList.contains('context-marked')).toBe(true);
+  expect(row).toHaveAttribute('title', 'Marked message — shown despite not matching the active filters');
+});
+
+test('context rows (#380): a "delta" reason gets a distinct reason class from a "marked" reason', () => {
+  const rows = makeList(2, 1);
+  const deltaKey = anchorKey(rows[0]);
+  const contextKeys = new Map([[deltaKey, 'delta' as const]]);
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      contextKeys={contextKeys}
+    />,
+  );
+
+  const row = container.querySelector(`[data-akey="${deltaKey}"]`)!;
+  expect(row.classList.contains('context-delta')).toBe(true);
+  expect(row.classList.contains('context-marked')).toBe(false);
+  expect((row as HTMLElement).style.boxShadow).toContain('var(--warning, #f59e0b)');
+});
+
+test('context rows: a "visualization" reason gets a green context bar and dedicated tooltip', () => {
+  const rows = makeList(2, 1);
+  const key = anchorKey(rows[0]);
+  const contextKeys = new Map([[key, 'visualization' as const]]);
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      contextKeys={contextKeys}
+    />,
+  );
+
+  const row = container.querySelector(`[data-akey="${key}"]`)! as HTMLElement;
+  expect(row.classList.contains('context-visualization')).toBe(true);
+  expect(row).toHaveAttribute('title', 'Navigation target from the visualization');
+  expect(row.style.boxShadow).toContain('#22c55e');
+});
+
+test('ctrl/cmd-click on a visualization-context row clears its context reason', () => {
+  const rows = makeList(2, 1);
+  const key = anchorKey(rows[0]);
+  const onVisualizationContextClear = vi.fn();
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      contextKeys={new Map([[key, 'visualization' as const]])}
+      onVisualizationContextClear={onVisualizationContextClear}
+    />,
+  );
+
+  const row = container.querySelector(`[data-akey="${key}"]`)!;
+  fireEvent.click(row, { ctrlKey: true });
+
+  expect(onVisualizationContextClear).toHaveBeenCalledWith(key);
+  expect(row.classList.contains('marked')).toBe(false);
 });

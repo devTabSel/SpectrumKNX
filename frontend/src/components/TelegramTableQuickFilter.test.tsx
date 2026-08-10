@@ -90,6 +90,7 @@ const renderTableWithDerivedContext = (
     flaggedKeys,
     effectiveDeltaBeforeMs,
     effectiveDeltaAfterMs,
+    new Map(),
   );
   return render(
     <TelegramTable
@@ -104,7 +105,7 @@ const renderTableWithDerivedContext = (
       quickFilterEnabled
       quickPatterns={quickPatterns}
       quickFilterColumnEnabled={quickFilterColumnEnabled}
-      contextKeys={expanded.contextKeys}
+      contextKeys={expanded.contextReasons}
       flaggedKeys={[...flaggedKeys]}
     />,
   );
@@ -221,7 +222,7 @@ test('filters combine across columns (AND)', () => {
   expect(rowCount(container)).toBe(1);
 });
 
-test('context rows are not filtered out again by the quick filter', () => {
+test('delta-context rows are filtered out again by the quick filter', () => {
   const contextTelegram = makeTelegram({
     timestamp: '2024-01-01T10:00:00.000Z',
     target_address: '9/9/9',
@@ -240,14 +241,45 @@ test('context rows are not filtered out again by the quick filter', () => {
       quickFilterOpen
       quickFilterEnabled
       quickPatterns={{ target: { top: '', bottom: 'küche' } }}
-      contextKeys={new Set([anchorKey(contextTelegram)])}
+      contextKeys={new Map([[anchorKey(contextTelegram), 'delta' as const]])}
+    />,
+  );
+
+  expect(rowCount(container)).toBe(1);
+  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(false);
+});
+
+test('non-delta contextual rows are remixed after quick filter', () => {
+  const contextTelegram = makeTelegram({
+    timestamp: '2024-01-01T10:00:00.000Z',
+    target_address: '9/9/9',
+    target_name: 'Marked Context',
+    raw_hex: '0x19',
+  });
+  const contextKey = anchorKey(contextTelegram);
+  const { container } = render(
+    <TelegramTable
+      telegrams={[...TELEGRAMS, contextTelegram]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ target: { top: '', bottom: 'küche' } }}
+      contextKeys={new Map([[contextKey, 'marked' as const]])}
+      markedKeys={[contextKey]}
+      lastMarkedKey={contextKey}
     />,
   );
 
   expect(rowCount(container)).toBe(2);
+  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Marked Context'))).toBe(true);
 });
 
-test('context rows are hidden when quick filter excludes every message', () => {
+test('delta-context rows are hidden when quick filter excludes every message', () => {
   const contextTelegram = makeTelegram({
     timestamp: '2024-01-01T10:00:00.000Z',
     target_address: '9/9/9',
@@ -266,11 +298,12 @@ test('context rows are hidden when quick filter excludes every message', () => {
       quickFilterOpen
       quickFilterEnabled
       quickPatterns={{ target: { top: '', bottom: 'regex:^no-match$' } }}
-      contextKeys={new Set([anchorKey(contextTelegram)])}
+      contextKeys={new Map([[anchorKey(contextTelegram), 'delta' as const]])}
     />,
   );
 
   expect(rowCount(container)).toBe(0);
+  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(false);
 });
 
 test('context-only rows do not show a message-context flag control, even when marked', () => {
@@ -291,13 +324,102 @@ test('context-only rows do not show a message-context flag control, even when ma
       onQuickVisualize={vi.fn()}
       markedKeys={[anchorKey(contextTelegram)]}
       lastMarkedKey={anchorKey(contextTelegram)}
-      contextKeys={new Set([anchorKey(contextTelegram)])}
+      contextKeys={new Map([[anchorKey(contextTelegram), 'delta' as const]])}
     />,
   );
 
   const contextRow = [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Context Only'))!;
   expect(contextRow.querySelector('button[title*="Always show context"]')).toBeFalsy();
   expect(contextRow.querySelector('button[title*="click to unflag"]')).toBeFalsy();
+});
+
+test('context rows with non-delta reason can show a message-context flag control', () => {
+  const contextTelegram = makeTelegram({
+    timestamp: '2024-01-01T10:00:00.000Z',
+    target_address: '9/9/9',
+    target_name: 'Marked Context',
+    raw_hex: '0x19',
+  });
+  const key = anchorKey(contextTelegram);
+  const { container } = render(
+    <TelegramTable
+      telegrams={[...TELEGRAMS, contextTelegram]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ target: { top: '', bottom: 'küche' } }}
+      contextKeys={new Map([[key, 'marked' as const]])}
+      markedKeys={[key]}
+      lastMarkedKey={key}
+    />,
+  );
+
+  const contextRow = [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Marked Context'))!;
+  expect(contextRow.querySelector('button[title*="Always show context"]')).toBeTruthy();
+});
+
+test('context rows with visualization reason can show a message-context flag control', () => {
+  const contextTelegram = makeTelegram({
+    timestamp: '2024-01-01T10:00:00.000Z',
+    target_address: '9/9/9',
+    target_name: 'Visualization Context',
+    raw_hex: '0x29',
+  });
+  const key = anchorKey(contextTelegram);
+  const { container } = render(
+    <TelegramTable
+      telegrams={[...TELEGRAMS, contextTelegram]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ target: { top: '', bottom: 'küche' } }}
+      contextKeys={new Map([[key, 'visualization' as const]])}
+    />,
+  );
+
+  const contextRow = [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Visualization Context'))!;
+  expect(contextRow.querySelector('button[title*="Always show context"]')).toBeTruthy();
+});
+
+test('a non-delta contextual row keeps its colored bar even when it passes the quick filter', () => {
+  const contextTelegram = makeTelegram({
+    timestamp: '2024-01-01T10:00:00.000Z',
+    target_address: '9/9/9',
+    target_name: 'Küche Context',
+    raw_hex: '0x39',
+  });
+  const key = anchorKey(contextTelegram);
+  const { container } = render(
+    <TelegramTable
+      telegrams={[...TELEGRAMS, contextTelegram]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ target: { top: '', bottom: 'küche' } }}
+      contextKeys={new Map([[key, 'marked' as const]])}
+      markedKeys={[key]}
+      lastMarkedKey={key}
+    />,
+  );
+
+  const contextRow = [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Küche Context')) as HTMLElement | undefined;
+  expect(contextRow).toBeDefined();
+  expect(contextRow?.style.boxShadow).toContain('var(--accent-primary)');
 });
 
 test('changing delta before/after re-evaluates and updates contextual rows', () => {
@@ -354,13 +476,13 @@ test('changing delta before/after re-evaluates and updates contextual rows', () 
       quickFilterEnabled
       quickPatterns={quickPatterns}
       quickFilterColumnEnabled={quickFilterColumnEnabled}
-      contextKeys={expanded.contextKeys}
+      contextKeys={expanded.contextReasons}
       flaggedKeys={flaggedKeys}
     />,
   );
 
-  expect(rowCount(container)).toBe(2);
-  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(true);
+  expect(rowCount(container)).toBe(1);
+  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(false);
 });
 
 test('enabling or disabling a quick-filter column re-evaluates which rows are contextual', () => {
@@ -392,8 +514,8 @@ test('enabling or disabling a quick-filter column re-evaluates which rows are co
     deltaAfterMs: 0,
     flaggedKeys,
   });
-  const contextRowBefore = [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Context Only'))!;
-  expect(contextRowBefore.getAttribute('title')).toContain('Unfiltered Time-Delta-Context');
+  const contextRowBefore = [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Context Only'));
+  expect(contextRowBefore).toBeUndefined();
 
   const disabledTarget = { ...DEFAULT_QUICK_FILTER_COLUMN_ENABLED, target: false };
   const quickMatches = compileQuickFilters(quickPatterns, disabledTarget);
@@ -419,13 +541,14 @@ test('enabling or disabling a quick-filter column re-evaluates which rows are co
       quickFilterEnabled
       quickPatterns={quickPatterns}
       quickFilterColumnEnabled={disabledTarget}
-      contextKeys={expanded.contextKeys}
+      contextKeys={expanded.contextReasons}
       flaggedKeys={flaggedKeys}
     />,
   );
 
-  const contextRowAfter = [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Context Only'))!;
-  expect(contextRowAfter.getAttribute('title')).toBeNull();
+  const contextRowAfter = [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Context Only'));
+  expect(contextRowAfter).toBeDefined();
+  expect(contextRowAfter?.getAttribute('title')).toBeNull();
 });
 
 test('disabling the DELTA quick-filter column re-evaluates contextual rows as if before=after=0', () => {
@@ -455,7 +578,7 @@ test('disabling the DELTA quick-filter column re-evaluates contextual rows as if
     deltaAfterMs: 0,
     flaggedKeys,
   });
-  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(true);
+  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(false);
 
   const disabledDelta = { ...DEFAULT_QUICK_FILTER_COLUMN_ENABLED, delta: false };
   const quickPatterns = { target: { top: '', bottom: 'küche' } };
@@ -482,7 +605,7 @@ test('disabling the DELTA quick-filter column re-evaluates contextual rows as if
       quickFilterEnabled
       quickPatterns={quickPatterns}
       quickFilterColumnEnabled={disabledDelta}
-      contextKeys={expanded.contextKeys}
+      contextKeys={expanded.contextReasons}
       flaggedKeys={flaggedKeys}
     />,
   );
@@ -646,9 +769,9 @@ test('quick-filter divider is orange when at least one row is filtered out', () 
 });
 
 test('quick-filter divider stays orange when excluded rows are re-shown as context rows', () => {
-  const contextKeys = new Set([
-    anchorKey(TELEGRAMS[1]),
-    anchorKey(TELEGRAMS[2]),
+  const contextKeys = new Map([
+    [anchorKey(TELEGRAMS[1]), 'delta' as const],
+    [anchorKey(TELEGRAMS[2]), 'delta' as const],
   ]);
   render(
     <TelegramTable
@@ -701,6 +824,7 @@ test('ctrl/cmd-click on the DELTA TIME toggle applies to all displayed messages'
       onQuickFilter={vi.fn()}
       onQuickVisualize={vi.fn()}
       onDeltaContextChange={onDeltaContextChange}
+      quickFilterFiltersOutAny
     />,
   );
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
@@ -824,6 +948,7 @@ test('delta tristate considers only visible non-context rows', () => {
     new Set([anchorKey(anchorTelegram)]),
     1000,
     0,
+    new Map([[anchorKey(contextTelegram), 'marked' as const]]),
   );
 
   const { container } = render(
@@ -839,7 +964,9 @@ test('delta tristate considers only visible non-context rows', () => {
       quickFilterEnabled
       quickPatterns={quickPatterns}
       quickFilterColumnEnabled={DEFAULT_QUICK_FILTER_COLUMN_ENABLED}
-      contextKeys={expanded.contextKeys}
+      contextKeys={expanded.contextReasons}
+      markedKeys={[anchorKey(contextTelegram)]}
+      lastMarkedKey={anchorKey(contextTelegram)}
       flaggedKeys={[anchorKey(contextTelegram)]}
     />,
   );

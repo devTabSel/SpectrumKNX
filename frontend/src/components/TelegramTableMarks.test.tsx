@@ -4,6 +4,7 @@ import { TelegramTable, type SortConfig } from './TelegramTable';
 import { makeTelegram } from '../test/telegramFactory';
 import type { Telegram } from '../hooks/useWebSocket';
 import { DEFAULT_FILTERS } from '../types/filters';
+import { anchorKey } from '../utils/anchorKey';
 
 // jsdom has no layout: give the virtualizer a viewport so it renders rows.
 beforeAll(() => {
@@ -104,6 +105,27 @@ test('Ctrl/Cmd+Shift+click adds the range to existing marks', () => {
   fireEvent.click(rows(container)[0], { ctrlKey: true });    // add {0}, last = 0
   fireEvent.click(rows(container)[1], { ctrlKey: true, shiftKey: true }); // + range 0..1
   expect(marked(container)).toEqual([true, true, false, false, true]);
+});
+
+test('Shift+click on a contextual row marks only non-context rows in range', () => {
+  const contextKeys = new Map([[anchorKey(TELEGRAMS[3]), 'delta' as const]]);
+  const { container } = renderTable({ contextKeys });
+
+  fireEvent.click(rows(container)[0]);
+  fireEvent.click(rows(container)[3], { shiftKey: true });
+
+  expect(marked(container)).toEqual([true, true, true, false, false]);
+});
+
+test('Ctrl/Cmd+Shift+click on a contextual row additively marks only non-context rows in range', () => {
+  const contextKeys = new Map([[anchorKey(TELEGRAMS[3]), 'delta' as const]]);
+  const { container } = renderTable({ contextKeys });
+
+  fireEvent.click(rows(container)[4]);
+  fireEvent.click(rows(container)[0], { ctrlKey: true });
+  fireEvent.click(rows(container)[3], { ctrlKey: true, shiftKey: true });
+
+  expect(marked(container)).toEqual([true, true, true, false, true]);
 });
 
 test('clear-marks pill appears only when marked and removes every mark', () => {

@@ -5,6 +5,7 @@ import 'uplot/dist/uPlot.min.css';
 import type { ChartBucket } from '../hooks/useChartData';
 import { useThemeTick } from '../hooks/useTheme';
 import { seriesColor } from '../utils/seriesColors';
+import { computeSharedLeftGutter } from '../utils/chartGutter';
 import { spansMultipleDays, formatAxisTime, formatFullTime } from '../utils/timeFormat';
 
 interface EventDotsChartProps {
@@ -16,6 +17,9 @@ interface EventDotsChartProps {
   /** Click (not drag-select) on the chart: navigate to the telegram list around
    * this timestamp (#308). */
   onTimeClick?: (ms: number) => void;
+  /** Shared left-axis gutter (#... ) so every chart's X-axis starts at the same
+   * pixel column; falls back to this chart's own bucket when not provided. */
+  leftGutter?: number;
 }
 
 const syncCursor = uPlot.sync('knx-time-axis');
@@ -27,7 +31,7 @@ const syncCursor = uPlot.sync('knx-time-axis');
  * (no forward-fill/held state); its tooltip/legend shows the telegram's
  * formatted value.
  */
-export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime, maxTime, autoFollow = false, onZoomRangeChange, onTimeClick }) => {
+export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime, maxTime, autoFollow = false, onZoomRangeChange, onTimeClick, leftGutter: sharedLeftGutter }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
   const themeTick = useThemeTick();
@@ -61,7 +65,10 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
   ];
 
   const multiDay = minTime != null && maxTime != null && spansMultipleDays(minTime, maxTime);
-  const LEFT_GUTTER = 150;
+  const LEFT_GUTTER = useMemo(
+    () => sharedLeftGutter ?? computeSharedLeftGutter([bucket]),
+    [sharedLeftGutter, bucket],
+  );
 
   const rowHeight = 32;
   const rowGap = 4;
@@ -73,7 +80,7 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
   const chartHeight = Math.max(160, series.length * (rowHeight + rowGap) + 60);
 
   const structureKey = [
-    width, themeTick, minTime, maxTime, series.map(s => s.name).join('|'),
+    width, themeTick, minTime, maxTime, LEFT_GUTTER, series.map(s => s.name).join('|'),
   ].join('§');
 
   const options: uPlot.Options = useMemo(() => {
@@ -138,6 +145,7 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
       width,
       height: chartHeight,
       padding: [10, 16, 30, 0],
+      legend: { show: false },
       cursor: {
         sync: { key: syncCursor.key },
         drag: { x: true, y: false, setScale: false }
@@ -201,6 +209,26 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
               if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
               onZoomRangeChange?.(null);
             });
+
+            // Hovering the ruler shows the same synced dashed cursor line as
+            // hovering the plot itself (#308), pinned to the plot's bottom
+            // edge since there's no data row to align a horizontal line to.
+            u.root.addEventListener('mousemove', (e) => {
+              const rootRect = u.root.getBoundingClientRect();
+              const overRect = u.over.getBoundingClientRect();
+              const withinOver =
+                e.clientX >= overRect.left && e.clientX <= overRect.right &&
+                e.clientY >= overRect.top && e.clientY <= overRect.bottom;
+              if (withinOver) return; // native cursor handling already applies
+
+              const inXAxisBand =
+                e.clientX >= overRect.left && e.clientX <= overRect.right &&
+                e.clientY > overRect.bottom && e.clientY <= rootRect.bottom;
+              u.setCursor(inXAxisBand
+                ? { left: e.clientX - overRect.left, top: overRect.height }
+                : { left: -10, top: -10 });
+            });
+            u.root.addEventListener('mouseleave', () => u.setCursor({ left: -10, top: -10 }));
           }
         ]
       },
@@ -242,6 +270,16 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
   }, [structureKey]);
 
   const plotTop = 10;
+  const edgeLineStyle: React.CSSProperties = {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: '1px',
+    background: 'var(--border-subtle)',
+    pointerEvents: 'none',
+    zIndex: 5,
+  };
+
   return (
     <div style={{ marginBottom: '2rem', background: 'var(--bg-inset)', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border-color)', overflow: 'visible' }}>
       <h4 style={{ margin: '0 0 1rem', fontSize: '0.9rem', color: 'var(--text-main)' }}>
@@ -307,13 +345,10 @@ export const EventDotsChart: React.FC<EventDotsChartProps> = ({ bucket, minTime,
         <div ref={containerRef} style={{ width: '100%', overflow: 'visible' }}>
            <UplotReact options={options} data={data} resetScales={autoFollow} />
         </div>
+        {/* Plot bounds markers for the chart area. */}
+        <div style={{ ...edgeLineStyle, left: `${LEFT_GUTTER}px` }} />
+        <div style={{ ...edgeLineStyle, right: '16px' }} />
       </div>
-      {minTime != null && maxTime != null && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.35rem', paddingLeft: `${LEFT_GUTTER}px`, paddingRight: '16px', fontSize: '0.7rem', color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
-          <span>{formatFullTime(minTime, multiDay)}</span>
-          <span>{formatFullTime(maxTime, multiDay)}</span>
-        </div>
-      )}
     </div>
   );
 };

@@ -18,6 +18,7 @@ import { FilterPanel } from './FilterPanel';
 import { loadHistoryTelegrams, type LoadedRange } from '../utils/historyLoad';
 import { buildViewUrl, type VizViewState } from '../utils/viewUrl';
 import { getPref, setPref } from '../utils/prefs';
+import { findNearestVisibleVisualizationTelegram } from '../utils/visualizationNavigation';
 import {
   effectiveDeltaContext,
   hasActiveFilters,
@@ -71,6 +72,14 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   const [isLoaderOpen, setIsLoaderOpen] = useState(false);
   const [metadata, setMetadata] = useState<{ total_count: number; limit_reached: boolean } | null>(null);
   const [sortConfig, setSortConfig] = useState<SortConfig>(() => readSortConfigPref(HISTORY_TABLE_INSTANCE_ID));
+  // Lifted row marks (#310/#380): marked rows stay visible across filter changes.
+  const [markedKeys, setMarkedKeys] = useState<string[]>(() =>
+    readStringArrayPref(`markedKeys:${HISTORY_TABLE_INSTANCE_ID}`)
+  );
+  const [lastMarkedKey, setLastMarkedKey] = useState<string | null>(() => {
+    const saved = getPref(`lastMarkedKey:${HISTORY_TABLE_INSTANCE_ID}`);
+    return saved ? saved : null;
+  });
   // Per-message Time-Delta-Context flags (#319) — local to this view, like marks.
   const [flaggedKeys, setFlaggedKeys] = useState<string[]>(() =>
     readStringArrayPref(`flaggedKeys:${HISTORY_TABLE_INSTANCE_ID}`)
@@ -81,6 +90,8 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(false);
   const [quickPatterns, setQuickPatterns] = useState<Partial<Record<ColId, { top: string; bottom: string }>>>({});
   const [quickFilterColumnEnabled, setQuickFilterColumnEnabled] = useState<QuickFilterColumnEnabled>(DEFAULT_QUICK_FILTER_COLUMN_ENABLED);
+  const [centerOnTelegramKey, setCenterOnTelegramKey] = useState<string | null>(null);
+  const [visualNavigationKey, setVisualNavigationKey] = useState<string | null>(null);
 
   // Persisted time range — survives HistoryLoader open/close cycles
   const [timeRange, setTimeRange] = useState<LoaderTimeRange>({
@@ -92,6 +103,18 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
 
   // The time window of the last load — basis for shareable links (#150)
   const [loadedRange, setLoadedRange] = useState<LoadedRange | null>(null);
+
+  useEffect(() => {
+    setPref(`markedKeys:${HISTORY_TABLE_INSTANCE_ID}`, JSON.stringify(markedKeys));
+  }, [markedKeys]);
+
+  useEffect(() => {
+    if (lastMarkedKey == null) {
+      setPref(`lastMarkedKey:${HISTORY_TABLE_INSTANCE_ID}`, '');
+      return;
+    }
+    setPref(`lastMarkedKey:${HISTORY_TABLE_INSTANCE_ID}`, lastMarkedKey);
+  }, [lastMarkedKey]);
 
   useEffect(() => {
     setPref(`flaggedKeys:${HISTORY_TABLE_INSTANCE_ID}`, JSON.stringify(flaggedKeys));
@@ -183,12 +206,26 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
       flaggedKeys,
       onFlaggedKeysChange: setFlaggedKeys,
     },
-  }), [sortConfig, handleSort, visibleColumns, columnOrder, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled, flaggedKeys]);
+    rowMarks: {
+      markedKeys,
+      onMarkedKeysChange: setMarkedKeys,
+      lastMarkedKey,
+      onLastMarkedKeyChange: setLastMarkedKey,
+    },
+  }), [sortConfig, handleSort, visibleColumns, columnOrder, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled, flaggedKeys, markedKeys, lastMarkedKey]);
 
   const sortedTelegrams = useMemo(
     () => sortTelegrams(telegrams, sortConfig),
     [telegrams, sortConfig]
   );
+  const handleChartTimeClick = useCallback((ms: number) => {
+    const nearest = findNearestVisibleVisualizationTelegram(sortedTelegrams, selectedVisualizationTargets, ms);
+    if (!nearest) return;
+    const key = anchorKey(nearest);
+    setVisualNavigationKey(key);
+    setCenterOnTelegramKey(key);
+    setIsVisualizerOpen(false);
+  }, [sortedTelegrams, selectedVisualizationTargets]);
   const allBufferSourceCount = useMemo(
     () => new Set(sortedTelegrams.map(t => t.source_address)).size,
     [sortedTelegrams],
@@ -256,11 +293,16 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     const before = deltaColumnEnabled ? rawBefore : 0;
     const after = deltaColumnEnabled ? rawAfter : 0;
     const flags = activeFilters.deltaContextEnabled ? new Set(flaggedKeys) : EMPTY_FLAG_SET;
-    return expandWithDeltaContext(sortedTelegrams, matches, anchorKey, flags, before, after);
-  }, [sortedTelegrams, activeFilters, flaggedKeys, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled]);
+    const forcedContextReasons = new Map<string, 'marked' | 'visualization'>();
+    for (const key of markedKeys) forcedContextReasons.set(key, 'marked');
+    if (visualNavigationKey) forcedContextReasons.set(visualNavigationKey, 'visualization');
+    return expandWithDeltaContext(sortedTelegrams, matches, anchorKey, flags, before, after, forcedContextReasons);
+  }, [sortedTelegrams, activeFilters, flaggedKeys, markedKeys, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled, visualNavigationKey]);
   const filteredSortedTelegrams = deltaExpandedHistory.items;
-  // Keys of rows shown only as unfiltered context around a match/flag (#343).
-  const contextTelegramKeys = deltaExpandedHistory.contextKeys;
+  // Keys of rows shown only as context, not a real filter match, mapped to
+  // the reason (#343). History marks are local-only (not lifted), so a
+  // 'marked' reason never applies here (#380).
+  const contextTelegramKeys = deltaExpandedHistory.contextReasons;
   const historyQuickFilterFiltersOutAny = useMemo(() => {
     if (!quickFilterOpen || !quickFilterEnabled) return false;
     const quickMatches = compileQuickFilters(quickPatterns, quickFilterColumnEnabled);
@@ -420,6 +462,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               selectedTargets={selectedVisualizationTargets}
               onTargetsChange={onVisualizationTargetsChange}
               onClose={() => setIsVisualizerOpen(false)}
+              onTimeClick={handleChartTimeClick}
               getShareLink={loadedRange ? () => buildViewUrl({
                 plot: selectedVisualizationTargets,
                 filters: activeFilters,
@@ -468,6 +511,11 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               flaggedKeys={flaggedKeys}
               onFlaggedKeysChange={setFlaggedKeys}
               contextKeys={contextTelegramKeys}
+              onVisualizationContextClear={(key) => {
+                setVisualNavigationKey(prev => prev === key ? null : prev);
+              }}
+              centerOnKey={centerOnTelegramKey}
+              onCenterOnKeyConsumed={() => setCenterOnTelegramKey(null)}
               allBufferSourceCount={allBufferSourceCount}
               bufferCapacity={loadLimit}
               allBufferMessageCount={sortedTelegrams.length}

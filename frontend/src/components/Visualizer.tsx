@@ -11,6 +11,7 @@ import { getPref, setPref } from '../utils/prefs';
 import { clearSeriesHidden } from '../utils/legendVisibility';
 import { expandDegenerateRange } from '../utils/timeRange';
 import { splitLockedBuckets } from '../utils/chartLock';
+import { computeSharedLeftGutter } from '../utils/chartGutter';
 
 interface VisualizerProps {
   telegrams: Telegram[];
@@ -86,6 +87,13 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   const displayBuckets = useMemo(
     () => splitLockedBuckets(buckets, selectedTargets, addressToUnit, lockThresholds),
     [buckets, selectedTargets, addressToUnit, lockThresholds]
+  );
+  // One gutter width shared by every displayed chart (#... ), wide enough for
+  // all their y-axis tick labels and titles, so every X-axis starts at the
+  // same vertical pixel column regardless of chart type.
+  const sharedLeftGutter = useMemo(
+    () => computeSharedLeftGutter(displayBuckets.map(g => g.bucket)),
+    [displayBuckets],
   );
   // `openGroupSize` is the currently-open chart's own GA count (for that
   // unit), read fresh from `displayBuckets` at the call site. If the most
@@ -184,9 +192,9 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     <div ref={chartWrapperRef} style={{ flex: 1, overflowY: 'auto', padding: embed ? '0.75rem' : '1.5rem' }}>
       {displayBuckets.map(g => (
         g.bucket.isBinary ? (
-          <TimelineChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={activeRange[1]} showDots={showDots} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={onTimeClick} />
+          <TimelineChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={activeRange[1]} showDots={showDots} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={onTimeClick} leftGutter={sharedLeftGutter} />
         ) : g.bucket.isEvents ? (
-          <EventDotsChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={activeRange[1]} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={onTimeClick} />
+          <EventDotsChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={activeRange[1]} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={onTimeClick} leftGutter={sharedLeftGutter} />
         ) : (
           <MixedChart
             key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={activeRange[1]}
@@ -196,6 +204,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
             locked={g.isLatest ? (lockThresholds[g.bucket.unit]?.at(-1) === g.bucket.series.length) : undefined}
             onToggleLock={g.isLatest ? () => toggleLock(g.bucket.unit, g.bucket.series.length) : undefined}
             onTimeClick={onTimeClick}
+            leftGutter={sharedLeftGutter}
           />
         )
       ))}

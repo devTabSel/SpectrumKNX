@@ -25,6 +25,7 @@ import {
 import { compileQuickFilters, DEFAULT_QUICK_FILTER_COLUMN_ENABLED, type QuickFilterColumnEnabled } from './utils/quickFilter';
 import { expandWithDeltaContext } from './utils/deltaContextExpansion';
 import { anchorKey } from './utils/anchorKey';
+import { findNearestVisibleVisualizationTelegram } from './utils/visualizationNavigation';
 import { readSortConfigPref, writeScopedSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
 import { readVisibleColumnsPref, writeVisibleColumnsPref, readColumnOrderPref, writeColumnOrderPref } from './utils/tablePrefs';
 import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, Search, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
@@ -239,6 +240,7 @@ function App() {
   const [listFollow, setListFollow] = useState(initialUiState.listFollow);
   const [listAnchorKey, setListAnchorKey] = useState<string | null>(initialUiState.listAnchorKey);
   const [infoBarOpen, setInfoBarOpen] = useState(initialUiState.infoBarOpen);
+  const [centerOnTelegramKey, setCenterOnTelegramKey] = useState<string | null>(null);
   const [zoomRange, setZoomRange] = useState<[number, number] | null>(initialUiState.zoomRange);
   const [statsSearch, setStatsSearch] = useState(initialUiState.statsSearch);
   const [buildingSearch, setBuildingSearch] = useState(initialUiState.buildingSearch);
@@ -557,6 +559,7 @@ function App() {
     const saved = getPref(`lastMarkedKey:${LIVE_TABLE_INSTANCE_ID}`);
     return saved ? saved : null;
   });
+  const [visualNavigationTelegramKey, setVisualNavigationTelegramKey] = useState<string | null>(null);
 
   // ── Per-message Time-Delta-Context flags (#319) ─────────────────────────────
   // Same lifting rationale as marks; each flagged telegram always anchors a
@@ -758,48 +761,27 @@ function App() {
     // The global toggle off (#318) suppresses per-message flags too, per its
     // "preserving all per-message flags" — inert, not cleared, while off.
     const flags = f.deltaContextEnabled ? new Set(flaggedTelegramKeys) : EMPTY_KEY_SET;
+    const forcedContextReasons = new Map<string, 'marked' | 'visualization'>();
+    for (const key of markedTelegramKeys) forcedContextReasons.set(key, 'marked');
+    if (visualNavigationTelegramKey) forcedContextReasons.set(visualNavigationTelegramKey, 'visualization');
 
-    return expandWithDeltaContext(sortedLiveTelegrams, matches, anchorKey, flags, deltaBeforeMs, deltaAfterMs);
-  }, [sortedLiveTelegrams, activeFilters, filtersEnabled, flaggedTelegramKeys, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled]);
+    return expandWithDeltaContext(sortedLiveTelegrams, matches, anchorKey, flags, deltaBeforeMs, deltaAfterMs, forcedContextReasons);
+  }, [sortedLiveTelegrams, activeFilters, filtersEnabled, flaggedTelegramKeys, markedTelegramKeys, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled, visualNavigationTelegramKey]);
   const filteredLiveTelegrams = deltaExpandedLive.items;
-  // Keys of rows shown only as unfiltered context around a match/flag (#343).
-  const contextTelegramKeys = deltaExpandedLive.contextKeys;
+  // Keys of rows shown only as context, not a real filter match, mapped to
+  // the reason (#343, #380).
+  const contextTelegramKeys = deltaExpandedLive.contextReasons;
 
-  // Click a chart time-ruler position: close the panel, land on the
-  // telegram nearest that timestamp with live-follow paused, and auto-flag it
-  // as a Time-Delta-Context anchor so its context window opens around it (#308).
-  // Additionally, mark the nearest row in the currently displayed telegram
-  // list as the latest clicked mark (additive, preserving existing marks).
   const handleChartTimeClick = useCallback((ms: number) => {
-    if (liveTelegrams.length === 0) return;
-    let nearest = liveTelegrams[0];
-    let bestDiff = Infinity;
-    for (const t of liveTelegrams) {
-      const diff = Math.abs(new Date(t.timestamp).getTime() - ms);
-      if (diff < bestDiff) { bestDiff = diff; nearest = t; }
-    }
+    const nearest = findNearestVisibleVisualizationTelegram(liveTelegrams, selectedVisualizationTargets, ms);
+    if (!nearest) return;
     const key = anchorKey(nearest);
-    setFlaggedTelegramKeys(prev => prev.includes(key) ? prev : [...prev, key]);
-
-    if (filteredLiveTelegrams.length > 0) {
-      let nearestDisplayed = filteredLiveTelegrams[0];
-      let bestDisplayedDiff = Infinity;
-      for (const t of filteredLiveTelegrams) {
-        const diff = Math.abs(new Date(t.timestamp).getTime() - ms);
-        if (diff < bestDisplayedDiff) {
-          bestDisplayedDiff = diff;
-          nearestDisplayed = t;
-        }
-      }
-      const displayedKey = anchorKey(nearestDisplayed);
-      setMarkedTelegramKeys(prev => prev.includes(displayedKey) ? prev : [...prev, displayedKey]);
-      setLastMarkedTelegramKey(displayedKey);
-    }
-
+    setVisualNavigationTelegramKey(key);
     setListFollow(false);
     setListAnchorKey(key);
+    setCenterOnTelegramKey(key);
     setActivePanel('list');
-  }, [liveTelegrams, filteredLiveTelegrams]);
+  }, [liveTelegrams, selectedVisualizationTargets]);
 
   const liveQuickFilterFiltersOutAny = useMemo(() => {
     if (!quickFilterOpen || !quickFilterEnabled) return false;
@@ -1411,6 +1393,8 @@ function App() {
                     onListFollowChange={setListFollow}
                     listAnchorKey={listAnchorKey}
                     onListAnchorKeyChange={setListAnchorKey}
+                    centerOnKey={centerOnTelegramKey}
+                    onCenterOnKeyConsumed={() => setCenterOnTelegramKey(null)}
                     markedKeys={markedTelegramKeys}
                     onMarkedKeysChange={setMarkedTelegramKeys}
                     lastMarkedKey={lastMarkedTelegramKey}
@@ -1418,6 +1402,9 @@ function App() {
                     flaggedKeys={flaggedTelegramKeys}
                     onFlaggedKeysChange={setFlaggedTelegramKeys}
                     contextKeys={contextTelegramKeys}
+                    onVisualizationContextClear={(key) => {
+                      setVisualNavigationTelegramKey(prev => prev === key ? null : prev);
+                    }}
                     allBufferSourceCount={liveAllBufferSourceCount}
                     bufferCapacity={loadLimit}
                     allBufferMessageCount={sortedLiveTelegrams.length}

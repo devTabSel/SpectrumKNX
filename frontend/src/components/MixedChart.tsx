@@ -7,6 +7,7 @@ import type { ChartBucket } from '../hooks/useChartData';
 import { useThemeTick } from '../hooks/useTheme';
 import { seriesColor } from '../utils/seriesColors';
 import { isSeriesHidden, setSeriesHidden } from '../utils/legendVisibility';
+import { computeSharedLeftGutter } from '../utils/chartGutter';
 import { spansMultipleDays, formatAxisTime, formatFullTime } from '../utils/timeFormat';
 
 interface MixedChartProps {
@@ -29,36 +30,17 @@ interface MixedChartProps {
   /** Click (not drag-select) on the chart: navigate to the telegram list around
    * this timestamp (#308). */
   onTimeClick?: (ms: number) => void;
+  /** Shared left-axis gutter (#... ) so every chart's X-axis starts at the same
+   * pixel column; falls back to this chart's own bucket when not provided. */
+  leftGutter?: number;
 }
 
 // Ensure we have a shared sync cursor across all charts
 const syncCursor = uPlot.sync('knx-time-axis');
-const MIN_GUTTER = 60;
-const MAX_GUTTER = 220;
-
-// Reused scratch canvas for text measurement (created lazily, once).
-let measureCanvas: HTMLCanvasElement | null = null;
-
-// Widens the y-axis gutter to fit the largest expected tick label instead of a
-// fixed guess, so e.g. "30000 lx" isn't clipped at the left edge (#349).
-const measureGutterWidth = (series: ChartBucket['series'], unit: string): number => {
-  let maxAbs = 0;
-  for (const s of series) {
-    for (const v of s.data) {
-      if (v != null && Math.abs(v) > maxAbs) maxAbs = Math.abs(v);
-    }
-  }
-  const sample = `${Math.ceil(maxAbs).toLocaleString()} ${unit}`;
-  measureCanvas ??= document.createElement('canvas');
-  const ctx = measureCanvas.getContext('2d');
-  if (!ctx) return MIN_GUTTER + 90;
-  ctx.font = '11px sans-serif'; // approximates uPlot's default axis label font
-  return Math.min(MAX_GUTTER, Math.max(MIN_GUTTER, Math.ceil(ctx.measureText(sample).width) + 30));
-};
 
 export const MixedChart: React.FC<MixedChartProps> = ({
   bucket, minTime, maxTime, stepped, showDots, autoFollow = false, onZoomRangeChange,
-  groupLabel, locked, onToggleLock, onTimeClick,
+  groupLabel, locked, onToggleLock, onTimeClick, leftGutter: sharedLeftGutter,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
@@ -81,7 +63,10 @@ export const MixedChart: React.FC<MixedChartProps> = ({
   }, []);
 
   const { unit, isBinary, timestamps, series } = bucket;
-  const leftGutter = useMemo(() => measureGutterWidth(series, unit), [series, unit]);
+  const leftGutter = useMemo(
+    () => sharedLeftGutter ?? computeSharedLeftGutter([bucket]),
+    [sharedLeftGutter, bucket],
+  );
 
   // Show a date alongside times once the visible range crosses midnight (#281).
   const multiDay = minTime != null && maxTime != null && spansMultipleDays(minTime, maxTime);
@@ -229,6 +214,26 @@ export const MixedChart: React.FC<MixedChartProps> = ({
               if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
               onZoomRangeChange?.(null);
             });
+
+            // Hovering the ruler shows the same synced dashed cursor line as
+            // hovering the plot itself (#308), pinned to the plot's bottom
+            // edge since there's no data row to align a horizontal line to.
+            u.root.addEventListener('mousemove', (e) => {
+              const rootRect = u.root.getBoundingClientRect();
+              const overRect = u.over.getBoundingClientRect();
+              const withinOver =
+                e.clientX >= overRect.left && e.clientX <= overRect.right &&
+                e.clientY >= overRect.top && e.clientY <= overRect.bottom;
+              if (withinOver) return; // native cursor handling already applies
+
+              const inXAxisBand =
+                e.clientX >= overRect.left && e.clientX <= overRect.right &&
+                e.clientY > overRect.bottom && e.clientY <= rootRect.bottom;
+              u.setCursor(inXAxisBand
+                ? { left: e.clientX - overRect.left, top: overRect.height }
+                : { left: -10, top: -10 });
+            });
+            u.root.addEventListener('mouseleave', () => u.setCursor({ left: -10, top: -10 }));
           }
         ]
       },
@@ -285,6 +290,16 @@ export const MixedChart: React.FC<MixedChartProps> = ({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [structureKey]);
 
+  const edgeLineStyle: React.CSSProperties = {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: '1px',
+    background: 'var(--border-subtle)',
+    pointerEvents: 'none',
+    zIndex: 5,
+  };
+
   return (
     <div style={{ marginBottom: '2rem', background: 'var(--bg-inset)', padding: '1rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1rem' }}>
@@ -312,72 +327,69 @@ export const MixedChart: React.FC<MixedChartProps> = ({
           </button>
         )}
       </div>
-      <div ref={containerRef} style={{ width: '100%', overflow: 'hidden', position: 'relative' }}>
-         {/* Re-fit to new data only while not zoomed (#340): keeps a new telegram
-             visible instead of dropping off a frozen scale. When the user has
-             zoomed, autoFollow is false so the range is preserved (#281). */}
-         <UplotReact options={options} data={data} resetScales={autoFollow} />
+      <div style={{ position: 'relative' }}>
+        <div ref={containerRef} style={{ width: '100%', overflow: 'hidden', position: 'relative' }}>
+           {/* Re-fit to new data only while not zoomed (#340): keeps a new telegram
+               visible instead of dropping off a frozen scale. When the user has
+               zoomed, autoFollow is false so the range is preserved (#281). */}
+           <UplotReact options={options} data={data} resetScales={autoFollow} />
 
-         {/* Fixed legend (#349): stays put while hovering, unlike uPlot's native
-             legend, and shows each GA's value at the hovered x-position. */}
-         <div style={{
-           position: 'absolute', top: 4, right: 4, zIndex: 10,
-           // --bg-inset (and every --bg-* token) is intentionally translucent
-           // for this app's glass-panel look, but a plotted line crossing
-           // behind a legend row at the same height reads badly through it —
-           // --bg-dark is the one fully opaque token, used here instead.
-           background: 'var(--bg-dark)',
-           boxShadow: '0 1px 4px rgba(0,0,0,0.25)',
-           border: '1px solid var(--border-color)', borderRadius: '6px',
-           maxWidth: '55%', pointerEvents: 'auto',
-         }}>
-           <button
-             onClick={() => setLegendOpen(o => !o)}
-             style={{
-               display: 'flex', alignItems: 'center', gap: '0.25rem', width: '100%',
-               background: 'transparent', border: 'none', cursor: 'pointer',
-               padding: '0.25rem 0.4rem', fontSize: '0.65rem', color: 'var(--text-dim)',
-             }}
-           >
-             {legendOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
-             {series.length} GA{series.length !== 1 ? 's' : ''}
-           </button>
-           {legendOpen && (
-             <div style={{ maxHeight: '160px', overflowY: 'auto', padding: '0 0.4rem 0.35rem' }}>
-               {series.map((s, sIdx) => (
-                 <div
-                   key={s.address}
-                   ref={el => { legendRowRefs.current[sIdx] = el; }}
-                   style={{
-                     display: 'flex', alignItems: 'center', gap: '0.35rem',
-                     padding: '0.15rem 0.3rem', borderRadius: '4px', fontSize: '0.68rem',
-                     transition: 'background 0.1s',
-                   }}
-                 >
-                   <span style={{ width: 8, height: 8, borderRadius: '50%', background: seriesColor(s.address), flexShrink: 0 }} />
-                   <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-main)' }} title={s.name}>
-                     {s.name}
-                   </span>
-                   <span
-                     ref={el => { legendValueRefs.current[sIdx] = el; }}
-                     style={{ marginLeft: 'auto', flexShrink: 0, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}
+           {/* Fixed legend (#349): stays put while hovering, unlike uPlot's native
+               legend, and shows each GA's value at the hovered x-position. */}
+           <div style={{
+             position: 'absolute', top: 4, right: 4, zIndex: 10,
+             // --bg-inset (and every --bg-* token) is intentionally translucent
+             // for this app's glass-panel look, but a plotted line crossing
+             // behind a legend row at the same height reads badly through it —
+             // --bg-dark is the one fully opaque token, used here instead.
+             background: 'var(--bg-dark)',
+             boxShadow: '0 1px 4px rgba(0,0,0,0.25)',
+             border: '1px solid var(--border-color)', borderRadius: '6px',
+             maxWidth: '55%', pointerEvents: 'auto',
+           }}>
+             <button
+               onClick={() => setLegendOpen(o => !o)}
+               style={{
+                 display: 'flex', alignItems: 'center', gap: '0.25rem', width: '100%',
+                 background: 'transparent', border: 'none', cursor: 'pointer',
+                 padding: '0.25rem 0.4rem', fontSize: '0.65rem', color: 'var(--text-dim)',
+               }}
+             >
+               {legendOpen ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+               {series.length} GA{series.length !== 1 ? 's' : ''}
+             </button>
+             {legendOpen && (
+               <div style={{ maxHeight: '160px', overflowY: 'auto', padding: '0 0.4rem 0.35rem' }}>
+                 {series.map((s, sIdx) => (
+                   <div
+                     key={s.address}
+                     ref={el => { legendRowRefs.current[sIdx] = el; }}
+                     style={{
+                       display: 'flex', alignItems: 'center', gap: '0.35rem',
+                       padding: '0.15rem 0.3rem', borderRadius: '4px', fontSize: '0.68rem',
+                       transition: 'background 0.1s',
+                     }}
                    >
-                     {s.data[s.data.length - 1] == null ? '–' : isBinary ? (s.data[s.data.length - 1] === 1 ? 'On' : 'Off') : `${s.data[s.data.length - 1]} ${unit}`}
-                   </span>
-                 </div>
-               ))}
-             </div>
-           )}
-         </div>
-      </div>
-      {/* Always spell out the visible window's start and end, so the range is
-          readable even when the axis ticks are sparse or zoomed out (#314). */}
-      {minTime != null && maxTime != null && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: '0.35rem', paddingLeft: `${leftGutter}px`, paddingRight: '16px', fontSize: '0.7rem', color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
-          <span>{formatFullTime(minTime, multiDay)}</span>
-          <span>{formatFullTime(maxTime, multiDay)}</span>
+                     <span style={{ width: 8, height: 8, borderRadius: '50%', background: seriesColor(s.address), flexShrink: 0 }} />
+                     <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-main)' }} title={s.name}>
+                       {s.name}
+                     </span>
+                     <span
+                       ref={el => { legendValueRefs.current[sIdx] = el; }}
+                       style={{ marginLeft: 'auto', flexShrink: 0, color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}
+                     >
+                       {s.data[s.data.length - 1] == null ? '–' : isBinary ? (s.data[s.data.length - 1] === 1 ? 'On' : 'Off') : `${s.data[s.data.length - 1]} ${unit}`}
+                     </span>
+                   </div>
+                 ))}
+               </div>
+             )}
+           </div>
         </div>
-      )}
+        {/* Plot bounds markers for the chart area. */}
+        <div style={{ ...edgeLineStyle, left: `${leftGutter}px` }} />
+        <div style={{ ...edgeLineStyle, right: '16px' }} />
+      </div>
     </div>
   );
 };
