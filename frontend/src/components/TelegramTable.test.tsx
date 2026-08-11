@@ -115,6 +115,42 @@ test('clicking a row pauses live-following (#266)', () => {
   expect(screen.getByText(/1 new telegram/)).toBeInTheDocument();
 });
 
+test('live follow does not resume after a pause when the list changes', () => {
+  const onListFollowChange = vi.fn();
+  const { container, rerender } = render(
+    <TelegramTable
+      telegrams={makeList(6, 5)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+
+  fireEvent.click(container.querySelectorAll('.log-row')[2]);
+  expect(onListFollowChange).toHaveBeenLastCalledWith(false);
+
+  rerender(
+    <TelegramTable
+      telegrams={makeList(7, 6)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+
+  expect(onListFollowChange).toHaveBeenLastCalledWith(false);
+});
+
 test('newest-on-bottom: clicking a row stays anchored while the full buffer evicts (#297)', () => {
   const asc: SortConfig = [{ key: 'timestamp', direction: 'asc' }];
   // In asc view the parent hands rows oldest-first, newest at the bottom edge.
@@ -167,6 +203,36 @@ test('without a click the table keeps following the live edge', () => {
     />,
   );
   expect(screen.queryByText(/new telegram/)).not.toBeInTheDocument();
+});
+
+test('a paused view does not auto-scroll when the list rerenders', () => {
+  const initialRows = makeList(8, 7);
+  const { container, rerender } = renderTable(initialRows);
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  scrollContainer.scrollTop = 240;
+  fireEvent.scroll(scrollContainer);
+
+  const beforeScrollTop = scrollContainer.scrollTop;
+  const rerenderedRows = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:20.000Z', raw_hex: '0x20' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:19.000Z', raw_hex: '0x19' }),
+    ...initialRows,
+  ];
+
+  rerender(
+    <TelegramTable
+      telegrams={rerenderedRows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+
+  expect(scrollContainer.scrollTop).toBe(beforeScrollTop);
 });
 
 test('source column can render configured device and location fields in two lines', () => {
@@ -1135,10 +1201,45 @@ test('context rows: non-delta reasons can be marked and unmarked', () => {
 
   const row = container.querySelector(`[data-akey="${key}"]`)!;
   fireEvent.click(row);
+  expect(row.classList.contains('marked')).toBe(false);
+
+  fireEvent.click(row, { ctrlKey: true });
   expect(row.classList.contains('marked')).toBe(true);
 
   fireEvent.click(row, { ctrlKey: true });
   expect(row.classList.contains('marked')).toBe(false);
+});
+
+test('context rows caused by marks keep their bar color matching marked rows and ignore plain clicks', () => {
+  const rows = makeList(2, 1);
+  const key = anchorKey(rows[0]);
+  const contextKeys = new Map([[key, 'marked' as const]]);
+  const onMarkedKeysChange = vi.fn();
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      contextKeys={contextKeys}
+      markedKeys={[key]}
+      lastMarkedKey={key}
+      onMarkedKeysChange={onMarkedKeysChange}
+    />,
+  );
+
+  const row = container.querySelector(`[data-akey="${key}"]`)! as HTMLElement;
+  expect(row.style.boxShadow).toContain('color-mix(in srgb, var(--accent-primary) 60%, transparent)');
+
+  fireEvent.click(row);
+  expect(onMarkedKeysChange).not.toHaveBeenCalled();
+
+  fireEvent.click(row, { ctrlKey: true });
+  expect(onMarkedKeysChange).toHaveBeenLastCalledWith([]);
 });
 
 test('context rows (#380): a "marked" reason keeps its blue context indicator even though the row is marked', () => {
