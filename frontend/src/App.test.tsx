@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { expect, test, vi } from 'vitest';
 import App from './App';
 
@@ -41,4 +41,19 @@ test('shows the five main-panel tabs with Telegram List active by default (#374)
 test('the filter toggle lives with the Telegram List (#374)', async () => {
   render(<App />);
   expect(screen.queryByRole('button', { name: 'Focus panel toggle temporarily disabled' })).not.toBeInTheDocument();
+});
+
+test('the focus panel can be resized with the drag handle', () => {
+  render(<App />);
+  fireEvent.click(screen.getByTitle('Toggle Focus panel'));
+
+  const handle = screen.getByTitle('Resize Focus panel');
+  act(() => {
+    fireEvent.mouseDown(handle, { clientX: 320 });
+    fireEvent.mouseMove(window, { clientX: 380 });
+    fireEvent.mouseUp(window);
+  });
+
+  const panel = screen.getByTestId('focus-panel-sidebar');
+  expect(panel).toHaveStyle({ width: '260px' });
 });

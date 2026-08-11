@@ -27,7 +27,7 @@ import { anchorKey } from './utils/anchorKey';
 import { findPreviousVisibleVisualizationTelegrams } from './utils/visualizationNavigation';
 import { readSortConfigPref, writeScopedSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
 import { readVisibleColumnsPref, writeVisibleColumnsPref, readColumnOrderPref, writeColumnOrderPref } from './utils/tablePrefs';
-import { LayoutDashboard, Settings, Download, Trash2, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
+import { LayoutDashboard, Settings, Download, Trash2, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List, Search } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
 import { useTheme } from './hooks/useTheme';
@@ -75,6 +75,9 @@ const DISMISSED_UPDATE_PREF = 'dismissed_update_version';
 
 const EMPTY_FILTER_OPTIONS: FilterOptions = { sources: [], targets: [], types: [], dpts: [], ga_group_names: {}, pa_line_names: {} };
 const LIVE_TABLE_INSTANCE_ID = 'live';
+const MIN_FOCUS_PANEL_WIDTH = 260;
+const MAX_FOCUS_PANEL_WIDTH = 520;
+const DEFAULT_FOCUS_PANEL_WIDTH = 320;
 
 const readStringArrayPref = (key: string): string[] => {
   try {
@@ -257,6 +260,46 @@ function App() {
   );
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isFilterOpen, setIsFilterOpen] = useState(initialWorkspace?.filterOpen ?? false);
+  const [focusListFlaggedAddresses, setFocusListFlaggedAddresses] = useState<string[]>([]);
+  const [focusPanelWidth, setFocusPanelWidth] = useState(() => {
+    const stored = Number(getPref('focusPanelWidth'));
+    if (!Number.isFinite(stored)) return DEFAULT_FOCUS_PANEL_WIDTH;
+    return Math.min(MAX_FOCUS_PANEL_WIDTH, Math.max(MIN_FOCUS_PANEL_WIDTH, stored));
+  });
+  const [isResizingFocusPanel, setIsResizingFocusPanel] = useState(false);
+  const resizeOriginRef = useRef<{ x: number; width: number } | null>(null);
+  const focusPanelWidthRef = useRef(focusPanelWidth);
+  useEffect(() => {
+    focusPanelWidthRef.current = focusPanelWidth;
+  }, [focusPanelWidth]);
+  useEffect(() => {
+    if (!isResizingFocusPanel) return;
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!resizeOriginRef.current) return;
+      const delta = event.clientX - resizeOriginRef.current.x;
+      const nextWidth = Math.min(
+        MAX_FOCUS_PANEL_WIDTH,
+        Math.max(MIN_FOCUS_PANEL_WIDTH, resizeOriginRef.current.width + delta),
+      );
+      setFocusPanelWidth(nextWidth);
+      setPref('focusPanelWidth', String(nextWidth));
+    };
+    const handleMouseUp = () => setIsResizingFocusPanel(false);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizingFocusPanel]);
+  const handleFocusPanelResizeStart = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    resizeOriginRef.current = { x: event.clientX, width: focusPanelWidthRef.current };
+    setIsResizingFocusPanel(true);
+  }, []);
+  // Focus panel's active category (Group Addresses/Devices), lifted so the
+  // Telegram List's SOURCE/TARGET "focus" label can switch it (#402).
+  const [focusMode, setFocusMode] = useState<'ga' | 'pa'>('ga');
   // The active main panel within Group Monitor (#374). Replaces the former
   // isVisualizerOpen/isLastSeenOpen/isStatisticsOpen/isBuildingOpen booleans with
   // one selector so exactly one panel is active and every close returns to 'list'.
@@ -656,6 +699,13 @@ function App() {
     setIsFilterOpen(true);
   }, [handleFiltersChange]);
 
+  // Focus panel row (#404): add this address to the Telegram List's active
+  // filter and switch to that main panel, regardless of which is open now.
+  const handleShowInTelegramList = useCallback((address: string, category: 'ga' | 'pa') => {
+    if (category === 'ga') handleFilterGAs([address]); else handleQuickFilter('sources', address);
+    setActivePanel('list');
+  }, [handleFilterGAs, handleQuickFilter]);
+
   // Time-Delta-Context window, now edited from the telegram list's DELTA TIME
   // quick-filter cell rather than the filter pane (#309, #371).
   const handleDeltaContextChange = useCallback((deltaBeforeMs: number, deltaAfterMs: number) => {
@@ -989,6 +1039,23 @@ function App() {
                   onChange={(p) => { if (p !== 'building') setStatusDevice(null); setActivePanel(p); setIsDatabaseOpen(false); }}
                 />
 
+                {/* Focus panel toggle: a slide-in pane shown at the side of
+                    every main panel, not a main panel itself. */}
+                <button
+                  className="icon-button"
+                  onClick={() => setIsFilterOpen(o => !o)}
+                  title="Toggle Focus panel"
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    padding: '0.4rem', borderRadius: '8px',
+                    border: '1px solid var(--border-color)',
+                    background: 'var(--bg-subtle)',
+                    color: isFilterOpen ? 'var(--accent-primary)' : 'var(--text-dim)',
+                  }}
+                >
+                  <Search size={18} />
+                </button>
+
                 {serverConfig?.status?.write_enabled && (
                   <button
                     className="icon-button"
@@ -1282,28 +1349,55 @@ function App() {
 
               {/* Filter panel (slide-in). Filters apply to the Telegram List only,
                   so the pane is list-only now (#374; contents redesign is #370). */}
-              <div style={{
-                width: showFilterPane ? 'clamp(260px, 18vw, 340px)' : '0px',
-                overflow: 'hidden',
-                transition: 'width 0.25s cubic-bezier(0.4,0,0.2,1)',
-                flexShrink: 0,
-                borderRight: showFilterPane ? '1px solid var(--border-color)' : 'none',
-                display: 'flex',
-                flexDirection: 'column'
-              }}>
-                <div style={{ width: 'clamp(260px, 18vw, 340px)', flex: 1, overflow: 'hidden' }}>
+              <div
+                data-testid="focus-panel-sidebar"
+                style={{
+                  width: showFilterPane ? `${focusPanelWidth}px` : '0px',
+                  overflow: 'hidden',
+                  transition: showFilterPane ? 'none' : 'width 0.25s cubic-bezier(0.4,0,0.2,1)',
+                  flexShrink: 0,
+                  borderRight: showFilterPane ? '1px solid var(--border-color)' : 'none',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  position: 'relative',
+                }}
+              >
+                {showFilterPane && (
+                  <div
+                    role="separator"
+                    aria-label="Resize Focus panel"
+                    title="Resize Focus panel"
+                    onMouseDown={handleFocusPanelResizeStart}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      bottom: 0,
+                      right: -4,
+                      width: 8,
+                      cursor: 'col-resize',
+                      zIndex: 5,
+                    }}
+                  />
+                )}
+                <div style={{ width: '100%', flex: 1, overflow: 'hidden' }}>
                   <FilterPanel
                     options={filterOptions}
                     activeFilters={activeFilters}
                     onFiltersChange={handleFiltersChange}
                     counts={filterCounts}
                     onQuickLastSeen={handleQuickLastSeen}
+                    onVisualizeGAs={handleVisualizeGAs}
+                    onShowInTelegramList={handleShowInTelegramList}
                     mode="live"
                     projectLoaded={projectStatus?.project_loaded}
                     onUploadProject={() => setIsSettingsOpen(true)}
                     writeEnabled={serverConfig?.status?.write_enabled}
                     filtersEnabled={filtersEnabled}
                     onFiltersEnabledChange={setFiltersEnabled}
+                    focusMode={focusMode}
+                    onFocusModeChange={setFocusMode}
+                    listFlaggedAddresses={focusListFlaggedAddresses}
+                    onListFlaggedAddressesChange={setFocusListFlaggedAddresses}
                   />
                 </div>
               </div>
@@ -1425,6 +1519,11 @@ function App() {
                     onVisualizationContextClear={(key) => {
                       setVisualNavigationTelegramKeys(prev => prev.filter(item => item !== key));
                     }}
+                    onFocusCategorySelect={(category) => {
+                      setFocusMode(category);
+                      setIsFilterOpen(true);
+                    }}
+                    focusListAddresses={focusListFlaggedAddresses}
                     allBufferSourceCount={liveAllBufferSourceCount}
                     bufferCapacity={loadLimit}
                     allBufferMessageCount={sortedLiveTelegrams.length}

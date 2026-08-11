@@ -1,32 +1,72 @@
 import React, { useState, useMemo } from 'react';
-import { Search, ChevronDown, ChevronRight, X, Clock, FolderInput, AlertTriangle } from 'lucide-react';
+import { Search, X, Clock, FolderInput, AlertTriangle, Minimize2, List, LineChart } from 'lucide-react';
 import {
+  type FilterOption,
   type FilterOptions,
   type ActiveFilters,
   type FilterCounts,
-  DEFAULT_FILTERS,
 } from '../types/filters';
 import { compareKnxAddress } from '../utils/knxAddress';
-import { KnxAddressTree } from './KnxAddressTree';
 import { SendToGaPopover } from './SendToGaPopover';
 
 const rowActionBtnStyle: React.CSSProperties = {
-  background: 'transparent', border: 'none', cursor: 'pointer',
+  background: 'transparent', border: '1px solid var(--border-color)', cursor: 'pointer',
   color: 'var(--text-dim)', padding: '0.15rem', borderRadius: '3px',
   display: 'flex', alignItems: 'center',
 };
 
-const LastSeenButton: React.FC<{ onClick: () => void }> = ({ onClick }) => (
+/** Borderless, inline style for the write-to-GA action next to the address text (#406). */
+const writeActionBtnStyle: React.CSSProperties = {
+  background: 'transparent', border: 'none', cursor: 'pointer',
+  color: 'var(--text-dim)', padding: '0.1rem', borderRadius: '3px',
+  display: 'inline-flex', alignItems: 'center', flexShrink: 0,
+};
+
+/** Toggle-icon style (#406): bordered per rowActionBtnStyle, accent-colored while active. */
+const toggleIconBtnStyle = (active: boolean): React.CSSProperties => ({
+  ...rowActionBtnStyle,
+  color: active ? 'var(--accent-primary)' : 'var(--text-dim)',
+  borderColor: active ? 'var(--accent-primary)' : 'var(--border-color)',
+  background: active ? 'rgba(99,102,241,0.15)' : 'transparent',
+});
+
+// The three row icons are real toggles (#406): they set/clear a flag on the
+// item; they don't navigate anywhere (yet). Once set, an icon stays visible
+// regardless of pin/hover state (#407); the `visible` prop otherwise mirrors
+// the row's pinned-or-hovered state, computed by the caller.
+const LastSeenButton: React.FC<{ active: boolean; visible: boolean; onClick: () => void }> = ({ active, visible, onClick }) => (
   <button
     onClick={onClick}
-    title="Show last seen values"
-    style={rowActionBtnStyle}
-    onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-    onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+    title={active ? 'Unmark for Last Seen Values' : 'Mark for Last Seen Values'}
+    aria-pressed={active}
+    style={{ ...toggleIconBtnStyle(active), opacity: visible ? 0.9 : 0, transition: 'opacity 0.15s' }}
   >
     <Clock size={12} />
   </button>
 );
+
+const VisualizeButton: React.FC<{ active: boolean; visible: boolean; onClick: () => void }> = ({ active, visible, onClick }) => (
+  <button
+    onClick={onClick}
+    title={active ? 'Unmark for Visualization' : 'Mark for Visualization'}
+    aria-pressed={active}
+    style={{ ...toggleIconBtnStyle(active), opacity: visible ? 0.9 : 0, transition: 'opacity 0.15s' }}
+  >
+    <LineChart size={12} />
+  </button>
+);
+
+const ShowInListButton: React.FC<{ active: boolean; visible: boolean; onClick: () => void }> = ({ active, visible, onClick }) => (
+  <button
+    onClick={onClick}
+    title={active ? 'Unmark for the Telegram List' : 'Mark for the Telegram List'}
+    aria-pressed={active}
+    style={{ ...toggleIconBtnStyle(active), opacity: visible ? 0.9 : 0, transition: 'opacity 0.15s' }}
+  >
+    <List size={12} />
+  </button>
+);
+
 
 // ─── FilterPanel component ────────────────────────────────────────────────────
 
@@ -37,7 +77,15 @@ interface FilterPanelProps {
   /** Live-only: count of telegrams that would match each option in isolation */
   counts?: FilterCounts;
   mode: 'live' | 'history';
+  /** Reserved for future navigation from a row's Last Seen Values toggle
+   * (#406) — the toggle currently only flips its own flag, it doesn't call this. */
   onQuickLastSeen?: (address: string, mode: 'ga' | 'pa') => void;
+  /** Reserved for future navigation from a row's Visualization toggle (#406)
+   * — the toggle currently only flips its own flag, it doesn't call this. */
+  onVisualizeGAs?: (addresses: string[]) => void;
+  /** Reserved for future navigation from a row's Telegram List toggle (#406)
+   * — the toggle currently only flips its own flag, it doesn't call this. */
+  onShowInTelegramList?: (address: string, category: 'ga' | 'pa') => void;
   /**
    * Whether an ETS project is loaded. Source/target/DPT options are derived from
    * the project, so when it's absent (e.g. Home Assistant companion mode without
@@ -56,34 +104,14 @@ interface FilterPanelProps {
    */
   filtersEnabled?: boolean;
   onFiltersEnabledChange?: (enabled: boolean) => void;
+  /** Lifted Group Addresses/Devices tab (#402): lets other panels (e.g. the
+   * Telegram List's SOURCE/TARGET "focus" label) switch the visible category.
+   * Uncontrolled (own state) when omitted. */
+  focusMode?: 'ga' | 'pa';
+  onFocusModeChange?: (mode: 'ga' | 'pa') => void;
+  listFlaggedAddresses?: string[];
+  onListFlaggedAddressesChange?: (addresses: string[]) => void;
 }
-
-interface SectionProps {
-  title: string;
-  children: React.ReactNode;
-  defaultOpen?: boolean;
-}
-
-const Section: React.FC<SectionProps> = ({ title, children, defaultOpen = true }) => {
-  const [open, setOpen] = useState(defaultOpen);
-  return (
-    <div style={{ borderBottom: '1px solid var(--border-color)' }}>
-      <button
-        onClick={() => setOpen(o => !o)}
-        style={{
-          width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          padding: '0.65rem 1rem', background: 'transparent', border: 'none',
-          color: 'var(--text-main)', fontWeight: 600, fontSize: '0.8125rem',
-          cursor: 'pointer', textAlign: 'left',
-        }}
-      >
-        {title}
-        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-      </button>
-      {open && <div style={{ padding: '0 0.75rem 0.75rem' }}>{children}</div>}
-    </div>
-  );
-};
 
 interface OptionRowProps {
   label: string;
@@ -148,19 +176,6 @@ export const OptionRow: React.FC<OptionRowProps> = ({ label, sublabel, checked, 
             }}>{sublabel}</div>
         )}
       </div>
-
-      {/* Count bubble */}
-      {count !== undefined && (
-        <span style={{
-          fontSize: '0.65rem', fontWeight: 600, minWidth: '1.8rem', textAlign: 'center',
-          padding: '0.1rem 0.4rem', borderRadius: '999px',
-          background: count > 0 ? 'rgba(99,102,241,0.15)' : 'var(--bg-tag)',
-          color: count > 0 ? 'var(--accent-primary)' : 'var(--text-dim)',
-          border: count > 0 ? '1px solid rgba(99,102,241,0.3)' : '1px solid var(--border-color)',
-        }}>
-          {count}
-        </span>
-      )}
     </label>
 
     {actions && (
@@ -173,6 +188,21 @@ export const OptionRow: React.FC<OptionRowProps> = ({ label, sublabel, checked, 
       >
         {actions}
       </div>
+    )}
+
+    {/* Count bubble — always flush with the row's right edge (#399) */}
+    {count !== undefined && (
+      <span
+        onClick={onToggle}
+        style={{
+          fontSize: '0.65rem', fontWeight: 600, minWidth: '1.8rem', textAlign: 'center',
+          padding: '0.1rem 0.4rem', borderRadius: '999px', flexShrink: 0, cursor: 'pointer',
+          background: count > 0 ? 'rgba(99,102,241,0.15)' : 'var(--bg-tag)',
+          color: count > 0 ? 'var(--accent-primary)' : 'var(--text-dim)',
+          border: count > 0 ? '1px solid rgba(99,102,241,0.3)' : '1px solid var(--border-color)',
+        }}>
+        {count}
+      </span>
     )}
 
     {onRemove && (
@@ -194,47 +224,297 @@ export const OptionRow: React.FC<OptionRowProps> = ({ label, sublabel, checked, 
   );
 };
 
+// ─── Focus address list (flat, pin-selected-to-top) ─────────────────────────
+// Modeled after XKNX/knx-frontend's "knx-list-filter" component: a flat,
+// searchable list where checking an item pins it above the rest instead of
+// nesting entries in a line/group tree. One list is shown at a time, switched
+// via the Group Addresses / Devices tabs (styled like the Last Seen Values
+// sidebar), so it renders without its own section header.
+
+interface FocusOptionRowProps {
+  label: string;
+  sublabel?: string;
+  checked: boolean;
+  count?: number;
+  onToggle: () => void;
+  /** Borderless write-to-GA action rendered inline after the address text
+   * (#406); receives row-hover so it can hide unless pinned or hovered (#407). */
+  writeAction?: (hovered: boolean) => React.ReactNode;
+  /** Column 3 quick-action icons (#404), spanning both rows; receives
+   * row-hover so each icon can compute its own visibility (#407). */
+  actions?: (hovered: boolean) => React.ReactNode;
+}
+
+// Table-like item (#404): column 1 (checkbox) and columns 3/4 (icons, badge)
+// span both rows; column 2 shows the address on row 1 and the name on row 2.
+// Only the checkbox (column 1) toggles the pinned state (#405) — the row
+// itself, the badge, and the quick-action icons never affect it.
+const FocusOptionRow: React.FC<FocusOptionRowProps> = ({ label, sublabel, checked, count, onToggle, writeAction, actions }) => {
+  const [hovered, setHovered] = useState(false);
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'auto 1fr auto auto auto auto',
+        gridTemplateRows: 'auto auto',
+        alignItems: 'center',
+        columnGap: '0.6rem',
+        rowGap: '0.1rem',
+        padding: '0.3rem 0.25rem',
+        borderRadius: '6px',
+        userSelect: 'none',
+        transition: 'background 0.15s',
+      }}
+      onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-hover)'; setHovered(true); }}
+      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; setHovered(false); }}
+    >
+      {/* Column 1: checkbox, spans both rows — the only control that pins/unpins */}
+      <div
+        role="checkbox"
+        aria-checked={checked}
+        aria-label={`Pin ${label}`}
+        onClick={onToggle}
+        style={{
+          gridColumn: 1, gridRow: '1 / span 2',
+          width: 14, height: 14, flexShrink: 0, borderRadius: 3, cursor: 'pointer',
+          border: `1.5px solid ${checked ? 'var(--accent-primary)' : 'var(--border-color)'}`,
+          background: checked ? 'var(--accent-primary)' : 'transparent',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          transition: 'all 0.15s',
+        }}
+      >
+        {checked && (
+          <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
+            <path d="M1.5 4L3.5 6L6.5 2" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        )}
+      </div>
+
+      {/* Column 2, row 1: address (PA/GA), plus the borderless write action */}
+      <div style={{ gridColumn: 2, gridRow: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
+        <span
+          title={label}
+          style={{
+            minWidth: 0,
+            fontSize: '0.8125rem', color: 'var(--text-main)', fontFamily: "'JetBrains Mono', monospace",
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{label}</span>
+        {writeAction?.(hovered)}
+      </div>
+      {/* Column 2, row 2: name */}
+      <div
+        title={sublabel}
+        style={{
+          gridColumn: 2, gridRow: 2, minWidth: 0,
+          fontSize: '0.65rem', color: 'var(--text-dim)',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{sublabel}</div>
+
+      {/* Column 3-5: quick-action icons, spans both rows — each icon computes
+          its own visibility (#407): pinned/hovered, or its own flag is set. */}
+      {actions && (
+        <div
+          style={{
+            gridColumn: '3 / span 3', gridRow: '1 / span 2',
+            display: 'flex', alignItems: 'center', gap: '0.1rem',
+          }}
+        >
+          {actions(hovered)}
+        </div>
+      )}
+
+      {/* Column 6: count badge, spans both rows — display only, no toggling */}
+      {count !== undefined && (
+        <span
+          style={{
+            gridColumn: 6, gridRow: '1 / span 2',
+            fontSize: '0.65rem', fontWeight: 600, minWidth: '1.8rem', textAlign: 'center',
+            padding: '0.1rem 0.4rem', borderRadius: '999px',
+            background: count > 0 ? 'rgba(99,102,241,0.15)' : 'var(--bg-tag)',
+            color: count > 0 ? 'var(--accent-primary)' : 'var(--text-dim)',
+            border: count > 0 ? '1px solid rgba(99,102,241,0.3)' : '1px solid var(--border-color)',
+          }}>
+          {count}
+        </span>
+      )}
+    </div>
+  );
+};
+
+interface FocusAddressSectionProps {
+  title: string;
+  entries: FilterOption[];
+  selected: string[];
+  onToggle: (addresses: string[]) => void;
+  counts?: Record<string, number>;
+  mode: 'live' | 'history';
+  /** Borderless write-to-GA action rendered inline after the address (#406);
+   * `checked` is the row's pinned state, for computing visibility (#407). */
+  writeActionFor?: (address: string, entry: FilterOption, checked: boolean, hovered: boolean) => React.ReactNode;
+  actionsFor?: (address: string, entry: FilterOption, checked: boolean, hovered: boolean) => React.ReactNode;
+  /** Hide entries whose live count badge reads "0" (#400). */
+  hideZeroCount?: boolean;
+}
+
+const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
+  title, entries, selected, onToggle, counts, mode, writeActionFor, actionsFor, hideZeroCount,
+}) => {
+  const [search, setSearch] = useState('');
+  const q = search.toLowerCase();
+  const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const zeroFilterActive = mode === 'live' && !!hideZeroCount;
+
+  const filtered = useMemo(() =>
+    entries
+      .filter(e => !q || e.address?.toLowerCase().includes(q) || e.name?.toLowerCase().includes(q))
+      .filter(e => !zeroFilterActive || (counts?.[e.address ?? ''] ?? 0) > 0),
+    [entries, q, zeroFilterActive, counts]);
+
+  // Selected items float to the top, each group sorted by address (#XXX).
+  const { pinned, rest } = useMemo(() => {
+    const pinned: FilterOption[] = [];
+    const rest: FilterOption[] = [];
+    for (const e of filtered) (selectedSet.has(e.address ?? '') ? pinned : rest).push(e);
+    const byAddress = (a: FilterOption, b: FilterOption) => compareKnxAddress(a.address ?? '', b.address ?? '');
+    pinned.sort(byAddress);
+    rest.sort(byAddress);
+    return { pinned, rest };
+  }, [filtered, selectedSet]);
+
+  const toggle = (address: string) =>
+    onToggle(selectedSet.has(address) ? selected.filter(v => v !== address) : [...selected, address]);
+
+  if (entries.length === 0) {
+    return (
+      <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', padding: '1.5rem 1rem', textAlign: 'center', lineHeight: 1.5 }}>
+        No {title.toLowerCase()} in the project.
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: '0.4rem',
+        background: 'var(--bg-tag)', border: '1px solid var(--border-color)',
+        borderRadius: '6px', padding: '0.35rem 0.55rem', marginBottom: '0.5rem',
+      }}>
+        <Search size={12} style={{ color: 'var(--text-dim)', flexShrink: 0 }} />
+        <input
+          type="text"
+          placeholder={`Search ${title.toLowerCase()}...`}
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          style={{
+            flex: 1, background: 'transparent', border: 'none', outline: 'none',
+            color: 'var(--text-main)', fontSize: '0.78rem', fontFamily: 'inherit',
+          }}
+        />
+        {search && (
+          <button
+            onClick={() => setSearch('')}
+            style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, color: 'var(--text-dim)' }}
+          >
+            <X size={10} />
+          </button>
+        )}
+      </div>
+
+      {/* Reserved for future per-category quick-action icons (#403) */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '0.3rem', minHeight: '1.25rem', marginBottom: '0.35rem' }} />
+
+      {filtered.length === 0 ? (
+        <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', padding: '0.5rem 0.25rem' }}>No matches.</div>
+      ) : (
+        <>
+          {pinned.map(e => (
+            <FocusOptionRow
+              key={e.address}
+              label={e.address ?? ''}
+              sublabel={e.name || undefined}
+              checked={true}
+              count={mode === 'live' ? (counts?.[e.address ?? ''] ?? 0) : undefined}
+              onToggle={() => toggle(e.address ?? '')}
+              writeAction={hovered => writeActionFor?.(e.address ?? '', e, true, hovered)}
+              actions={hovered => actionsFor?.(e.address ?? '', e, true, hovered)}
+            />
+          ))}
+          {pinned.length > 0 && rest.length > 0 && (
+            <div style={{ borderTop: '2px solid var(--accent-primary)', opacity: 0.5, margin: '0.5rem 0' }} />
+          )}
+          {rest.map(e => (
+            <FocusOptionRow
+              key={e.address}
+              label={e.address ?? ''}
+              sublabel={e.name || undefined}
+              checked={false}
+              count={mode === 'live' ? (counts?.[e.address ?? ''] ?? 0) : undefined}
+              onToggle={() => toggle(e.address ?? '')}
+              writeAction={hovered => writeActionFor?.(e.address ?? '', e, false, hovered)}
+              actions={hovered => actionsFor?.(e.address ?? '', e, false, hovered)}
+            />
+          ))}
+        </>
+      )}
+    </>
+  );
+};
+
 export const FilterPanel: React.FC<FilterPanelProps> = ({
   options,
   activeFilters,
   onFiltersChange,
   counts,
   mode,
-  onQuickLastSeen,
   projectLoaded,
   onUploadProject,
   writeEnabled,
-  filtersEnabled = true,
+  focusMode: controlledFocusMode,
+  onFocusModeChange,
+  listFlaggedAddresses: controlledListFlaggedAddresses,
+  onListFlaggedAddressesChange,
 }) => {
-  const [search, setSearch] = useState('');
-  // The pane shows one of two views (#370): Edit filters (category controls) or
-  // Active filters (the current set). No auto-inserted active block, so editing
-  // never repositions entries (#87).
-  const [view, setView] = useState<'edit' | 'active'>('edit');
+  // Mode tabs mirror the Last Seen Values sidebar: one list shown at a time,
+  // switched between Group Addresses (targets) and Devices (sources). Lifted
+  // when the caller controls it (#402), otherwise a local fallback.
+  const [internalFocusMode, setInternalFocusMode] = useState<'ga' | 'pa'>('ga');
+  const focusMode = controlledFocusMode ?? internalFocusMode;
+  const setFocusMode = (m: 'ga' | 'pa') => {
+    setInternalFocusMode(m);
+    onFocusModeChange?.(m);
+  };
+  // Compress: hides entries whose live count badge reads "0" (#400).
+  const [hideZeroCount, setHideZeroCount] = useState(false);
+  // The three row icons are real toggles (#406): each just flips a per-address
+  // flag, kept here so it survives switching between the two tabs. They don't
+  // navigate anywhere yet — that's future work.
+  const [internalListFlaggedAddresses, setInternalListFlaggedAddresses] = useState<string[]>([]);
+  const listFlaggedSet = useMemo(() => new Set(controlledListFlaggedAddresses ?? internalListFlaggedAddresses), [controlledListFlaggedAddresses, internalListFlaggedAddresses]);
+  const [visualizeFlagged, setVisualizeFlagged] = useState<Set<string>>(new Set());
+  const [lastSeenFlagged, setLastSeenFlagged] = useState<Set<string>>(new Set());
+  const toggleFlag = (setter: React.Dispatch<React.SetStateAction<Set<string>>>, address: string) => {
+    setter(prev => {
+      const next = new Set(prev);
+      if (next.has(address)) next.delete(address); else next.add(address);
+      return next;
+    });
+  };
+  const toggleListFlag = (address: string) => {
+    const next = new Set(controlledListFlaggedAddresses ?? internalListFlaggedAddresses);
+    if (next.has(address)) next.delete(address); else next.add(address);
+    const nextAddresses = [...next];
+    if (onListFlaggedAddressesChange) {
+      onListFlaggedAddressesChange(nextAddresses);
+    } else {
+      setInternalListFlaggedAddresses(nextAddresses);
+    }
+  };
   // Source/target/DPT options come from the ETS project. Without one, those
   // filters are empty and searching them turns up nothing — surface why.
   const showNoProjectNotice = projectLoaded === false;
 
-  const q = search.toLowerCase();
-
-  const filteredSources = useMemo(() =>
-    options.sources
-      .filter(s => !q || s.address?.toLowerCase().includes(q) || s.name?.toLowerCase().includes(q))
-      .sort((a, b) => compareKnxAddress(a.address ?? '', b.address ?? '')),
-    [options.sources, q]);
-
-  const filteredTargets = useMemo(() =>
-    options.targets
-      .filter(s => !q || s.address?.toLowerCase().includes(q) || s.name?.toLowerCase().includes(q))
-      .sort((a, b) => compareKnxAddress(a.address ?? '', b.address ?? '')),
-    [options.targets, q]);
-
   const update = (patch: Partial<ActiveFilters>) =>
     onFiltersChange({ ...activeFilters, ...patch });
-
-  const activeCount =
-    activeFilters.sources.length +
-    activeFilters.targets.length;
 
   return (
     <div style={{
@@ -250,156 +530,53 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
           <Search size={15} style={{ color: 'var(--accent-primary)' }} />
           <span style={{ fontWeight: 700, fontSize: '0.875rem' }}>Focus</span>
-          {activeCount > 0 && (
-            <span style={{
-              fontSize: '0.65rem', fontWeight: 700, padding: '0.1rem 0.45rem',
-              borderRadius: '999px',
-              background: filtersEnabled ? 'var(--accent-primary)' : 'var(--text-dim)',
-              color: 'white',
-            }}>
-              {activeCount}
-            </span>
-          )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-          {activeCount > 0 && (
+          {mode === 'live' && (
             <button
-              onClick={() => onFiltersChange(DEFAULT_FILTERS)}
-              title="Clear all filters"
+              onClick={() => setHideZeroCount(v => !v)}
+              title={hideZeroCount ? 'Show all entries' : 'Hide entries with no matching telegrams'}
               style={{
                 background: 'transparent', border: 'none', cursor: 'pointer',
-                color: 'var(--text-dim)', display: 'flex', alignItems: 'center',
+                color: hideZeroCount ? 'var(--accent-primary)' : 'var(--text-dim)',
+                display: 'flex', alignItems: 'center',
                 padding: '0.2rem', borderRadius: '4px', transition: 'color 0.15s',
               }}
-              onMouseEnter={e => (e.currentTarget.style.color = 'var(--text-main)')}
-              onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
+              onMouseLeave={e => (e.currentTarget.style.color = hideZeroCount ? 'var(--accent-primary)' : 'var(--text-dim)')}
             >
-              <X size={14} />
+              <Minimize2 size={14} />
             </button>
           )}
         </div>
       </div>
 
-      {/* View toggle: Edit filters ↔ Active filters (#370) */}
-      <div style={{
-        display: 'flex', gap: '0.25rem', padding: '0.5rem 0.75rem',
-        borderBottom: '1px solid var(--border-color)', flexShrink: 0,
-      }}>
-        {(['edit', 'active'] as const).map(v => {
-          const isActive = view === v;
-          return (
-            <button
-              key={v}
-              onClick={() => setView(v)}
-              style={{
-                flex: 1, padding: '0.35rem 0.5rem', borderRadius: '6px',
-                fontSize: '0.75rem', fontWeight: 600, cursor: 'pointer',
-                border: '1px solid',
-                borderColor: isActive ? 'var(--accent-primary)' : 'var(--border-color)',
-                background: isActive ? 'rgba(99,102,241,0.15)' : 'transparent',
-                color: isActive ? 'var(--accent-primary)' : 'var(--text-dim)',
-              }}
-            >
-              {v === 'edit' ? 'Edit filters' : 'Active filters'}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Active filters view */}
-      {view === 'active' && (
-        <div style={{ flex: 1, overflowY: 'auto', padding: '0.5rem 0.75rem' }}>
-          {activeCount === 0 && (
-            <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', padding: '0.5rem 0.25rem', lineHeight: 1.5 }}>
-              No active filters. Switch to <strong>Edit filters</strong> to add some.
-            </div>
-          )}
-          {activeFilters.sources.map(s => {
-            const name = options.sources.find(opt => opt.address === s)?.name;
-            return (
-              <OptionRow
-                key={`active-s-${s}`}
-                label={s}
-                sublabel={name || undefined}
-                checked={true}
-                count={mode === 'live' ? (counts?.sources[s] ?? 0) : undefined}
-                onToggle={() => update({ sources: activeFilters.sources.filter(v => v !== s) })}
-                onRemove={() => update({ sources: activeFilters.sources.filter(v => v !== s) })}
-                actions={onQuickLastSeen && <LastSeenButton onClick={() => onQuickLastSeen(s, 'pa')} />}
-              />
-            );
-          })}
-          {activeFilters.targets.map(t => {
-            const opt = options.targets.find(o => o.address === t);
-            return (
-              <OptionRow
-                key={`active-t-${t}`}
-                label={t}
-                sublabel={opt?.name || undefined}
-                checked={true}
-                count={mode === 'live' ? (counts?.targets[t] ?? 0) : undefined}
-                onToggle={() => update({ targets: activeFilters.targets.filter(v => v !== t) })}
-                onRemove={() => update({ targets: activeFilters.targets.filter(v => v !== t) })}
-                actions={(writeEnabled || onQuickLastSeen) && (
-                  <>
-                    {writeEnabled && (
-                      <SendToGaPopover
-                        address={t}
-                        name={opt?.name}
-                        dptMain={opt?.main}
-                        dptSub={opt?.sub}
-                        buttonStyle={rowActionBtnStyle}
-                      />
-                    )}
-                    {onQuickLastSeen && <LastSeenButton onClick={() => onQuickLastSeen(t, 'ga')} />}
-                  </>
-                )}
-              />
-            );
-          })}
-        </div>
-      )}
-
-      {/* Edit filters view: search + category sections */}
-      {view === 'edit' && (<>
-      {/* Search bar */}
-      <div style={{ padding: '0.75rem', borderBottom: '1px solid var(--border-color)', flexShrink: 0 }}>
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '0.5rem',
-          background: 'var(--bg-tag)', border: '1px solid var(--border-color)',
-          borderRadius: '7px', padding: '0.45rem 0.65rem',
-          transition: 'border-color 0.2s',
-        }}>
-          <Search size={13} style={{ color: 'var(--text-dim)', flexShrink: 0 }} />
-          <input
-            type="text"
-            placeholder="Search options..."
-            value={search}
-            onChange={e => setSearch(e.target.value)}
+      {/* Mode tabs (styled like the Last Seen Values sidebar) */}
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', flexShrink: 0 }}>
+        {(['pa', 'ga'] as const).map(m => (
+          <button
+            key={m}
+            onClick={() => setFocusMode(m)}
             style={{
-              background: 'transparent', border: 'none', outline: 'none',
-              color: 'var(--text-main)', fontSize: '0.8125rem', width: '100%',
-              fontFamily: 'inherit',
+              flex: 1, padding: '0.55rem 0.25rem', border: 'none', cursor: 'pointer',
+              fontSize: '0.73rem', fontWeight: focusMode === m ? 600 : 400,
+              background: focusMode === m ? 'rgba(99,102,241,0.12)' : 'transparent',
+              color: focusMode === m ? 'var(--accent-primary)' : 'var(--text-dim)',
+              borderBottom: `2px solid ${focusMode === m ? 'var(--accent-primary)' : 'transparent'}`,
+              transition: 'all 0.15s',
             }}
-          />
-          {search && (
-            <button
-              onClick={() => setSearch('')}
-              style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, color: 'var(--text-dim)' }}
-            >
-              <X size={11} />
-            </button>
-          )}
-        </div>
+          >
+            {m === 'ga' ? 'Group Addresses' : 'Devices'}
+          </button>
+        ))}
       </div>
 
-      {/* Scrollable options */}
-      <div style={{ flex: 1, overflowY: 'auto' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '0.75rem' }}>
 
         {/* No-project notice — source/target/DPT filters need an ETS project */}
         {showNoProjectNotice && (
           <div style={{
-            margin: '0.75rem', padding: '0.85rem',
+            marginBottom: '0.75rem', padding: '0.85rem',
             border: '1px solid var(--border-color)', borderRadius: '8px',
             background: 'var(--bg-subtle)',
           }}>
@@ -432,44 +609,61 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
           </div>
         )}
 
-        {/* Source */}
-        {filteredSources.length > 0 && (
-          <Section title="Source" defaultOpen>
-            <KnxAddressTree
-              entries={filteredSources}
-              selected={activeFilters.sources}
-              groupNames={options.pa_line_names ?? {}}
-              separator="."
-              onToggle={addresses => update({ sources: addresses })}
-              counts={counts?.sources}
-              mode={mode}
-              searchQuery={q}
-              onLastSeen={onQuickLastSeen ? addr => onQuickLastSeen(addr, 'pa') : undefined}
-              writeEnabled={writeEnabled}
-            />
-          </Section>
-        )}
-
-        {/* Target */}
-        {filteredTargets.length > 0 && (
-          <Section title="Target" defaultOpen>
-            <KnxAddressTree
-              entries={filteredTargets}
-              selected={activeFilters.targets}
-              groupNames={options.ga_group_names ?? {}}
-              separator="/"
-              onToggle={addresses => update({ targets: addresses })}
-              counts={counts?.targets}
-              mode={mode}
-              searchQuery={q}
-              onLastSeen={onQuickLastSeen ? addr => onQuickLastSeen(addr, 'ga') : undefined}
-              writeEnabled={writeEnabled}
-            />
-          </Section>
+        {focusMode === 'ga' ? (
+          <FocusAddressSection
+            title="Group Addresses"
+            entries={options.targets}
+            selected={activeFilters.targets}
+            onToggle={addresses => update({ targets: addresses })}
+            counts={counts?.targets}
+            mode={mode}
+            hideZeroCount={hideZeroCount}
+            writeActionFor={writeEnabled ? (address, entry, checked, hovered) => (
+              <SendToGaPopover
+                address={address}
+                name={entry.name}
+                dptMain={entry.main}
+                dptSub={entry.sub}
+                buttonStyle={{ ...writeActionBtnStyle, opacity: (checked || hovered) ? 0.9 : 0, transition: 'opacity 0.15s' }}
+              />
+            ) : undefined}
+            actionsFor={(address, _entry, checked, hovered) => (
+              <>
+                <div data-action-column="list" style={{ gridColumn: 3, display: 'flex', alignItems: 'center' }}>
+                  <ShowInListButton active={listFlaggedSet.has(address)} visible={listFlaggedSet.has(address) || checked || hovered} onClick={() => toggleListFlag(address)} />
+                </div>
+                <div data-action-column="visualize" style={{ gridColumn: 4, display: 'flex', alignItems: 'center' }}>
+                  <VisualizeButton active={visualizeFlagged.has(address)} visible={visualizeFlagged.has(address) || checked || hovered} onClick={() => toggleFlag(setVisualizeFlagged, address)} />
+                </div>
+                <div data-action-column="lastSeen" style={{ gridColumn: 5, display: 'flex', alignItems: 'center' }}>
+                  <LastSeenButton active={lastSeenFlagged.has(address)} visible={lastSeenFlagged.has(address) || checked || hovered} onClick={() => toggleFlag(setLastSeenFlagged, address)} />
+                </div>
+              </>
+            )}
+          />
+        ) : (
+          <FocusAddressSection
+            title="Devices"
+            entries={options.sources}
+            selected={activeFilters.sources}
+            onToggle={addresses => update({ sources: addresses })}
+            counts={counts?.sources}
+            mode={mode}
+            hideZeroCount={hideZeroCount}
+            actionsFor={(address, _entry, checked, hovered) => (
+              <>
+                <div data-action-column="list" style={{ gridColumn: 3, display: 'flex', alignItems: 'center' }}>
+                  <ShowInListButton active={listFlaggedSet.has(address)} visible={listFlaggedSet.has(address) || checked || hovered} onClick={() => toggleListFlag(address)} />
+                </div>
+                <div data-action-column="lastSeen" style={{ gridColumn: 5, display: 'flex', alignItems: 'center' }}>
+                  <LastSeenButton active={lastSeenFlagged.has(address)} visible={lastSeenFlagged.has(address) || checked || hovered} onClick={() => toggleFlag(setLastSeenFlagged, address)} />
+                </div>
+              </>
+            )}
+          />
         )}
 
       </div>
-      </>)}
     </div>
   );
 };
@@ -482,3 +676,4 @@ style.textContent = `
   }
 `;
 document.head.appendChild(style);
+

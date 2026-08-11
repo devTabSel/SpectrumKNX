@@ -1346,3 +1346,83 @@ test('ctrl/cmd-click on a visualization-context row clears its context reason', 
   expect(onVisualizationContextClear).toHaveBeenCalledWith(key);
   expect(row.classList.contains('marked')).toBe(false);
 });
+
+// ── SOURCE/TARGET header "Focus" checkboxes (#401) ───────────────────────────
+
+test('the SOURCE header icon shows only telegrams whose source is flagged for the Telegram List in the Focus panel', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', source_address: '1.1.1', raw_hex: '0x01' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', source_address: '1.1.2', raw_hex: '0x02' }),
+  ];
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      focusListAddresses={['1.1.1']}
+    />,
+  );
+
+  expect(container.querySelectorAll('.log-row')).toHaveLength(2);
+
+  fireEvent.click(screen.getByTitle('Show only telegrams whose source is flagged for the Telegram List in the Focus panel'));
+
+  const remaining = container.querySelectorAll('.log-row');
+  expect(remaining).toHaveLength(1);
+  expect(remaining[0]).toHaveAttribute('data-akey', anchorKey(rows[0]));
+});
+
+test('the TARGET header icon shows only telegrams whose target is flagged for the Telegram List in the Focus panel', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', target_address: '1/1/1', raw_hex: '0x01' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', target_address: '1/1/2', raw_hex: '0x02' }),
+  ];
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      focusListAddresses={['1/1/2']}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show only telegrams whose target is flagged for the Telegram List in the Focus panel'));
+
+  const remaining = container.querySelectorAll('.log-row');
+  expect(remaining).toHaveLength(1);
+  expect(remaining[0]).toHaveAttribute('data-akey', anchorKey(rows[1]));
+});
+
+test('clicking the "focus" label switches the Focus panel to the corresponding category, without toggling the checkbox', () => {
+  const rows = makeList(1, 0);
+  const onFocusCategorySelect = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      onFocusCategorySelect={onFocusCategorySelect}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Switch the Focus panel to Devices'));
+  expect(onFocusCategorySelect).toHaveBeenCalledWith('pa');
+  expect(container.querySelectorAll('.log-row')).toHaveLength(1);
+
+  fireEvent.click(screen.getByTitle('Switch the Focus panel to Group Addresses'));
+  expect(onFocusCategorySelect).toHaveBeenCalledWith('ga');
+  expect(container.querySelectorAll('.log-row')).toHaveLength(1);
+});
+

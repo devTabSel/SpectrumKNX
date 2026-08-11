@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useEffect, useLayoutEffect, useState, useCallba
 import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
-import { ChevronUp, ChevronDown, Filter, Search, LineChart, X, Clock, Circle, CircleDot } from 'lucide-react';
+import { ChevronUp, ChevronDown, Filter, Search, LineChart, X, Clock, Circle, CircleDot, List } from 'lucide-react';
 import { type ActiveFilters } from '../types/filters';
 import { seriesColor } from '../utils/seriesColors';
 import { SendToGaPopover } from './SendToGaPopover';
@@ -179,6 +179,13 @@ interface TelegramTableProps {
    * main panel (#380) — for distinct visual treatment. */
   contextKeys?: ReadonlyMap<string, ContextReason>;
   onVisualizationContextClear?: (key: string) => void;
+  /** Switches the Focus panel to the corresponding category (#402): clicking
+   * the "focus" label next to the SOURCE/TARGET header icon opens
+   * Devices/Group Addresses there, independent of toggling the icon. */
+  onFocusCategorySelect?: (category: 'ga' | 'pa') => void;
+  /** Addresses flagged for the Telegram List in the Focus panel. Used to filter
+   * the table before quick-filter/context rows are added. */
+  focusListAddresses?: string[];
   /** Number of unique source devices across all telegrams in the current buffer. */
   allBufferSourceCount?: number | null;
   /** Configured message-buffer capacity (max telegram count). */
@@ -395,6 +402,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   flaggedKeys, onFlaggedKeysChange,
   contextKeys,
   onVisualizationContextClear,
+  onFocusCategorySelect,
+  focusListAddresses = [],
   allBufferSourceCount,
   bufferCapacity,
   allBufferMessageCount,
@@ -718,16 +727,26 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     () => compileQuickFilters(currentPatterns, currentQuickColumnEnabled),
     [currentPatterns, currentQuickColumnEnabled],
   );
+  const [sourceFocusOnly, setSourceFocusOnly] = useState(false);
+  const [targetFocusOnly, setTargetFocusOnly] = useState(false);
   const forcedAfterQuickFilterKeys = useMemo(() => {
     if (!contextKeys) return new Set<string>();
     return new Set<string>(contextKeys.keys());
   }, [contextKeys]);
+  const focusFilteredRows = useMemo(() => {
+    if (!sourceFocusOnly && !targetFocusOnly) return telegrams;
+    const focusListSet = new Set(focusListAddresses);
+    return telegrams.filter(t =>
+      (!sourceFocusOnly || focusListSet.has(t.source_address)) &&
+      (!targetFocusOnly || focusListSet.has(t.target_address))
+    );
+  }, [telegrams, sourceFocusOnly, targetFocusOnly, focusListAddresses]);
   const quickFiltered = useMemo(() => {
-    if (!quickFilterFeatureEnabled || !quickOpen || !quickEnabled) return telegrams;
-    const hasAnyQuickMatch = telegrams.some(t => quickMatches(t));
+    if (!quickFilterFeatureEnabled || !quickOpen || !quickEnabled) return focusFilteredRows;
+    const hasAnyQuickMatch = focusFilteredRows.some(t => quickMatches(t));
     if (!hasAnyQuickMatch && forcedAfterQuickFilterKeys.size === 0) return [];
-    return telegrams.filter(t => quickMatches(t) || forcedAfterQuickFilterKeys.has(anchorKey(t)));
-  }, [telegrams, quickFilterFeatureEnabled, quickOpen, quickEnabled, quickMatches, forcedAfterQuickFilterKeys]);
+    return focusFilteredRows.filter(t => quickMatches(t) || forcedAfterQuickFilterKeys.has(anchorKey(t)));
+  }, [focusFilteredRows, quickFilterFeatureEnabled, quickOpen, quickEnabled, quickMatches, forcedAfterQuickFilterKeys]);
 
   const anyQuickColumnEnabled = useMemo(
     () => Object.values(currentQuickColumnEnabled).some(Boolean),
@@ -736,7 +755,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const quickFilterFiltersOutAnyMessage = quickFilterFiltersOutAny ?? (
     quickEnabled &&
     anyQuickColumnEnabled &&
-    telegrams.some(t => !quickMatches(t))
+    focusFilteredRows.some(t => !quickMatches(t))
   );
 
   const hasNonInitialDeltaWindow = activeFilters.deltaBeforeMs !== 0 || activeFilters.deltaAfterMs !== 0;
@@ -799,10 +818,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const [deltaSortDirection, setDeltaSortDirection] = useState<'asc' | 'desc'>('desc');
   const [deltaFrozenRows, setDeltaFrozenRows] = useState<TelegramRow[] | null>(null);
   const [valueRowFilter, setValueRowFilter] = useState<'none' | 'marked' | 'flagged'>('none');
+  // SOURCE/TARGET column header icon: restrict the list to telegrams whose
+  // source/target is flagged for the Telegram List in the Focus panel.
   const [viewportVersion, setViewportVersion] = useState(0);
   // Bumped to force a re-render so the marks-pill anchor visibility (computed
   // from the live scroll position at render time) recomputes on scroll.
   void viewportVersion;
+  void setViewportVersion;
   const applyFlaggedKeysList = useCallback((nextKeys: string[]) => {
     setFlaggedKeysList(nextKeys);
     if (valueRowFilter === 'flagged' && nextKeys.length === 0) {
@@ -891,6 +913,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   }, [timeSortDirection]);
 
   const preValueFilterRows = deltaSortActive && deltaFrozenRows ? deltaFrozenRows : naturalTelegramRows;
+  const focusFilteredValueRows = useMemo(() => {
+    if (!sourceFocusOnly && !targetFocusOnly) return preValueFilterRows;
+    const focusListSet = new Set(focusListAddresses);
+    return preValueFilterRows.filter(t =>
+      (!sourceFocusOnly || focusListSet.has(t.source_address)) &&
+      (!targetFocusOnly || focusListSet.has(t.target_address))
+    );
+  }, [preValueFilterRows, sourceFocusOnly, targetFocusOnly, focusListAddresses]);
   const telegramRows = useMemo(() => {
     const contextRelatedToSeedKeys = (seedKeys: Set<string>): Set<string> => {
       if (!contextKeys || contextKeys.size === 0 || seedKeys.size === 0) return new Set<string>();
@@ -915,26 +945,27 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       return related;
     };
 
+    const baseRows = focusFilteredValueRows;
     if (valueRowFilter === 'marked') {
-      const markedKeys = new Set(preValueFilterRows.filter(t => markedSet.has(anchorKey(t))).map(t => anchorKey(t)));
+      const markedKeys = new Set(baseRows.filter(t => markedSet.has(anchorKey(t))).map(t => anchorKey(t)));
       const relatedContext = contextRelatedToSeedKeys(markedKeys);
-      const filtered = preValueFilterRows.filter(t => {
+      const filtered = baseRows.filter(t => {
         const key = anchorKey(t);
         return markedSet.has(key) || relatedContext.has(key);
       });
       return applyVisibleDeltas(filtered);
     }
     if (valueRowFilter === 'flagged') {
-      const flaggedKeys = new Set(preValueFilterRows.filter(t => flaggedSet.has(anchorKey(t))).map(t => anchorKey(t)));
+      const flaggedKeys = new Set(baseRows.filter(t => flaggedSet.has(anchorKey(t))).map(t => anchorKey(t)));
       const relatedContext = contextRelatedToSeedKeys(flaggedKeys);
-      const filtered = preValueFilterRows.filter(t => {
+      const filtered = baseRows.filter(t => {
         const key = anchorKey(t);
         return flaggedSet.has(key) || relatedContext.has(key);
       });
       return applyVisibleDeltas(filtered);
     }
-    return applyVisibleDeltas(preValueFilterRows);
-  }, [preValueFilterRows, valueRowFilter, markedSet, flaggedSet, contextKeys, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs, applyVisibleDeltas]);
+    return applyVisibleDeltas(baseRows);
+  }, [focusFilteredValueRows, preValueFilterRows, valueRowFilter, markedSet, flaggedSet, contextKeys, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs, applyVisibleDeltas]);
   const valueRowFilterFiltersOutAnyMessage = valueRowFilter !== 'none' && telegramRows.length < preValueFilterRows.length;
   const filterIndicatorFiltersOutAnyMessage = quickFilterFiltersOutAnyMessage || valueRowFilterFiltersOutAnyMessage;
   const quickFilterDividerColor = filterIndicatorFiltersOutAnyMessage
@@ -2354,7 +2385,45 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             }}
             style={{ position: 'relative', display: 'flex', flexDirection: 'column', minWidth: 0 }}
           >
-            <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }} />
+            <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '0.4rem' }}>
+              {(c.id === 'source' || c.id === 'target') && (() => {
+                const focusChecked = c.id === 'source' ? sourceFocusOnly : targetFocusOnly;
+                const focusCategory = c.id === 'source' ? 'pa' : 'ga';
+                return (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                    <span
+                      onClick={e => {
+                        e.stopPropagation();
+                        if (c.id === 'source') setSourceFocusOnly(v => !v); else setTargetFocusOnly(v => !v);
+                      }}
+                      title={c.id === 'source'
+                        ? 'Show only telegrams whose source is flagged for the Telegram List in the Focus panel'
+                        : 'Show only telegrams whose target is flagged for the Telegram List in the Focus panel'}
+                      style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', userSelect: 'none', color: focusChecked ? 'var(--accent-primary)' : 'var(--text-dim)' }}
+                    >
+                      <List size={12} />
+                    </span>
+                    <span
+                      onClick={e => {
+                        e.stopPropagation();
+                        onFocusCategorySelect?.(focusCategory);
+                      }}
+                      title={c.id === 'source'
+                        ? 'Switch the Focus panel to Devices'
+                        : 'Switch the Focus panel to Group Addresses'}
+                      style={{
+                        fontWeight: 400, fontSize: '0.68rem', color: 'var(--text-dim)',
+                        textTransform: 'none', letterSpacing: 'normal', userSelect: 'none',
+                        cursor: onFocusCategorySelect ? 'pointer' : 'default',
+                      }}
+                    >
+                      focus
+                    </span>
+                  </span>
+                );
+              })()}
+
+            </div>
             <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
               {c.id === 'delta' ? (
                 <button
