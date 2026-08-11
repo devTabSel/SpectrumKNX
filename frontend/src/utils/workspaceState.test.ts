@@ -31,6 +31,7 @@ const sampleWorkspace = (): WorkspaceState => ({
   plot: ['0/1/2'],
   lastSeenAddresses: ['0/1/2'],
   lastSeenMode: 'pa',
+  focusMode: 'pa',
   focusListFlaggedAddresses: ['0/1/3'],
   focusVisualizationFlaggedAddresses: ['0/1/4'],
 });
@@ -91,6 +92,7 @@ describe('monitor URL encoding', () => {
     const ws = sampleWorkspace();
     const search = buildMonitorSearch(ws);
     expect(search).toContain('view=monitor');
+    expect(search).toContain('fm=pa');
     expect(search).toContain('fl=');
     expect(search).toContain('fv=');
     expect(parseMonitorSearch('?' + search)).toEqual(ws);
@@ -123,6 +125,7 @@ describe('monitor URL encoding', () => {
   it('round-trips a write panel open state', () => {
     const ws: WorkspaceState = {
       ...DEFAULT_WORKSPACE,
+      focusMode: 'pa',
       writeOpen: true,
     };
     const search = buildMonitorSearch(ws);

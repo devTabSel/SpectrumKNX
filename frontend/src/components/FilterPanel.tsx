@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Search, X, Clock, FolderInput, AlertTriangle, Minimize2, List, LineChart, Pin } from 'lucide-react';
+import { Search, X, Clock, FolderInput, AlertTriangle, Minimize2, List, LineChart, Pin, ArrowUpDown, CheckCheck, RotateCcw } from 'lucide-react';
 import {
   type FilterOption,
   type FilterOptions,
@@ -439,13 +439,14 @@ interface FocusAddressSectionProps {
   compactMode: Record<FocusCompactMode, boolean>;
   onCompactModeChange: (mode: FocusCompactMode) => void;
   onPinChangeAutoSync?: (addresses: string[], pinned: boolean, ctrlClick?: boolean) => void;
+  onResetCategory?: () => void;
   resetSignal?: number;
 }
 
 const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
   title, entries, selected, onToggle, counts, mode, writeActionFor, actionsFor, hideZeroCount, selectionState, onSelectionChange,
   listFlaggedAddresses, visualizeFlaggedAddresses, lastSeenFlaggedAddresses, bulkActions, showVisualizeAction,
-  compactMode, onCompactModeChange, onPinChangeAutoSync, resetSignal,
+  compactMode, onCompactModeChange, onPinChangeAutoSync, onResetCategory, resetSignal,
 }) => {
   const [search, setSearch] = useState('');
   const [anchorAddress, setAnchorAddress] = useState<string | null>(null);
@@ -463,8 +464,12 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
   const lastSeenFlagSet = useMemo(() => new Set(lastSeenFlaggedAddresses ?? []), [lastSeenFlaggedAddresses]);
   const hasListMatches = useMemo(() => entries.some(entry => listFlagSet.has(entry.address ?? '')), [entries, listFlagSet]);
   const hasVisualizeMatches = useMemo(() => entries.some(entry => visualizeFlagSet.has(entry.address ?? '')), [entries, visualizeFlagSet]);
-  const hasLastSeenMatches = useMemo(() => entries.some(entry => lastSeenFlagSet.has(entry.address ?? '')), [entries, lastSeenFlagSet]);
+  const hasAnyFlagMatches = useMemo(() => entries.some(entry =>
+    listFlagSet.has(entry.address ?? '') || visualizeFlagSet.has(entry.address ?? '') || lastSeenFlagSet.has(entry.address ?? '')
+  ), [entries, listFlagSet, visualizeFlagSet, lastSeenFlagSet]);
+  const hasLastSeenMatches = hasAnyFlagMatches;
   const zeroFilterActive = mode === 'live' && !!hideZeroCount;
+  const matchesAnyFlag = (address: string) => listFlagSet.has(address) || visualizeFlagSet.has(address) || lastSeenFlagSet.has(address);
 
   const searchMatcher = useMemo(() => {
     const trimmed = search.trim();
@@ -484,7 +489,7 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
       if (activeModes.length === 0) return true;
       const address = entry.address ?? '';
       if (activeModes.includes('compress')) {
-        if (counts === undefined) return true;
+        if (counts === undefined) return false;
         const badgeCount = counts[address];
         if (badgeCount === undefined || badgeCount <= 0) return false;
       }
@@ -504,23 +509,11 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
           || lastSeenFlagSet.has(address);
       })
       .sort((a, b) => {
-        const matchA = activeModes.some(mode => {
-          if (mode === 'compress') return false;
-          const address = a.address ?? '';
-          if (mode === 'list') return listFlagSet.has(address);
-          if (mode === 'visualize') return visualizeFlagSet.has(address);
-          return lastSeenFlagSet.has(address);
-        });
-        const matchB = activeModes.some(mode => {
-          if (mode === 'compress') return false;
-          const address = b.address ?? '';
-          if (mode === 'list') return listFlagSet.has(address);
-          if (mode === 'visualize') return visualizeFlagSet.has(address);
-          return lastSeenFlagSet.has(address);
-        });
+        const anyFlagA = matchesAnyFlag(a.address ?? '');
+        const anyFlagB = matchesAnyFlag(b.address ?? '');
 
         if (activeModes.some(mode => mode !== 'compress')) {
-          if (matchA !== matchB) return Number(matchB) - Number(matchA);
+          if (anyFlagA !== anyFlagB) return Number(anyFlagB) - Number(anyFlagA);
         }
         return compareKnxAddress(a.address ?? '', b.address ?? '');
       });
@@ -538,11 +531,7 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
     const matchesActiveFlagMode = (entry: FilterOption) => {
       if (activeFlagModes.length === 0) return false;
       const address = entry.address ?? '';
-      return activeFlagModes.some(mode => {
-        if (mode === 'list') return listFlagSet.has(address);
-        if (mode === 'visualize') return visualizeFlagSet.has(address);
-        return lastSeenFlagSet.has(address);
-      });
+      return matchesAnyFlag(address);
     };
     const byFocusPriority = (a: FilterOption, b: FilterOption) => {
       const aMarked = matchesActiveFlagMode(a);
@@ -556,6 +545,20 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
     return { pinned, rest };
   }, [filtered, selectedSet, compactMode, listFlagSet, visualizeFlagSet, lastSeenFlagSet]);
   const visibleEntries = useMemo(() => [...pinned, ...rest], [pinned, rest]);
+  const [visualizeSelectionSnapshot, setVisualizeSelectionSnapshot] = useState<string[]>([]);
+  const isAllVisibleSelected = useMemo(() => visibleEntries.length > 0 && visibleEntries.every(entry => selectionSet.has(entry.address ?? '')), [visibleEntries, selectionSet]);
+
+  const handleVisualizationHeaderToggle = () => {
+    if (!onSelectionChange || visibleEntries.length === 0) return;
+    const nextSelection = visibleEntries.map(entry => entry.address ?? '').filter(Boolean);
+    if (isAllVisibleSelected) {
+      onSelectionChange(visualizeSelectionSnapshot.length > 0 ? visualizeSelectionSnapshot : []);
+      setVisualizeSelectionSnapshot([]);
+      return;
+    }
+    setVisualizeSelectionSnapshot(selectionState ?? []);
+    onSelectionChange(nextSelection);
+  };
 
   const toggle = (address: string, ctrlClick = false) => {
     const nextPinned = !selectedSet.has(address);
@@ -704,42 +707,40 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
         >
           <button
             type="button"
-            onClick={() => onCompactModeChange('list')}
-            title={hasListMatches ? (compactMode.list ? 'Show all entries' : 'Show only entries marked for the Telegram List') : 'No entries marked for the Telegram List'}
-            aria-pressed={compactMode.list && hasListMatches}
-            disabled={!hasListMatches}
-            style={{ ...toggleIconBtnStyle(compactMode.list && hasListMatches), gridColumn: 2, opacity: hasListMatches ? 1 : 0.45 }}
+            onClick={onResetCategory}
+            title="Reset current category"
+            aria-pressed={false}
+            style={{ ...toggleIconBtnStyle(false), gridColumn: 2, opacity: 1 }}
           >
-            <List size={12} />
+            <RotateCcw size={12} />
           </button>
           {showVisualizeAction && (
             <button
               type="button"
-              onClick={() => onCompactModeChange('visualize')}
-              title={hasVisualizeMatches ? (compactMode.visualize ? 'Show all entries' : 'Show only entries marked for Visualization') : 'No entries marked for Visualization'}
-              aria-pressed={compactMode.visualize && hasVisualizeMatches}
-              disabled={!hasVisualizeMatches}
-              style={{ ...toggleIconBtnStyle(compactMode.visualize && hasVisualizeMatches), gridColumn: 3, opacity: hasVisualizeMatches ? 1 : 0.45 }}
+              onClick={handleVisualizationHeaderToggle}
+              title={isAllVisibleSelected ? 'Restore previous item selection' : 'Select all visible rows'}
+              aria-pressed={isAllVisibleSelected}
+              style={{ ...toggleIconBtnStyle(isAllVisibleSelected), gridColumn: 3, opacity: 1 }}
             >
-              <LineChart size={12} />
+              <CheckCheck size={12} />
             </button>
           )}
           <button
             type="button"
             onClick={() => onCompactModeChange('lastseen')}
-            title={hasLastSeenMatches ? (compactMode.lastseen ? 'Show all entries' : 'Show only entries marked for Last Seen Values') : 'No entries marked for Last Seen Values'}
-            aria-pressed={compactMode.lastseen && hasLastSeenMatches}
-            disabled={!hasLastSeenMatches}
-            style={{ ...toggleIconBtnStyle(compactMode.lastseen && hasLastSeenMatches), gridColumn: 4, opacity: hasLastSeenMatches ? 1 : 0.45 }}
+            title={hasAnyFlagMatches ? (compactMode.lastseen ? 'Show all entries' : 'Toggle sort order by flagged entries') : 'No entries marked with any flag'}
+            aria-pressed={compactMode.lastseen && hasAnyFlagMatches}
+            disabled={!hasAnyFlagMatches}
+            style={{ ...toggleIconBtnStyle(compactMode.lastseen && hasAnyFlagMatches), gridColumn: 4, opacity: hasAnyFlagMatches ? 1 : 0.45 }}
           >
-            <Clock size={12} />
+            <ArrowUpDown size={12} />
           </button>
         </div>
         <div style={{ gridColumn: 4, display: 'flex', justifyContent: 'center' }}>
           <button
             type="button"
             onClick={() => onCompactModeChange('compress')}
-            title={compactMode.compress ? 'Show all entries' : 'Show only entries with a non-zero badge count'}
+            title={compactMode.compress ? 'Show all entries' : 'Show only entries contained in the current buffer'}
             aria-pressed={compactMode.compress}
             style={toggleIconBtnStyle(compactMode.compress)}
           >
@@ -858,6 +859,33 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
       },
     }));
   };
+
+  const resetCurrentCategory = () => {
+    if (focusMode === 'ga') {
+      setInternalListFlaggedAddresses([]);
+      setInternalVisualizationFlaggedAddresses([]);
+      setLastSeenFlagged(new Set());
+      setSelectedAddresses([]);
+      setCompactModeByCategory(prev => ({
+        ...prev,
+        ga: { ...prev.ga, list: false, visualize: false, lastseen: false },
+      }));
+      if (onListFlaggedAddressesChange) onListFlaggedAddressesChange([]);
+      if (onVisualizationFlaggedAddressesChange) onVisualizationFlaggedAddressesChange([]);
+      return;
+    }
+
+    setSelectedAddresses([]);
+    setCompactModeByCategory(prev => ({
+      ...prev,
+      pa: { ...prev.pa, list: false, visualize: false, lastseen: false },
+    }));
+    setInternalListFlaggedAddresses([]);
+    setInternalVisualizationFlaggedAddresses([]);
+    setLastSeenFlagged(new Set());
+    if (onListFlaggedAddressesChange) onListFlaggedAddressesChange([]);
+    if (onVisualizationFlaggedAddressesChange) onVisualizationFlaggedAddressesChange([]);
+  };
   useEffect(() => {
     Object.entries(compactModeByCategory.ga).forEach(([mode, enabled]) => {
       setPref(`focusPanel.compactMode.ga.${mode}`, enabled ? '1' : '0');
@@ -873,10 +901,10 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
     setFocusMode('ga');
     setSelectedAddresses([]);
     setHideZeroCount(false);
-    setCompactModeByCategory({
-      ga: { list: false, visualize: false, lastseen: false, compress: false },
-      pa: { list: false, visualize: false, lastseen: false, compress: false },
-    });
+    setCompactModeByCategory(prev => ({
+      ga: { ...prev.ga, list: false, visualize: false, lastseen: false },
+      pa: { ...prev.pa, list: false, visualize: false, lastseen: false },
+    }));
     update({ targets: [], sources: [] });
     setInternalListFlaggedAddresses([]);
     setInternalVisualizationFlaggedAddresses([]);
@@ -1035,6 +1063,7 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
             type="button"
             onClick={resetFocusPanel}
             title="Reset Focus panel"
+            aria-label="Reset Focus panel"
             style={{
               border: '1px solid var(--border-color)',
               background: 'transparent',
@@ -1042,11 +1071,12 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
               borderRadius: '4px',
               padding: '0.25rem 0.5rem',
               cursor: 'pointer',
-              fontSize: '0.7rem',
-              fontWeight: 600,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
             }}
           >
-            Reset
+            <RotateCcw size={13} />
           </button>
         </div>
       </div>
@@ -1133,6 +1163,7 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
             compactMode={compactModeByCategory.ga}
             onCompactModeChange={setCompactModeForCurrentCategory}
             onPinChangeAutoSync={syncAutoFlagForPinnedAddresses}
+            onResetCategory={resetCurrentCategory}
             resetSignal={resetSignal}
             writeActionFor={writeEnabled ? (address, entry, checked, hovered) => (
               <SendToGaPopover
@@ -1202,6 +1233,7 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
             compactMode={compactModeByCategory.pa}
             onCompactModeChange={setCompactModeForCurrentCategory}
             onPinChangeAutoSync={syncAutoFlagForPinnedAddresses}
+            onResetCategory={resetCurrentCategory}
             resetSignal={resetSignal}
             actionsFor={(address, _entry, checked, hovered) => (
               <>

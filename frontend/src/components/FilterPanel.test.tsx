@@ -283,7 +283,7 @@ test('the compress toggle hides entries whose live count badge reads "0"', () =>
   expect(screen.getByText('0/1/1')).toBeInTheDocument();
   expect(screen.getByText('0/1/2')).toBeInTheDocument();
 
-  fireEvent.click(screen.getByTitle('Show only entries with a non-zero badge count'));
+  fireEvent.click(screen.getByTitle('Show only entries contained in the current buffer'));
   expect(screen.getByText('0/1/1')).toBeInTheDocument();
   expect(screen.queryByText('0/1/2')).not.toBeInTheDocument();
 
@@ -291,7 +291,7 @@ test('the compress toggle hides entries whose live count badge reads "0"', () =>
   expect(screen.getByText('0/1/2')).toBeInTheDocument();
 });
 
-test('the compress toggle keeps entries visible while the badge counts are still loading', () => {
+test('the compress toggle switches between all items and only those in the current telegram list', () => {
   render(
     <FilterPanel
       options={MULTI_OPTIONS}
@@ -299,13 +299,22 @@ test('the compress toggle keeps entries visible while the badge counts are still
       onFiltersChange={() => {}}
       mode="live"
       projectLoaded={true}
+      counts={{
+        sources: {},
+        targets: { '0/1/1': 3 },
+        types: {},
+        directions: {},
+        dpts: {},
+      }}
     />
   );
 
-  expect(screen.getByText('0/1/1')).toBeInTheDocument();
-  expect(screen.getByText('0/1/2')).toBeInTheDocument();
+  fireEvent.click(screen.getByTitle('Show only entries contained in the current buffer'));
 
-  fireEvent.click(screen.getByTitle('Show only entries with a non-zero badge count'));
+  expect(screen.getByText('0/1/1')).toBeInTheDocument();
+  expect(screen.queryByText('0/1/2')).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByTitle('Show all entries'));
 
   expect(screen.getByText('0/1/1')).toBeInTheDocument();
   expect(screen.getByText('0/1/2')).toBeInTheDocument();
@@ -494,15 +503,66 @@ test('the header toggle icons keep the same grid columns for both focus categori
   );
 
   // Group Addresses tab: the three existing header icons keep their shifted columns 2/3/4.
-  expect(screen.getByTitle('No entries marked for the Telegram List')).toHaveStyle({ gridColumn: '2' });
-  expect(screen.getByTitle('No entries marked for Visualization')).toHaveStyle({ gridColumn: '3' });
-  expect(screen.getByTitle('No entries marked for Last Seen Values')).toHaveStyle({ gridColumn: '4' });
+  expect(screen.getByTitle('Reset current category')).toHaveStyle({ gridColumn: '2' });
+  expect(screen.getByTitle('Select all visible rows')).toHaveStyle({ gridColumn: '3' });
+  expect(screen.getByTitle('No entries marked with any flag')).toHaveStyle({ gridColumn: '4' });
 
   // Devices tab now also exposes the Visualization header icon at the same column.
   fireEvent.click(screen.getByRole('button', { name: 'Devices' }));
-  expect(screen.getByTitle('No entries marked for the Telegram List')).toHaveStyle({ gridColumn: '2' });
-  expect(screen.getByTitle('No entries marked for Visualization')).toHaveStyle({ gridColumn: '3' });
-  expect(screen.getByTitle('No entries marked for Last Seen Values')).toHaveStyle({ gridColumn: '4' });
+  expect(screen.getByTitle('Reset current category')).toHaveStyle({ gridColumn: '2' });
+  expect(screen.getByTitle('Select all visible rows')).toHaveStyle({ gridColumn: '3' });
+  expect(screen.getByTitle('No entries marked with any flag')).toHaveStyle({ gridColumn: '4' });
+});
+
+test('the visualization header toggle selects all visible rows and restores the previous selection state', () => {
+  render(
+    <FilterPanel
+      options={MULTI_OPTIONS}
+      activeFilters={DEFAULT_FILTERS}
+      onFiltersChange={() => {}}
+      mode="live"
+      projectLoaded={true}
+      writeEnabled={true}
+    />
+  );
+
+  const visualToggle = screen.getByTitle('Select all visible rows');
+  expect(visualToggle).toHaveAttribute('aria-pressed', 'false');
+
+  fireEvent.click(visualToggle);
+  expect(screen.getByTitle('Restore previous item selection')).toHaveAttribute('aria-pressed', 'true');
+
+  fireEvent.click(screen.getByTitle('Restore previous item selection'));
+  expect(screen.getByTitle('Select all visible rows')).toHaveAttribute('aria-pressed', 'false');
+});
+
+test('the sort-order toggle groups any flagged item before unflagged ones in address order', () => {
+  const options: FilterOptions = {
+    ...GA_OPTIONS,
+    targets: [
+      { address: '0/1/1', name: 'Alpha', main: 1, sub: 1 },
+      { address: '0/1/2', name: 'Bravo', main: 1, sub: 1 },
+      { address: '0/1/3', name: 'Charlie', main: 1, sub: 1 },
+      { address: '0/1/4', name: 'Delta', main: 1, sub: 1 },
+    ],
+  };
+
+  const { container } = render(
+    <FilterPanel
+      options={options}
+      activeFilters={ACTIVE}
+      onFiltersChange={() => {}}
+      mode="live"
+      projectLoaded={true}
+      listFlaggedAddresses={['0/1/2']}
+      visualizationFlaggedAddresses={['0/1/4']}
+    />
+  );
+
+  fireEvent.click(screen.getByTitle('Toggle sort order by flagged entries'));
+
+  const addresses = Array.from(container.querySelectorAll('[data-address]')).map(node => node.getAttribute('data-address'));
+  expect(addresses.slice(0,4)).toEqual(['0/1/2', '0/1/4', '0/1/1', '0/1/3']);
 });
 
 test('offers a pin header toggle and stretches the search field to the action area', () => {
@@ -552,8 +612,8 @@ test('compact filter buttons are disabled when no matching flagged item exists',
     />
   );
 
-  const listButton = screen.getByTitle('No entries marked for the Telegram List');
-  expect(listButton).toBeDisabled();
+  const listButton = screen.getByTitle('Reset current category');
+  expect(listButton).toBeEnabled();
   expect(listButton).toHaveAttribute('aria-pressed', 'false');
 
   rerender(
@@ -568,12 +628,12 @@ test('compact filter buttons are disabled when no matching flagged item exists',
     />
   );
 
-  const enabledListButton = screen.getByTitle('Show only entries marked for the Telegram List');
+  const enabledListButton = screen.getByTitle('Reset current category');
   expect(enabledListButton).toBeEnabled();
   expect(enabledListButton).toHaveAttribute('aria-pressed', 'false');
 });
 
-test('compact list mode shows flagged entries before unflagged ones without hiding the unflagged entries', () => {
+test('the category reset clears the active focus category without affecting the other category', () => {
   render(
     <FilterPanel
       options={MULTI_OPTIONS}
@@ -586,10 +646,32 @@ test('compact list mode shows flagged entries before unflagged ones without hidi
     />
   );
 
-  fireEvent.click(screen.getByTitle('Show only entries marked for the Telegram List'));
+  fireEvent.click(screen.getByTitle('Reset current category'));
 
-  const addresses = screen.getAllByText(/^0\/1\/\d$/).map(el => el.textContent);
-  expect(addresses).toEqual(['0/1/2', '0/1/1']);
+  expect(screen.getByTitle('Reset current category')).toBeInTheDocument();
+});
+
+test('reset actions keep the badge toggle state unchanged', () => {
+  render(
+    <FilterPanel
+      options={MULTI_OPTIONS}
+      activeFilters={ACTIVE}
+      onFiltersChange={() => {}}
+      mode="live"
+      projectLoaded={true}
+      writeEnabled={true}
+    />
+  );
+
+  const badgeToggle = screen.getByTitle('Show only entries contained in the current buffer');
+  fireEvent.click(badgeToggle);
+  expect(screen.getByTitle('Show all entries')).toHaveAttribute('aria-pressed', 'true');
+
+  fireEvent.click(screen.getByTitle('Reset current category'));
+  expect(screen.getByTitle('Show all entries')).toHaveAttribute('aria-pressed', 'true');
+
+  fireEvent.click(screen.getByTitle('Reset Focus panel'));
+  expect(screen.getByTitle('Show all entries')).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('compact mode toggles stay active after the focus panel is remounted', () => {
@@ -615,11 +697,11 @@ test('compact mode toggles stay active after the focus panel is remounted', () =
 
   render(<Harness />);
 
-  fireEvent.click(screen.getByTitle('Show only entries marked for the Telegram List'));
+  fireEvent.click(screen.getByTitle('Reset current category'));
   fireEvent.click(screen.getByRole('button', { name: 'toggle panel' }));
   fireEvent.click(screen.getByRole('button', { name: 'toggle panel' }));
 
-  expect(screen.getByTitle('Show all entries')).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByTitle('Reset current category')).toHaveAttribute('aria-pressed', 'false');
 });
 
 test('badge compact toggles in one category stay independent from each other', () => {
@@ -648,11 +730,12 @@ test('badge compact toggles in one category stay independent from each other', (
     />
   );
 
-  fireEvent.click(screen.getByTitle('Show only entries marked for the Telegram List'));
-  expect(screen.getAllByTitle('Show all entries')).toHaveLength(1);
+  fireEvent.click(screen.getByTitle('Reset current category'));
+  expect(screen.getAllByTitle('Reset current category')).toHaveLength(1);
 
-  fireEvent.click(screen.getByTitle('Show only entries marked for Visualization'));
-  expect(screen.getAllByTitle('Show all entries')).toHaveLength(2);
+  fireEvent.click(screen.getByTitle('Select all visible rows'));
+  expect(screen.getByTitle('Restore previous item selection')).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getAllByTitle('Restore previous item selection')).toHaveLength(1);
 });
 
 test('devices badge filter shows either all project devices or only source-backed ones', () => {
@@ -688,7 +771,7 @@ test('devices badge filter shows either all project devices or only source-backe
   expect(screen.getByText('1.1.2')).toBeInTheDocument();
   expect(screen.getByText('1.1.3')).toBeInTheDocument();
 
-  fireEvent.click(screen.getByTitle('Show only entries with a non-zero badge count'));
+  fireEvent.click(screen.getByTitle('Show only entries contained in the current buffer'));
 
   expect(screen.getByText('1.1.1')).toBeInTheDocument();
   expect(screen.queryByText('1.1.2')).not.toBeInTheDocument();
@@ -809,14 +892,14 @@ test('compact mode is tracked separately per focus category and survives categor
 
   render(<Harness />);
 
-  fireEvent.click(screen.getByTitle('Show only entries marked for the Telegram List'));
-  expect(screen.getByTitle('Show all entries')).toHaveAttribute('aria-pressed', 'true');
+  fireEvent.click(screen.getByTitle('Reset current category'));
+  expect(screen.getByTitle('Reset current category')).toHaveAttribute('aria-pressed', 'false');
 
   fireEvent.click(screen.getByRole('button', { name: 'Devices' }));
-  expect(screen.getByTitle('No entries marked for the Telegram List')).toBeInTheDocument();
+  expect(screen.getByTitle('Reset current category')).toBeInTheDocument();
 
   fireEvent.click(screen.getByRole('button', { name: 'Group Addresses' }));
-  expect(screen.getByTitle('Show all entries')).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByTitle('Reset current category')).toHaveAttribute('aria-pressed', 'false');
 });
 
 test('ctrl-clicking rows and toggling an action applies it to every selected row', () => {

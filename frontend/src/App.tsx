@@ -300,7 +300,7 @@ function App() {
   }, []);
   // Focus panel's active category (Group Addresses/Devices), lifted so the
   // Telegram List's SOURCE/TARGET "focus" label can switch it (#402).
-  const [focusMode, setFocusMode] = useState<'ga' | 'pa'>('ga');
+  const [focusMode, setFocusMode] = useState<'ga' | 'pa'>(initialWorkspace?.focusMode ?? 'ga');
   // The active main panel within Group Monitor (#374). Replaces the former
   // isVisualizerOpen/isLastSeenOpen/isStatisticsOpen/isBuildingOpen booleans with
   // one selector so exactly one panel is active and every close returns to 'list'.
@@ -599,6 +599,7 @@ function App() {
       plot: selectedVisualizationTargets,
       lastSeenAddresses,
       lastSeenMode,
+      focusMode,
       focusListFlaggedAddresses,
       focusVisualizationFlaggedAddresses,
     };
@@ -607,7 +608,7 @@ function App() {
       else applyWorkspaceUrl(workspace);
     }, 500);
     return () => clearTimeout(handle);
-  }, [activeTab, workspaceView, isFilterOpen, isSendOpen, activeFilters, selectedVisualizationTargets, lastSeenAddresses, lastSeenMode, focusListFlaggedAddresses, focusVisualizationFlaggedAddresses]);
+  }, [activeTab, workspaceView, isFilterOpen, isSendOpen, activeFilters, selectedVisualizationTargets, lastSeenAddresses, lastSeenMode, focusMode, focusListFlaggedAddresses, focusVisualizationFlaggedAddresses]);
 
   // ── Persist UI Session State (#341) ──────────────────────────────────────────
   useEffect(() => {

@@ -31,6 +31,7 @@ export interface WorkspaceState {
   plot: string[];
   lastSeenAddresses: string[];
   lastSeenMode: 'ga' | 'pa';
+  focusMode: 'ga' | 'pa';
   focusListFlaggedAddresses: string[];
   focusVisualizationFlaggedAddresses: string[];
 }
@@ -44,6 +45,7 @@ export const DEFAULT_WORKSPACE: WorkspaceState = {
   plot: [],
   lastSeenAddresses: [],
   lastSeenMode: 'ga',
+  focusMode: 'ga',
   focusListFlaggedAddresses: [],
   focusVisualizationFlaggedAddresses: [],
 };
@@ -118,6 +120,7 @@ function sanitize(p: Partial<WorkspaceState>): WorkspaceState {
     plot: strings(p.plot),
     lastSeenAddresses: strings(p.lastSeenAddresses),
     lastSeenMode: p.lastSeenMode === 'pa' ? 'pa' : 'ga',
+    focusMode: p.focusMode === 'pa' ? 'pa' : 'ga',
     focusListFlaggedAddresses: strings(p.focusListFlaggedAddresses),
     focusVisualizationFlaggedAddresses: strings(p.focusVisualizationFlaggedAddresses),
   };
@@ -148,6 +151,7 @@ export function buildMonitorSearch(state: WorkspaceState): string {
   if (state.plot.length > 0) p.set('plot', state.plot.join(','));
   if (state.lastSeenAddresses.length > 0) p.set('ls', state.lastSeenAddresses.join(','));
   if (state.lastSeenMode !== 'ga') p.set('lsm', state.lastSeenMode);
+  if (state.focusMode !== 'ga') p.set('fm', state.focusMode);
   if (state.focusListFlaggedAddresses.length > 0) p.set('fl', state.focusListFlaggedAddresses.join(','));
   if (state.focusVisualizationFlaggedAddresses.length > 0) p.set('fv', state.focusVisualizationFlaggedAddresses.join(','));
   if ([...p.keys()].length === 0) return '';
@@ -181,6 +185,7 @@ export function parseMonitorSearch(search: string): WorkspaceState | null {
     plot: list(p.get('plot')),
     lastSeenAddresses: list(p.get('ls')),
     lastSeenMode: (p.get('lsm') as 'ga' | 'pa') ?? 'ga',
+    focusMode: (p.get('fm') as 'ga' | 'pa') === 'pa' ? 'pa' : 'ga',
     focusListFlaggedAddresses: list(p.get('fl')),
     focusVisualizationFlaggedAddresses: list(p.get('fv')),
   });
