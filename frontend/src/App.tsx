@@ -1398,6 +1398,7 @@ function App() {
                     onFocusModeChange={setFocusMode}
                     listFlaggedAddresses={focusListFlaggedAddresses}
                     onListFlaggedAddressesChange={setFocusListFlaggedAddresses}
+                    activeMainPanel={activePanel}
                   />
                 </div>
               </div>

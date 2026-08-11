@@ -21,7 +21,7 @@ export const DEFAULT_QUICK_FILTER_COLUMN_ENABLED: QuickFilterColumnEnabled = {
   value: true,
 };
 
-const makeTextMatcher = (pattern: string): ((s: string) => boolean) => {
+export const makeTextMatcher = (pattern: string): ((s: string) => boolean) => {
   const trimmed = pattern.trim();
   if (trimmed.length === 0) return () => true;
 
