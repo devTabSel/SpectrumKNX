@@ -152,4 +152,20 @@ describe('Visualizer', () => {
 
     expect(onListFollowChange).not.toHaveBeenCalled();
   });
+
+  it('renders the chart area without the legacy targets sidebar', () => {
+    render(
+      <Visualizer
+        telegrams={[]}
+        selectedTargets={['1/1/1']}
+        onTargetsChange={() => {}}
+        onClose={() => {}}
+        listFollow={true}
+        pendingLiveCount={0}
+      />,
+    );
+
+    expect(screen.getByTestId('visualization-chart-area')).toBeInTheDocument();
+    expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
+  });
 });

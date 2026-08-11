@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import type { Telegram } from '../hooks/useWebSocket';
-import { VisualizerSidebar } from './VisualizerSidebar';
 import { useChartData } from '../hooks/useChartData';
 import { MixedChart } from './MixedChart';
 import { TimelineChart } from './TimelineChart';
@@ -272,6 +271,14 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     onTargetsChange(next);
   };
 
+  useEffect(() => {
+    if (selectedTargets.length === 0) return;
+    const removed = selectedTargets.filter(address => !telegrams.some(telegram => telegram.target_address === address));
+    if (removed.length > 0) {
+      clearSeriesHidden(removed);
+    }
+  }, [selectedTargets, telegrams]);
+
   const toggleStepped = () => {
     setStepped(s => {
       const next = !s;
@@ -396,19 +403,6 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-
-        <VisualizerSidebar
-          telegrams={telegrams}
-          selectedTargets={selectedTargets}
-          onTargetsChange={handleTargetsChange}
-          untypedTargets={untypedTargets}
-          dptOverrides={dptOverrides}
-          onDptOverrideChange={setDptOverride}
-          writeEnabled={writeEnabled}
-          onFilterGAs={onFilterGAs}
-          onLastSeen={onLastSeen}
-        />
-
         {/* Chart Area */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: 'var(--bg-subtle)' }}>
           <div style={{ padding: '1rem 1.5rem', position: 'relative', borderBottom: '1px solid var(--border-color)' }}>
@@ -491,40 +485,51 @@ export const Visualizer: React.FC<VisualizerProps> = ({
                   the pill can center in the gap before copy-link/close (#391).
                   justifyContent keeps close pinned top-right even without a
                   pill/copy-link filler to push it there. */}
-              <div style={{ width: Math.max(0, rulerRightInset - chartsWrapperPad), flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', pointerEvents: 'auto' }}>
-              {showAutoFollowPill && (
-                <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
-                  {autoFollowPill}
-                </div>
-              )}
-              {nowLabel && (
-                <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
-                  {nowLabel}
-                </div>
-              )}
-              {getShareLink && buckets.length > 0 && (
-                  <button
-                    className="icon-button"
-                    onClick={() => void copyShareLink()}
-                    title="Copy a shareable link to this visualization (filters, targets and time range)"
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0.85rem',
-                      border: '1px solid var(--border-color)', borderRadius: '7px', fontSize: '0.8125rem',
-                      color: linkCopied ? 'var(--success)' : undefined,
-                    }}
-                  >
-                    {linkCopied ? <><Check size={16} /> Copied</> : <><Link2 size={16} /> Copy link</>}
-                  </button>
-              )}
-              {/* Close X in the panel header, like every other main panel (#347). */}
-              <button
-                className="icon-button"
-                onClick={onClose}
-                title="Close Visualization"
-                style={{ padding: '0.4rem', display: 'flex', color: 'var(--text-dim)' }}
+              <div
+                style={{
+                  width: Math.max(0, rulerRightInset - chartsWrapperPad),
+                  minWidth: '12rem',
+                  flexShrink: 0,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'flex-end',
+                  gap: '0.5rem',
+                  pointerEvents: 'auto',
+                }}
               >
-                <X size={18} />
-              </button>
+                {showAutoFollowPill && (
+                  <div style={{ display: 'flex', justifyContent: 'center', flexShrink: 0 }}>
+                    {autoFollowPill}
+                  </div>
+                )}
+                {nowLabel && (
+                  <div style={{ display: 'flex', justifyContent: 'center', flexShrink: 0 }}>
+                    {nowLabel}
+                  </div>
+                )}
+                {getShareLink && buckets.length > 0 && (
+                    <button
+                      className="icon-button"
+                      onClick={() => void copyShareLink()}
+                      title="Copy a shareable link to this visualization (filters, targets and time range)"
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0.85rem',
+                        border: '1px solid var(--border-color)', borderRadius: '7px', fontSize: '0.8125rem',
+                        color: linkCopied ? 'var(--success)' : undefined,
+                      }}
+                    >
+                      {linkCopied ? <><Check size={16} /> Copied</> : <><Link2 size={16} /> Copy link</>}
+                    </button>
+                )}
+                {/* Close X in the panel header, like every other main panel (#347). */}
+                <button
+                  className="icon-button"
+                  onClick={onClose}
+                  title="Close Visualization"
+                  style={{ padding: '0.4rem', display: 'flex', color: 'var(--text-dim)', flexShrink: 0 }}
+                >
+                  <X size={18} />
+                </button>
               </div>
             </div>
           </div>

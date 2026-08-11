@@ -1,5 +1,5 @@
 import { render, fireEvent, screen } from '@testing-library/react';
-import { expect, test, vi, beforeAll } from 'vitest';
+import { expect, test, vi, beforeAll, beforeEach } from 'vitest';
 import { TelegramTable, type SortConfig } from './TelegramTable';
 import { makeTelegram } from '../test/telegramFactory';
 import type { Telegram } from '../hooks/useWebSocket';
@@ -9,6 +9,10 @@ import { seriesColor } from '../utils/seriesColors';
 
 // jsdom has no layout: give the virtualizer a viewport and rows a rect so it
 // renders items and the anchor logic finds rows.
+beforeEach(() => {
+  localStorage.clear();
+});
+
 beforeAll(() => {
   globalThis.ResizeObserver = class {
     private cb: ResizeObserverCallback;
@@ -204,6 +208,105 @@ test('without a click the table keeps following the live edge', () => {
     />,
   );
   expect(screen.queryByText(/new/)).not.toBeInTheDocument();
+});
+
+test('scrolling back to the live edge resumes auto-follow when the paused buffer is empty', () => {
+  const onListFollowChange = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      pendingLiveCount={0}
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  scrollContainer.scrollTop = 0;
+  fireEvent.scroll(scrollContainer);
+
+  expect(onListFollowChange).toHaveBeenCalledWith(true);
+});
+
+test('scrolling back to the live edge does not resume auto-follow while the paused buffer is still non-empty', () => {
+  const onListFollowChange = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      pendingLiveCount={3}
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  scrollContainer.scrollTop = 0;
+  fireEvent.scroll(scrollContainer);
+
+  expect(onListFollowChange).not.toHaveBeenCalledWith(true);
+});
+
+test('scrolling away from the live edge does not resume auto-follow for top- or bottom-sorted time lists', () => {
+  const onListFollowChange = vi.fn();
+  const { container, rerender } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  onListFollowChange.mockClear();
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  scrollContainer.scrollTop = 300;
+  fireEvent.scroll(scrollContainer);
+  expect(onListFollowChange).not.toHaveBeenCalledWith(true);
+
+  rerender(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'asc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+
+  const ascScrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  onListFollowChange.mockClear();
+  Object.defineProperty(ascScrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(ascScrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  ascScrollContainer.scrollTop = 600;
+  fireEvent.scroll(ascScrollContainer);
+  expect(onListFollowChange).not.toHaveBeenCalledWith(true);
 });
 
 test('a paused view does not auto-scroll when the list rerenders', () => {
@@ -1349,7 +1452,7 @@ test('ctrl/cmd-click on a visualization-context row clears its context reason', 
 
 // ── SOURCE/TARGET header "Focus" checkboxes (#401) ───────────────────────────
 
-test('the SOURCE header icon shows only telegrams whose source is flagged for the Telegram List in the Focus panel', () => {
+test('the SOURCE header icon toggles the state without filtering rows for now', () => {
   const rows: Telegram[] = [
     makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', source_address: '1.1.1', raw_hex: '0x01' }),
     makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', source_address: '1.1.2', raw_hex: '0x02' }),
@@ -1371,12 +1474,10 @@ test('the SOURCE header icon shows only telegrams whose source is flagged for th
 
   fireEvent.click(screen.getByTitle('Show only telegrams whose source is flagged for the Telegram List in the Focus panel'));
 
-  const remaining = container.querySelectorAll('.log-row');
-  expect(remaining).toHaveLength(1);
-  expect(remaining[0]).toHaveAttribute('data-akey', anchorKey(rows[0]));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(2);
 });
 
-test('the TARGET header icon shows only telegrams whose target is flagged for the Telegram List in the Focus panel', () => {
+test('the TARGET header icon toggles the state without filtering rows for now', () => {
   const rows: Telegram[] = [
     makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', target_address: '1/1/1', raw_hex: '0x01' }),
     makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', target_address: '1/1/2', raw_hex: '0x02' }),
@@ -1396,9 +1497,153 @@ test('the TARGET header icon shows only telegrams whose target is flagged for th
 
   fireEvent.click(screen.getByTitle('Show only telegrams whose target is flagged for the Telegram List in the Focus panel'));
 
-  const remaining = container.querySelectorAll('.log-row');
-  expect(remaining).toHaveLength(1);
-  expect(remaining[0]).toHaveAttribute('data-akey', anchorKey(rows[1]));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(2);
+});
+
+test('source and target focus filters are independent', () => {
+  render(
+    <TelegramTable
+      telegrams={[]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      focusListAddresses={[]}
+    />
+  );
+
+  expect(screen.getByTitle('Show only telegrams whose source is flagged for the Telegram List in the Focus panel')).toHaveStyle({ color: 'var(--text-dim)' });
+  expect(screen.getByTitle('Show only telegrams whose target is flagged for the Telegram List in the Focus panel')).toHaveStyle({ color: 'var(--text-dim)' });
+
+  fireEvent.click(screen.getByTitle('Show only telegrams whose source is flagged for the Telegram List in the Focus panel'));
+
+  expect(screen.getByTitle('Show only telegrams whose source is flagged for the Telegram List in the Focus panel')).toHaveStyle({ color: 'var(--accent-primary)' });
+  expect(screen.getByTitle('Show only telegrams whose target is flagged for the Telegram List in the Focus panel')).toHaveStyle({ color: 'var(--text-dim)' });
+});
+
+test('source and target focus filters stay enabled while the Focus panel is in its reset state', () => {
+  render(
+    <TelegramTable
+      telegrams={[]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      focusFilterDisabled={true}
+    />,
+  );
+
+  const sourceToggle = screen.getByTitle('Show only telegrams whose source is flagged for the Telegram List in the Focus panel');
+  const targetToggle = screen.getByTitle('Show only telegrams whose target is flagged for the Telegram List in the Focus panel');
+
+  fireEvent.click(sourceToggle);
+  fireEvent.click(targetToggle);
+
+  expect(sourceToggle).toHaveStyle({ cursor: 'pointer' });
+  expect(targetToggle).toHaveStyle({ cursor: 'pointer' });
+  expect(sourceToggle).toHaveStyle({ color: 'var(--accent-primary)' });
+  expect(targetToggle).toHaveStyle({ color: 'var(--accent-primary)' });
+});
+
+test('clicking the "new" pill keeps the current scroll position instead of jumping to the edge', () => {
+  const onListFollowChange = vi.fn();
+  const { container, rerender } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      pendingLiveCount={3}
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  scrollContainer.scrollTop = 300;
+  fireEvent.scroll(scrollContainer);
+
+  expect(scrollContainer.scrollTop).toBe(300);
+  fireEvent.click(screen.getByTitle('Resume auto-follow'));
+
+  rerender(
+    <TelegramTable
+      telegrams={makeList(26, 25)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={true}
+      pendingLiveCount={0}
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+
+  expect(onListFollowChange).toHaveBeenCalledWith(true);
+  expect(scrollContainer.scrollTop).toBe(300);
+});
+
+test('paused new-count keeps accumulating until auto-follow is resumed', () => {
+  const initial = makeList(2, 1);
+  const { container, rerender } = render(
+    <TelegramTable
+      telegrams={initial}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+    />,
+  );
+
+  rerender(
+    <TelegramTable
+      telegrams={makeList(3, 2)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+    />,
+  );
+
+  expect(screen.getByText('1 new')).toBeInTheDocument();
+
+  fireEvent.click(container.querySelectorAll('.log-row')[0]);
+  expect(screen.getByText('1 new')).toBeInTheDocument();
+
+  rerender(
+    <TelegramTable
+      telegrams={makeList(4, 3)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+    />,
+  );
+
+  expect(screen.getByText('2 new')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByTitle('Resume auto-follow'));
+  expect(screen.queryByText(/\bnew\b/)).not.toBeInTheDocument();
 });
 
 test('clicking the "focus" label switches the Focus panel to the corresponding category, without toggling the checkbox', () => {

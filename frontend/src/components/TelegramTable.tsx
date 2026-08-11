@@ -186,6 +186,14 @@ interface TelegramTableProps {
   /** Addresses flagged for the Telegram List in the Focus panel. Used to filter
    * the table before quick-filter/context rows are added. */
   focusListAddresses?: string[];
+  /** Optional controlled state for the SOURCE header focus toggle. */
+  sourceFocusOnly?: boolean;
+  onSourceFocusOnlyChange?: (enabled: boolean) => void;
+  /** Optional controlled state for the TARGET header focus toggle. */
+  targetFocusOnly?: boolean;
+  onTargetFocusOnlyChange?: (enabled: boolean) => void;
+  /** Disables the source/target focus filter toggles while the Focus panel is in its reset/initial state. */
+  focusFilterDisabled?: boolean;
   /** Number of unique source devices across all telegrams in the current buffer. */
   allBufferSourceCount?: number | null;
   /** Configured message-buffer capacity (max telegram count). */
@@ -404,6 +412,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   onVisualizationContextClear,
   onFocusCategorySelect,
   focusListAddresses = [],
+  sourceFocusOnly: sourceFocusOnlyProp,
+  onSourceFocusOnlyChange,
+  targetFocusOnly: targetFocusOnlyProp,
+  onTargetFocusOnlyChange,
+  focusFilterDisabled = false,
   allBufferSourceCount,
   bufferCapacity,
   allBufferMessageCount,
@@ -727,14 +740,37 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     () => compileQuickFilters(currentPatterns, currentQuickColumnEnabled),
     [currentPatterns, currentQuickColumnEnabled],
   );
-  const [sourceFocusOnly, setSourceFocusOnly] = useState(false);
-  const [targetFocusOnly, setTargetFocusOnly] = useState(false);
+  const [internalSourceFocusOnly, setInternalSourceFocusOnly] = useState<boolean>(() => getPref('telegramTable.sourceFocusOnly') === '1');
+  const [internalTargetFocusOnly, setInternalTargetFocusOnly] = useState<boolean>(() => getPref('telegramTable.targetFocusOnly') === '1');
+  const sourceFocusOnly = sourceFocusOnlyProp ?? internalSourceFocusOnly;
+  const targetFocusOnly = targetFocusOnlyProp ?? internalTargetFocusOnly;
+  const setSourceFocusOnly = useCallback((next: boolean) => {
+    if (onSourceFocusOnlyChange) {
+      onSourceFocusOnlyChange(next);
+      return;
+    }
+    setInternalSourceFocusOnly(next);
+  }, [onSourceFocusOnlyChange]);
+  const setTargetFocusOnly = useCallback((next: boolean) => {
+    if (onTargetFocusOnlyChange) {
+      onTargetFocusOnlyChange(next);
+      return;
+    }
+    setInternalTargetFocusOnly(next);
+  }, [onTargetFocusOnlyChange]);
+  useEffect(() => {
+    setPref('telegramTable.sourceFocusOnly', sourceFocusOnly ? '1' : '0');
+  }, [sourceFocusOnly]);
+  useEffect(() => {
+    setPref('telegramTable.targetFocusOnly', targetFocusOnly ? '1' : '0');
+  }, [targetFocusOnly]);
   const forcedAfterQuickFilterKeys = useMemo(() => {
     if (!contextKeys) return new Set<string>();
     return new Set<string>(contextKeys.keys());
   }, [contextKeys]);
+  const focusFilteringEnabled = false;
   const focusFilteredRows = useMemo(() => {
-    if (!sourceFocusOnly && !targetFocusOnly) return telegrams;
+    if (!focusFilteringEnabled || (!sourceFocusOnly && !targetFocusOnly)) return telegrams;
     const focusListSet = new Set(focusListAddresses);
     return telegrams.filter(t =>
       (!sourceFocusOnly || focusListSet.has(t.source_address)) &&
@@ -743,10 +779,24 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   }, [telegrams, sourceFocusOnly, targetFocusOnly, focusListAddresses]);
   const quickFiltered = useMemo(() => {
     if (!quickFilterFeatureEnabled || !quickOpen || !quickEnabled) return focusFilteredRows;
-    const hasAnyQuickMatch = focusFilteredRows.some(t => quickMatches(t));
-    if (!hasAnyQuickMatch && forcedAfterQuickFilterKeys.size === 0) return [];
-    return focusFilteredRows.filter(t => quickMatches(t) || forcedAfterQuickFilterKeys.has(anchorKey(t)));
-  }, [focusFilteredRows, quickFilterFeatureEnabled, quickOpen, quickEnabled, quickMatches, forcedAfterQuickFilterKeys]);
+
+    const matchesFocusFilter = (row: Telegram) => {
+      if (!focusFilteringEnabled || (!sourceFocusOnly && !targetFocusOnly)) return true;
+      const focusListSet = new Set(focusListAddresses);
+      return (
+        (!sourceFocusOnly || focusListSet.has(row.source_address)) &&
+        (!targetFocusOnly || focusListSet.has(row.target_address))
+      );
+    };
+
+    const keepRow = (row: Telegram) => {
+      const key = anchorKey(row);
+      return matchesFocusFilter(row) || quickMatches(row) || forcedAfterQuickFilterKeys.has(key);
+    };
+
+    const retained = telegrams.filter(keepRow);
+    return retained;
+  }, [telegrams, focusFilteredRows, focusListAddresses, quickFilterFeatureEnabled, quickOpen, quickEnabled, quickMatches, forcedAfterQuickFilterKeys, sourceFocusOnly, targetFocusOnly]);
 
   const anyQuickColumnEnabled = useMemo(
     () => Object.values(currentQuickColumnEnabled).some(Boolean),
@@ -914,7 +964,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   const preValueFilterRows = deltaSortActive && deltaFrozenRows ? deltaFrozenRows : naturalTelegramRows;
   const focusFilteredValueRows = useMemo(() => {
-    if (!sourceFocusOnly && !targetFocusOnly) return preValueFilterRows;
+    if (!focusFilteringEnabled || (!sourceFocusOnly && !targetFocusOnly)) return preValueFilterRows;
     const focusListSet = new Set(focusListAddresses);
     return preValueFilterRows.filter(t =>
       (!sourceFocusOnly || focusListSet.has(t.source_address)) &&
@@ -967,7 +1017,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     return applyVisibleDeltas(baseRows);
   }, [focusFilteredValueRows, preValueFilterRows, valueRowFilter, markedSet, flaggedSet, contextKeys, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs, applyVisibleDeltas]);
   const valueRowFilterFiltersOutAnyMessage = valueRowFilter !== 'none' && telegramRows.length < preValueFilterRows.length;
-  const filterIndicatorFiltersOutAnyMessage = quickFilterFiltersOutAnyMessage || valueRowFilterFiltersOutAnyMessage;
+  const focusFilterFiltersOutAnyMessage = false;
+  const filterIndicatorFiltersOutAnyMessage = quickFilterFiltersOutAnyMessage || valueRowFilterFiltersOutAnyMessage || focusFilterFiltersOutAnyMessage;
   const quickFilterDividerColor = filterIndicatorFiltersOutAnyMessage
     ? '#f59e0b'
     : (!quickEnabled || !anyQuickColumnEnabled ? '#000000' : '#6b7280');
@@ -1071,7 +1122,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       onListFollowChange?.(false);
       onListAnchorKeyChange?.(key);
       setFollowPaused(true);
-      setNewSinceAnchor(0);
     }
 
     let nextKeys: string[];
@@ -1289,6 +1339,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const isTimeSort = primarySort?.key === 'timestamp' && !deltaSortActive;
   const liveEdge = primarySort?.direction === 'asc' ? 'bottom' : 'top';
   const atEdgeRef = useRef(listFollow ?? true);
+  const lastScrollTopRef = useRef<number>(0);
   const [newSinceAnchor, setNewSinceAnchor] = useState(0);
   // Reactive mirror of atEdgeRef so the autofollow pill can re-render on
   // pause/resume regardless of sort (edge-diffing alone only works for the
@@ -1311,11 +1362,20 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     setFollowPaused(true);
   }, [onListFollowChange]);
 
-  const resumeFollow = useCallback(() => {
-    atEdgeRef.current = true;
+  const resumeFollow = useCallback((keepAnchor = false) => {
+    if (keepAnchor) {
+      captureAnchor();
+    }
+    atEdgeRef.current = !keepAnchor;
     onListFollowChange?.(true);
     setNewSinceAnchor(0);
     setFollowPaused(false);
+    if (!keepAnchor) {
+      anchorRef.current = null;
+      onListAnchorKeyChange?.(null);
+    } else if (anchorRef.current) {
+      onListAnchorKeyChange?.(anchorRef.current.key);
+    }
   }, [onListFollowChange]);
 
   // Sync props to refs. A parent prop of false pauses follow; a prop of true
@@ -1381,22 +1441,20 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const handleScroll = () => {
     // Ignore the scrolls our own compensation triggers.
     if (programmaticScrollRef.current) return;
+    const el = parentRef.current;
+    if (!el) return;
     if (isTimeSort) {
-      // A live edge exists: reaching it resumes follow automatically, moving
-      // away pauses it, mirroring the pre-unification behavior.
       const atEdge = checkAtEdge();
-      if (atEdge !== atEdgeRef.current) {
-        if (atEdge) {
+      if (!atEdge) {
+        pauseFollow();
+        captureAnchor();
+      } else {
+        const bufferEmpty = (pendingLiveCount ?? 0) === 0;
+        if (bufferEmpty && (listFollow ?? true) === false) {
           resumeFollow();
-        } else {
-          pauseFollow();
         }
-      }
-      if (atEdge) {
         anchorRef.current = null;
         onListAnchorKeyChange?.(null);
-      } else {
-        captureAnchor();
       }
     } else {
       // No live edge outside the timestamp sort — any scroll is navigation;
@@ -1434,10 +1492,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   };
 
   const jumpToLive = () => {
-    resumeFollow();
-    anchorRef.current = null;
-    onListAnchorKeyChange?.(null);
-    scrollToEdge();
+    // Clicking the "new" pill resumes the live feed without snapping the list to
+    // the live edge. The current viewport stays anchored so the user can keep
+    // reading the same rows while the buffer clears.
+    resumeFollow(true);
   };
 
   // Scrolls to a specific row by index and stops live-following, so the
@@ -1564,7 +1622,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     atEdgeRef.current = false;
     onListFollowChange?.(false);
     setFollowPaused(true);
-    setNewSinceAnchor(0);
     markProgrammatic();
     virtualizer.scrollToIndex(idx, { align: 'center' });
     requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -1604,7 +1661,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     if (added <= 0) {
       anchorRef.current = null;
       onListAnchorKeyChange?.(null);
-      setNewSinceAnchor(0);
       setStripeOffset(0);
       return;
     }
@@ -2399,7 +2455,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       title={c.id === 'source'
                         ? 'Show only telegrams whose source is flagged for the Telegram List in the Focus panel'
                         : 'Show only telegrams whose target is flagged for the Telegram List in the Focus panel'}
-                      style={{ display: 'flex', alignItems: 'center', cursor: 'pointer', userSelect: 'none', color: focusChecked ? 'var(--accent-primary)' : 'var(--text-dim)' }}
+                      style={{
+                        display: 'flex', alignItems: 'center', userSelect: 'none',
+                        cursor: 'pointer',
+                        color: focusChecked ? 'var(--accent-primary)' : 'var(--text-dim)',
+                        opacity: 1,
+                      }}
                     >
                       <List size={12} />
                     </span>

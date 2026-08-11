@@ -8,10 +8,15 @@ import {
 } from '../types/filters';
 import { compareKnxAddress } from '../utils/knxAddress';
 import { makeTextMatcher } from '../utils/quickFilter';
+import { getPref, setPref } from '../utils/prefs';
 import { SendToGaPopover } from './SendToGaPopover';
 
 type ToggleAction = 'pin' | 'list' | 'visualize' | 'lastseen';
 type TriState = 'off' | 'mixed' | 'on';
+type FocusCompactMode = 'list' | 'visualize' | 'lastseen' | 'compress';
+type FocusCompactModes = Record<'ga' | 'pa', Record<FocusCompactMode, boolean>>;
+
+const readCompactModePref = (category: 'ga' | 'pa', mode: FocusCompactMode): boolean => getPref(`focusPanel.compactMode.${category}.${mode}`) === '1';
 
 const rowActionBtnStyle: React.CSSProperties = {
   background: 'transparent', border: '1px solid var(--border-color)', cursor: 'pointer',
@@ -137,7 +142,11 @@ interface FilterPanelProps {
   onFocusModeChange?: (mode: 'ga' | 'pa') => void;
   listFlaggedAddresses?: string[];
   onListFlaggedAddressesChange?: (addresses: string[]) => void;
+  visualizationFlaggedAddresses?: string[];
+  onVisualizationFlaggedAddressesChange?: (addresses: string[]) => void;
   activeMainPanel?: 'list' | 'visualizer' | 'statistics' | 'building' | 'lastseen';
+  autoFlag?: 'list' | 'visualize' | 'lastseen' | null;
+  onResetFocusPanel?: () => void;
 }
 
 interface OptionRowProps {
@@ -274,8 +283,9 @@ interface FocusOptionRowProps {
   striped?: boolean;
   count?: number;
   hideCheckbox?: boolean;
-  onToggle: () => void;
-  onToggleSelection?: (addresses: string[]) => void;
+  onToggle: (ctrlClick?: boolean) => void;
+  onToggleSelection?: (addresses: string[], ctrlClick?: boolean) => void;
+  onPinChangeAutoSync?: (addresses: string[], pinned: boolean, ctrlClick?: boolean) => void;
   onSelect: (event: React.MouseEvent<HTMLElement>) => void;
   /** Borderless write-to-GA action rendered inline after the address text
    * (#406); receives row-hover so it can hide unless pinned or hovered (#407). */
@@ -285,7 +295,7 @@ interface FocusOptionRowProps {
   actions?: (hovered: boolean) => React.ReactNode;
 }
 
-const FocusOptionRow: React.FC<FocusOptionRowProps> = ({ label, sublabel, checked, selected, selectionState, pinnedAddresses, striped, count, hideCheckbox, onToggle, onToggleSelection, onSelect, writeAction, actions }) => {
+const FocusOptionRow: React.FC<FocusOptionRowProps> = ({ label, sublabel, checked, selected, selectionState, pinnedAddresses, striped, count, hideCheckbox, onToggle, onToggleSelection, onPinChangeAutoSync, onSelect, writeAction, actions }) => {
   const [hovered, setHovered] = useState(false);
   const isRowSelected = selectionState?.includes(label) ?? selected;
   const rowGridColumns = hideCheckbox ? 'minmax(0, 1fr) 4rem 1.8rem' : FOCUS_ROW_GRID_COLUMNS;
@@ -320,6 +330,7 @@ const FocusOptionRow: React.FC<FocusOptionRowProps> = ({ label, sublabel, checke
           aria-label={`Pin ${label}`}
           onClick={e => {
             e.stopPropagation();
+            const ctrlClick = e.ctrlKey || e.metaKey;
             if ((selectionState?.length ?? 0) > 1 && isRowSelected) {
               const addresses = selectionState ?? [label];
               const next = new Set(pinnedAddresses ?? []);
@@ -328,9 +339,11 @@ const FocusOptionRow: React.FC<FocusOptionRowProps> = ({ label, sublabel, checke
                 if (shouldPin) next.add(address);
                 else next.delete(address);
               });
-              onToggleSelection?.(Array.from(next));
+              const nextAddresses = Array.from(next);
+              onToggleSelection?.(nextAddresses, ctrlClick);
+              onPinChangeAutoSync?.(addresses, shouldPin, ctrlClick);
             } else {
-              onToggle();
+              onToggle(ctrlClick);
             }
           }}
           style={{
@@ -364,9 +377,11 @@ const FocusOptionRow: React.FC<FocusOptionRowProps> = ({ label, sublabel, checke
         title={sublabel}
         style={{
           gridColumn: contentColumn, gridRow: 2, minWidth: 0,
+          minHeight: '0.8rem',
           fontSize: '0.65rem', color: 'var(--text-dim)',
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>{sublabel}</div>
+          lineHeight: '0.8rem',
+        }}>{sublabel ?? ' '}</div>
 
       {actions && (
         <div
@@ -421,16 +436,26 @@ interface FocusAddressSectionProps {
     onToggleLastSeen?: () => void;
   };
   showVisualizeAction?: boolean;
+  compactMode: Record<FocusCompactMode, boolean>;
+  onCompactModeChange: (mode: FocusCompactMode) => void;
+  onPinChangeAutoSync?: (addresses: string[], pinned: boolean, ctrlClick?: boolean) => void;
+  resetSignal?: number;
 }
 
 const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
   title, entries, selected, onToggle, counts, mode, writeActionFor, actionsFor, hideZeroCount, selectionState, onSelectionChange,
   listFlaggedAddresses, visualizeFlaggedAddresses, lastSeenFlaggedAddresses, bulkActions, showVisualizeAction,
+  compactMode, onCompactModeChange, onPinChangeAutoSync, resetSignal,
 }) => {
   const [search, setSearch] = useState('');
   const [anchorAddress, setAnchorAddress] = useState<string | null>(null);
-  const [compactMode, setCompactMode] = useState<'list' | 'visualize' | 'lastseen' | 'compress' | null>(null);
   const [showPinnedOnly, setShowPinnedOnly] = useState(false);
+
+  useEffect(() => {
+    setSearch('');
+    setAnchorAddress(null);
+    setShowPinnedOnly(false);
+  }, [resetSignal]);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   const selectionSet = useMemo(() => new Set(selectionState ?? []), [selectionState]);
   const listFlagSet = useMemo(() => new Set(listFlaggedAddresses ?? []), [listFlaggedAddresses]);
@@ -454,20 +479,53 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
       return searchMatcher(haystack);
     };
 
+    const activeModes = (Object.keys(compactMode) as FocusCompactMode[]).filter(mode => compactMode[mode]);
     const matchesCompactMode = (entry: FilterOption) => {
-      if (!compactMode) return true;
+      if (activeModes.length === 0) return true;
       const address = entry.address ?? '';
-      if (compactMode === 'compress') return (counts?.[address] ?? 0) > 0;
-      if (compactMode === 'list') return listFlagSet.has(address);
-      if (compactMode === 'visualize') return visualizeFlagSet.has(address);
-      return lastSeenFlagSet.has(address);
+      if (activeModes.includes('compress')) {
+        if (counts === undefined) return true;
+        const badgeCount = counts[address];
+        if (badgeCount === undefined || badgeCount <= 0) return false;
+      }
+      return true;
     };
 
-    return entries
+    const sorted = entries
       .filter(matchesSearch)
       .filter(e => !zeroFilterActive || (counts?.[e.address ?? ''] ?? 0) > 0)
       .filter(matchesCompactMode)
-      .filter(e => !showPinnedOnly || (selected?.includes(e.address ?? '') ?? false));
+      .filter(e => {
+        if (!showPinnedOnly) return true;
+        const address = e.address ?? '';
+        return (selected?.includes(address) ?? false)
+          || listFlagSet.has(address)
+          || visualizeFlagSet.has(address)
+          || lastSeenFlagSet.has(address);
+      })
+      .sort((a, b) => {
+        const matchA = activeModes.some(mode => {
+          if (mode === 'compress') return false;
+          const address = a.address ?? '';
+          if (mode === 'list') return listFlagSet.has(address);
+          if (mode === 'visualize') return visualizeFlagSet.has(address);
+          return lastSeenFlagSet.has(address);
+        });
+        const matchB = activeModes.some(mode => {
+          if (mode === 'compress') return false;
+          const address = b.address ?? '';
+          if (mode === 'list') return listFlagSet.has(address);
+          if (mode === 'visualize') return visualizeFlagSet.has(address);
+          return lastSeenFlagSet.has(address);
+        });
+
+        if (activeModes.some(mode => mode !== 'compress')) {
+          if (matchA !== matchB) return Number(matchB) - Number(matchA);
+        }
+        return compareKnxAddress(a.address ?? '', b.address ?? '');
+      });
+
+    return sorted;
   }, [entries, searchMatcher, zeroFilterActive, counts, compactMode, listFlagSet, visualizeFlagSet, lastSeenFlagSet, selected, showPinnedOnly]);
 
   // Selected items float to the top, each group sorted by address (#XXX).
@@ -475,19 +533,38 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
     const pinned: FilterOption[] = [];
     const rest: FilterOption[] = [];
     for (const e of filtered) (selectedSet.has(e.address ?? '') ? pinned : rest).push(e);
-    const byAddress = (a: FilterOption, b: FilterOption) => compareKnxAddress(a.address ?? '', b.address ?? '');
-    pinned.sort(byAddress);
-    rest.sort(byAddress);
+
+    const activeFlagModes = (Object.keys(compactMode) as FocusCompactMode[]).filter(mode => mode !== 'compress' && compactMode[mode]);
+    const matchesActiveFlagMode = (entry: FilterOption) => {
+      if (activeFlagModes.length === 0) return false;
+      const address = entry.address ?? '';
+      return activeFlagModes.some(mode => {
+        if (mode === 'list') return listFlagSet.has(address);
+        if (mode === 'visualize') return visualizeFlagSet.has(address);
+        return lastSeenFlagSet.has(address);
+      });
+    };
+    const byFocusPriority = (a: FilterOption, b: FilterOption) => {
+      const aMarked = matchesActiveFlagMode(a);
+      const bMarked = matchesActiveFlagMode(b);
+      if (aMarked !== bMarked) return Number(bMarked) - Number(aMarked);
+      return compareKnxAddress(a.address ?? '', b.address ?? '');
+    };
+
+    pinned.sort(byFocusPriority);
+    rest.sort(byFocusPriority);
     return { pinned, rest };
-  }, [filtered, selectedSet]);
+  }, [filtered, selectedSet, compactMode, listFlagSet, visualizeFlagSet, lastSeenFlagSet]);
   const visibleEntries = useMemo(() => [...pinned, ...rest], [pinned, rest]);
 
-  const toggle = (address: string) => {
-    const next = selectedSet.has(address) ? selected.filter(v => v !== address) : [...selected, address];
+  const toggle = (address: string, ctrlClick = false) => {
+    const nextPinned = !selectedSet.has(address);
+    const next = nextPinned ? [...selected, address] : selected.filter(v => v !== address);
     onToggle(next);
+    onPinChangeAutoSync?.([address], nextPinned, ctrlClick);
   };
 
-  const toggleSelectionForPin = () => {
+  const toggleSelectionForPin = (ctrlClick = false) => {
     const relevant = filtered.filter(e => selectionSet.has(e.address ?? '')).map(e => e.address ?? '').filter(Boolean);
     if (relevant.length === 0) return;
     const next = new Set(selected);
@@ -497,6 +574,7 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
       else next.add(address);
     });
     onToggle([...next]);
+    onPinChangeAutoSync?.(relevant, !allPinned, ctrlClick);
   };
 
   const getTriState = (values: boolean[]) => {
@@ -626,33 +704,33 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
         >
           <button
             type="button"
-            onClick={() => setCompactMode(mode => mode === 'list' ? null : 'list')}
-            title={hasListMatches ? (compactMode === 'list' ? 'Show all entries' : 'Show only entries marked for the Telegram List') : 'No entries marked for the Telegram List'}
-            aria-pressed={compactMode === 'list' && hasListMatches}
+            onClick={() => onCompactModeChange('list')}
+            title={hasListMatches ? (compactMode.list ? 'Show all entries' : 'Show only entries marked for the Telegram List') : 'No entries marked for the Telegram List'}
+            aria-pressed={compactMode.list && hasListMatches}
             disabled={!hasListMatches}
-            style={{ ...toggleIconBtnStyle(compactMode === 'list' && hasListMatches), gridColumn: 2, opacity: hasListMatches ? 1 : 0.45 }}
+            style={{ ...toggleIconBtnStyle(compactMode.list && hasListMatches), gridColumn: 2, opacity: hasListMatches ? 1 : 0.45 }}
           >
             <List size={12} />
           </button>
           {showVisualizeAction && (
             <button
               type="button"
-              onClick={() => setCompactMode(mode => mode === 'visualize' ? null : 'visualize')}
-              title={hasVisualizeMatches ? (compactMode === 'visualize' ? 'Show all entries' : 'Show only entries marked for Visualization') : 'No entries marked for Visualization'}
-              aria-pressed={compactMode === 'visualize' && hasVisualizeMatches}
+              onClick={() => onCompactModeChange('visualize')}
+              title={hasVisualizeMatches ? (compactMode.visualize ? 'Show all entries' : 'Show only entries marked for Visualization') : 'No entries marked for Visualization'}
+              aria-pressed={compactMode.visualize && hasVisualizeMatches}
               disabled={!hasVisualizeMatches}
-              style={{ ...toggleIconBtnStyle(compactMode === 'visualize' && hasVisualizeMatches), gridColumn: 3, opacity: hasVisualizeMatches ? 1 : 0.45 }}
+              style={{ ...toggleIconBtnStyle(compactMode.visualize && hasVisualizeMatches), gridColumn: 3, opacity: hasVisualizeMatches ? 1 : 0.45 }}
             >
               <LineChart size={12} />
             </button>
           )}
           <button
             type="button"
-            onClick={() => setCompactMode(mode => mode === 'lastseen' ? null : 'lastseen')}
-            title={hasLastSeenMatches ? (compactMode === 'lastseen' ? 'Show all entries' : 'Show only entries marked for Last Seen Values') : 'No entries marked for Last Seen Values'}
-            aria-pressed={compactMode === 'lastseen' && hasLastSeenMatches}
+            onClick={() => onCompactModeChange('lastseen')}
+            title={hasLastSeenMatches ? (compactMode.lastseen ? 'Show all entries' : 'Show only entries marked for Last Seen Values') : 'No entries marked for Last Seen Values'}
+            aria-pressed={compactMode.lastseen && hasLastSeenMatches}
             disabled={!hasLastSeenMatches}
-            style={{ ...toggleIconBtnStyle(compactMode === 'lastseen' && hasLastSeenMatches), gridColumn: 4, opacity: hasLastSeenMatches ? 1 : 0.45 }}
+            style={{ ...toggleIconBtnStyle(compactMode.lastseen && hasLastSeenMatches), gridColumn: 4, opacity: hasLastSeenMatches ? 1 : 0.45 }}
           >
             <Clock size={12} />
           </button>
@@ -660,10 +738,10 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
         <div style={{ gridColumn: 4, display: 'flex', justifyContent: 'center' }}>
           <button
             type="button"
-            onClick={() => setCompactMode(mode => mode === 'compress' ? null : 'compress')}
-            title={compactMode === 'compress' ? 'Show all entries' : 'Show only entries with a non-zero badge count'}
-            aria-pressed={compactMode === 'compress'}
-            style={toggleIconBtnStyle(compactMode === 'compress')}
+            onClick={() => onCompactModeChange('compress')}
+            title={compactMode.compress ? 'Show all entries' : 'Show only entries with a non-zero badge count'}
+            aria-pressed={compactMode.compress}
+            style={toggleIconBtnStyle(compactMode.compress)}
           >
             <Minimize2 size={12} />
           </button>
@@ -686,15 +764,19 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
               pinnedAddresses={selected}
               striped={pinned.length > 0 && pinned.indexOf(e) % 2 === 1}
               count={mode === 'live' ? (counts?.[e.address ?? ''] ?? 0) : undefined}
-              onToggle={() => toggle(e.address ?? '')}
-              onToggleSelection={addresses => onToggle(addresses)}
+              onToggle={(ctrlClick) => toggle(e.address ?? '', ctrlClick)}
+              onToggleSelection={(addresses, ctrlClick) => {
+                onToggle(addresses);
+                onPinChangeAutoSync?.(addresses, addresses.some(address => !selectedSet.has(address)), ctrlClick);
+              }}
+              onPinChangeAutoSync={onPinChangeAutoSync}
               onSelect={event => handleSelect(e.address ?? '', event)}
               writeAction={hovered => writeActionFor?.(e.address ?? '', e, true, hovered)}
               actions={hovered => actionsFor?.(e.address ?? '', e, true, hovered)}
             />
           ))}
           {pinned.length > 0 && rest.length > 0 && (
-            <div style={{ borderTop: '2px solid var(--accent-primary)', opacity: 0.5, margin: '0.5rem 0' }} />
+            <div style={{ borderTop: '2px solid var(--accent-primary)', opacity: 0.5, margin: 0, padding: 0, lineHeight: 0 }} />
           )}
           {rest.map(e => (
             <FocusOptionRow
@@ -708,8 +790,12 @@ const FocusAddressSection: React.FC<FocusAddressSectionProps> = ({
               pinnedAddresses={selected}
               striped={rest.indexOf(e) % 2 === 1}
               count={mode === 'live' ? (counts?.[e.address ?? ''] ?? 0) : undefined}
-              onToggle={() => toggle(e.address ?? '')}
-              onToggleSelection={addresses => onToggle(addresses)}
+              onToggle={(ctrlClick) => toggle(e.address ?? '', ctrlClick)}
+              onToggleSelection={(addresses, ctrlClick) => {
+                onToggle(addresses);
+                onPinChangeAutoSync?.(addresses, addresses.some(address => !selectedSet.has(address)), ctrlClick);
+              }}
+              onPinChangeAutoSync={onPinChangeAutoSync}
               onSelect={event => handleSelect(e.address ?? '', event)}
               writeAction={hovered => writeActionFor?.(e.address ?? '', e, false, hovered)}
               actions={hovered => actionsFor?.(e.address ?? '', e, false, hovered)}
@@ -734,7 +820,11 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
   onFocusModeChange,
   listFlaggedAddresses: controlledListFlaggedAddresses,
   onListFlaggedAddressesChange,
+  visualizationFlaggedAddresses: controlledVisualizationFlaggedAddresses,
+  onVisualizationFlaggedAddressesChange,
   activeMainPanel,
+  autoFlag,
+  onResetFocusPanel,
 }) => {
   // Mode tabs mirror the Last Seen Values sidebar: one list shown at a time,
   // switched between Group Addresses (targets) and Devices (sources). Lifted
@@ -745,27 +835,73 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
     setInternalFocusMode(m);
     onFocusModeChange?.(m);
   };
+  const [compactModeByCategory, setCompactModeByCategory] = useState<FocusCompactModes>({
+    ga: {
+      list: readCompactModePref('ga', 'list'),
+      visualize: readCompactModePref('ga', 'visualize'),
+      lastseen: readCompactModePref('ga', 'lastseen'),
+      compress: readCompactModePref('ga', 'compress'),
+    },
+    pa: {
+      list: readCompactModePref('pa', 'list'),
+      visualize: readCompactModePref('pa', 'visualize'),
+      lastseen: readCompactModePref('pa', 'lastseen'),
+      compress: readCompactModePref('pa', 'compress'),
+    },
+  });
+  const setCompactModeForCurrentCategory = (mode: FocusCompactMode) => {
+    setCompactModeByCategory(prev => ({
+      ...prev,
+      [focusMode]: {
+        ...prev[focusMode],
+        [mode]: !prev[focusMode][mode],
+      },
+    }));
+  };
+  useEffect(() => {
+    Object.entries(compactModeByCategory.ga).forEach(([mode, enabled]) => {
+      setPref(`focusPanel.compactMode.ga.${mode}`, enabled ? '1' : '0');
+    });
+    Object.entries(compactModeByCategory.pa).forEach(([mode, enabled]) => {
+      setPref(`focusPanel.compactMode.pa.${mode}`, enabled ? '1' : '0');
+    });
+  }, [compactModeByCategory]);
   // Compress: hides entries whose live count badge reads "0" (#400).
   const [hideZeroCount, setHideZeroCount] = useState(false);
+  const [resetSignal, setResetSignal] = useState(0);
+  const resetFocusPanel = () => {
+    setFocusMode('ga');
+    setSelectedAddresses([]);
+    setHideZeroCount(false);
+    setCompactModeByCategory({
+      ga: { list: false, visualize: false, lastseen: false, compress: false },
+      pa: { list: false, visualize: false, lastseen: false, compress: false },
+    });
+    update({ targets: [], sources: [] });
+    setInternalListFlaggedAddresses([]);
+    setInternalVisualizationFlaggedAddresses([]);
+    setLastSeenFlagged(new Set());
+    setResetSignal(prev => prev + 1);
+    onResetFocusPanel?.();
+  };
   // The three row icons are real toggles (#406): each just flips a per-address
   // flag, kept here so it survives switching between the two tabs. They don't
   // navigate anywhere yet — that's future work.
   const [internalListFlaggedAddresses, setInternalListFlaggedAddresses] = useState<string[]>([]);
-  const listFlaggedSet = useMemo(() => new Set(controlledListFlaggedAddresses ?? internalListFlaggedAddresses), [controlledListFlaggedAddresses, internalListFlaggedAddresses]);
-  const [visualizeFlagged, setVisualizeFlagged] = useState<Set<string>>(new Set());
+  const effectiveListFlaggedAddresses = onListFlaggedAddressesChange ? internalListFlaggedAddresses : (controlledListFlaggedAddresses ?? internalListFlaggedAddresses);
+  const listFlaggedSet = useMemo(() => new Set(effectiveListFlaggedAddresses), [effectiveListFlaggedAddresses]);
+  const [internalVisualizationFlaggedAddresses, setInternalVisualizationFlaggedAddresses] = useState<string[]>([]);
+  const effectiveVisualizationFlaggedAddresses = onVisualizationFlaggedAddressesChange ? internalVisualizationFlaggedAddresses : (controlledVisualizationFlaggedAddresses ?? internalVisualizationFlaggedAddresses);
+  const visualizationFlaggedSet = useMemo(() => new Set(effectiveVisualizationFlaggedAddresses), [effectiveVisualizationFlaggedAddresses]);
   const [lastSeenFlagged, setLastSeenFlagged] = useState<Set<string>>(new Set());
   const [selectedAddresses, setSelectedAddresses] = useState<string[]>([]);
-  const syncMainPanelFlags = useMemo(() => {
-    if (activeMainPanel === 'list') return 'list';
-    if (activeMainPanel === 'visualizer') return 'visualize';
-    if (activeMainPanel === 'lastseen') return 'lastseen';
-    return null;
-  }, [activeMainPanel]);
-  // Tracks the pinned-address set as of the last sync run, so the effect below
-  // can react to pin/unpin *transitions* instead of overwriting the whole flag
-  // set (#409). Switching the active main panel should not be treated as a
-  // fresh pin transition and therefore should not rewrite the current flags.
-  const previousPinnedRef = useRef<Set<string>>(new Set());
+  const autoSyncFlag = autoFlag ?? (activeMainPanel === 'list'
+    ? 'list'
+    : activeMainPanel === 'visualizer'
+      ? 'visualize'
+      : activeMainPanel === 'lastseen'
+        ? 'lastseen'
+        : null);
   const toggleFlag = (setter: React.Dispatch<React.SetStateAction<Set<string>>>, address: string) => {
     setter(prev => {
       const next = new Set(prev);
@@ -784,29 +920,47 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
     });
   };
   const toggleListFlag = (address: string) => {
-    const next = new Set(controlledListFlaggedAddresses ?? internalListFlaggedAddresses);
+    const next = new Set(effectiveListFlaggedAddresses);
     if (next.has(address)) next.delete(address); else next.add(address);
     const nextAddresses = [...next];
+    setInternalListFlaggedAddresses(nextAddresses);
     if (onListFlaggedAddressesChange) {
       onListFlaggedAddressesChange(nextAddresses);
-    } else {
-      setInternalListFlaggedAddresses(nextAddresses);
     }
   };
   const toggleListFlagForSelection = (addresses: string[]) => {
-    const next = new Set(controlledListFlaggedAddresses ?? internalListFlaggedAddresses);
+    const next = new Set(effectiveListFlaggedAddresses);
     const allSelected = addresses.every(address => next.has(address));
     addresses.forEach(address => {
       if (allSelected) next.delete(address); else next.add(address);
     });
     const nextAddresses = [...next];
+    setInternalListFlaggedAddresses(nextAddresses);
     if (onListFlaggedAddressesChange) {
       onListFlaggedAddressesChange(nextAddresses);
-    } else {
-      setInternalListFlaggedAddresses(nextAddresses);
     }
   };
-  const toggleVisualizationFlagForSelection = (addresses: string[]) => toggleFlagForSelection(setVisualizeFlagged, addresses);
+  const toggleVisualizationFlag = (address: string) => {
+    const next = new Set(effectiveVisualizationFlaggedAddresses);
+    if (next.has(address)) next.delete(address); else next.add(address);
+    const nextAddresses = [...next];
+    setInternalVisualizationFlaggedAddresses(nextAddresses);
+    if (onVisualizationFlaggedAddressesChange) {
+      onVisualizationFlaggedAddressesChange(nextAddresses);
+    }
+  };
+  const toggleVisualizationFlagForSelection = (addresses: string[]) => {
+    const next = new Set(effectiveVisualizationFlaggedAddresses);
+    const allSelected = addresses.every(address => next.has(address));
+    addresses.forEach(address => {
+      if (allSelected) next.delete(address); else next.add(address);
+    });
+    const nextAddresses = [...next];
+    setInternalVisualizationFlaggedAddresses(nextAddresses);
+    if (onVisualizationFlaggedAddressesChange) {
+      onVisualizationFlaggedAddressesChange(nextAddresses);
+    }
+  };
   const toggleLastSeenFlagForSelection = (addresses: string[]) => toggleFlagForSelection(setLastSeenFlagged, addresses);
   const handleRowAction = (addresses: string[], action: ToggleAction) => {
     if (addresses.length === 0) return;
@@ -814,38 +968,46 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
     if (action === 'visualize') toggleVisualizationFlagForSelection(addresses);
     if (action === 'lastseen') toggleLastSeenFlagForSelection(addresses);
   };
-  useEffect(() => {
-    if (!syncMainPanelFlags) return;
-    const pinnedAddresses = Array.from(new Set([...activeFilters.targets, ...activeFilters.sources]));
-    // Only react to pin/unpin transitions (#409): recomputing the whole flag
-    // set from `pinnedAddresses` on every run would also erase flags a user
-    // just set manually on a row that isn't pinned.
-    const previousPinned = previousPinnedRef.current;
-    const newlyPinned = pinnedAddresses.filter(address => !previousPinned.has(address));
-    const newlyUnpinned = Array.from(previousPinned).filter(address => !pinnedAddresses.includes(address));
-    previousPinnedRef.current = new Set(pinnedAddresses);
-    if (newlyPinned.length === 0 && newlyUnpinned.length === 0) return;
 
-    if (syncMainPanelFlags === 'list') {
-      const next = new Set(controlledListFlaggedAddresses ?? internalListFlaggedAddresses);
-      newlyPinned.forEach(address => next.add(address));
-      newlyUnpinned.forEach(address => next.delete(address));
-      const nextAddresses = [...next];
-      if (onListFlaggedAddressesChange) {
-        onListFlaggedAddressesChange(nextAddresses);
-      } else {
-        setInternalListFlaggedAddresses(nextAddresses);
-      }
+  const syncAutoFlagForPinnedAddresses = (addresses: string[], isPinned: boolean, ctrlClick = false) => {
+    if (!autoSyncFlag) return;
+    const current = autoSyncFlag === 'list'
+      ? new Set(effectiveListFlaggedAddresses)
+      : autoSyncFlag === 'visualize'
+        ? new Set(effectiveVisualizationFlaggedAddresses)
+        : new Set(lastSeenFlagged);
+
+    if (ctrlClick && isPinned) {
+      addresses.forEach(address => current.add(address));
+    } else if (!ctrlClick && !isPinned) {
+      addresses.forEach(address => current.delete(address));
+    }
+
+    const nextAddresses = [...current];
+    if (autoSyncFlag === 'list') {
+      setInternalListFlaggedAddresses(nextAddresses);
+      onListFlaggedAddressesChange?.(nextAddresses);
       return;
     }
-    const setter = syncMainPanelFlags === 'visualize' ? setVisualizeFlagged : setLastSeenFlagged;
-    setter(prev => {
-      const next = new Set(prev);
-      newlyPinned.forEach(address => next.add(address));
-      newlyUnpinned.forEach(address => next.delete(address));
-      return next;
-    });
-  }, [activeFilters.targets, activeFilters.sources, syncMainPanelFlags, controlledListFlaggedAddresses, internalListFlaggedAddresses, onListFlaggedAddressesChange]);
+    if (autoSyncFlag === 'visualize') {
+      setInternalVisualizationFlaggedAddresses(nextAddresses);
+      onVisualizationFlaggedAddressesChange?.(nextAddresses);
+      return;
+    }
+    setLastSeenFlagged(current);
+  };
+
+  useEffect(() => {
+    if (controlledListFlaggedAddresses !== undefined) {
+      setInternalListFlaggedAddresses(controlledListFlaggedAddresses);
+    }
+  }, [controlledListFlaggedAddresses]);
+
+  useEffect(() => {
+    if (controlledVisualizationFlaggedAddresses !== undefined) {
+      setInternalVisualizationFlaggedAddresses(controlledVisualizationFlaggedAddresses);
+    }
+  }, [controlledVisualizationFlaggedAddresses]);
   // Source/target/DPT options come from the ETS project. Without one, those
   // filters are empty and searching them turns up nothing — surface why.
   const showNoProjectNotice = projectLoaded === false;
@@ -868,7 +1030,25 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
           <Search size={15} style={{ color: 'var(--accent-primary)' }} />
           <span style={{ fontWeight: 700, fontSize: '0.875rem' }}>Focus</span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+          <button
+            type="button"
+            onClick={resetFocusPanel}
+            title="Reset Focus panel"
+            style={{
+              border: '1px solid var(--border-color)',
+              background: 'transparent',
+              color: 'var(--text-dim)',
+              borderRadius: '4px',
+              padding: '0.25rem 0.5rem',
+              cursor: 'pointer',
+              fontSize: '0.7rem',
+              fontWeight: 600,
+            }}
+          >
+            Reset
+          </button>
+        </div>
       </div>
 
       {/* Mode tabs (styled like the Last Seen Values sidebar) */}
@@ -931,6 +1111,7 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
 
         {focusMode === 'ga' ? (
           <FocusAddressSection
+            key={`ga-${resetSignal}`}
             title="Group Addresses"
             entries={options.targets}
             selected={activeFilters.targets}
@@ -940,8 +1121,8 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
             hideZeroCount={hideZeroCount}
             selectionState={selectedAddresses}
             onSelectionChange={setSelectedAddresses}
-            listFlaggedAddresses={controlledListFlaggedAddresses ?? internalListFlaggedAddresses}
-            visualizeFlaggedAddresses={Array.from(visualizeFlagged)}
+            listFlaggedAddresses={effectiveListFlaggedAddresses}
+            visualizeFlaggedAddresses={effectiveVisualizationFlaggedAddresses}
             lastSeenFlaggedAddresses={Array.from(lastSeenFlagged)}
             bulkActions={{
               onToggleList: () => handleRowAction(selectedAddresses, 'list'),
@@ -949,6 +1130,10 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
               onToggleLastSeen: () => handleRowAction(selectedAddresses, 'lastseen'),
             }}
             showVisualizeAction
+            compactMode={compactModeByCategory.ga}
+            onCompactModeChange={setCompactModeForCurrentCategory}
+            onPinChangeAutoSync={syncAutoFlagForPinnedAddresses}
+            resetSignal={resetSignal}
             writeActionFor={writeEnabled ? (address, entry, checked, hovered) => (
               <SendToGaPopover
                 address={address}
@@ -971,12 +1156,12 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
                   }} />
                 </div>
                 <div data-action-column="visualize" style={{ gridColumn: 2, display: 'flex', alignItems: 'center' }}>
-                  <VisualizeButton active={visualizeFlagged.has(address)} visible={visualizeFlagged.has(address) || checked || hovered} onClick={event => {
+                  <VisualizeButton active={visualizationFlaggedSet.has(address)} visible={visualizationFlaggedSet.has(address) || checked || hovered} onClick={event => {
                     event.stopPropagation();
                     if (selectedAddresses.length > 1 && selectedAddresses.includes(address)) {
                       handleRowAction(selectedAddresses, 'visualize');
                     } else {
-                      toggleFlag(setVisualizeFlagged, address);
+                      toggleVisualizationFlag(address);
                     }
                   }} />
                 </div>
@@ -995,6 +1180,7 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
           />
         ) : (
           <FocusAddressSection
+            key={`pa-${resetSignal}`}
             title="Devices"
             entries={options.sources}
             selected={activeFilters.sources}
@@ -1004,8 +1190,8 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
             hideZeroCount={hideZeroCount}
             selectionState={selectedAddresses}
             onSelectionChange={setSelectedAddresses}
-            listFlaggedAddresses={controlledListFlaggedAddresses ?? internalListFlaggedAddresses}
-            visualizeFlaggedAddresses={Array.from(visualizeFlagged)}
+            listFlaggedAddresses={effectiveListFlaggedAddresses}
+            visualizeFlaggedAddresses={effectiveVisualizationFlaggedAddresses}
             lastSeenFlaggedAddresses={Array.from(lastSeenFlagged)}
             bulkActions={{
               onToggleList: () => handleRowAction(selectedAddresses, 'list'),
@@ -1013,6 +1199,10 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
               onToggleLastSeen: () => handleRowAction(selectedAddresses, 'lastseen'),
             }}
             showVisualizeAction
+            compactMode={compactModeByCategory.pa}
+            onCompactModeChange={setCompactModeForCurrentCategory}
+            onPinChangeAutoSync={syncAutoFlagForPinnedAddresses}
+            resetSignal={resetSignal}
             actionsFor={(address, _entry, checked, hovered) => (
               <>
                 <div data-action-column="list" style={{ gridColumn: 1, display: 'flex', alignItems: 'center' }}>
@@ -1026,12 +1216,12 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
                   }} />
                 </div>
                 <div data-action-column="visualize" style={{ gridColumn: 2, display: 'flex', alignItems: 'center' }}>
-                  <VisualizeButton active={visualizeFlagged.has(address)} visible={visualizeFlagged.has(address) || checked || hovered} onClick={event => {
+                  <VisualizeButton active={visualizationFlaggedSet.has(address)} visible={visualizationFlaggedSet.has(address) || checked || hovered} onClick={event => {
                     event.stopPropagation();
                     if (selectedAddresses.length > 1 && selectedAddresses.includes(address)) {
                       handleRowAction(selectedAddresses, 'visualize');
                     } else {
-                      toggleFlag(setVisualizeFlagged, address);
+                      toggleVisualizationFlag(address);
                     }
                   }} />
                 </div>

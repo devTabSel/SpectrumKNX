@@ -25,21 +25,27 @@ export interface WorkspaceState {
   tab: WorkspaceTab;
   view: WorkspaceView;
   filterOpen: boolean;
+  writeOpen: boolean;
   filters: ActiveFilters;
   /** Group addresses selected for visualization. */
   plot: string[];
   lastSeenAddresses: string[];
   lastSeenMode: 'ga' | 'pa';
+  focusListFlaggedAddresses: string[];
+  focusVisualizationFlaggedAddresses: string[];
 }
 
 export const DEFAULT_WORKSPACE: WorkspaceState = {
   tab: 'live',
   view: 'none',
   filterOpen: true,
+  writeOpen: false,
   filters: DEFAULT_FILTERS,
   plot: [],
   lastSeenAddresses: [],
   lastSeenMode: 'ga',
+  focusListFlaggedAddresses: [],
+  focusVisualizationFlaggedAddresses: [],
 };
 
 export const WORKSPACE_STORAGE_KEY = 'spectrum-knx-workspace';
@@ -96,6 +102,7 @@ function sanitize(p: Partial<WorkspaceState>): WorkspaceState {
     tab: TABS.includes(p.tab as WorkspaceTab) ? (p.tab as WorkspaceTab) : 'live',
     view: VIEWS.includes(p.view as WorkspaceView) ? (p.view as WorkspaceView) : 'none',
     filterOpen: typeof p.filterOpen === 'boolean' ? p.filterOpen : true,
+    writeOpen: typeof p.writeOpen === 'boolean' ? p.writeOpen : false,
     filters: {
       ...DEFAULT_FILTERS,
       sources: strings(f.sources),
@@ -111,6 +118,8 @@ function sanitize(p: Partial<WorkspaceState>): WorkspaceState {
     plot: strings(p.plot),
     lastSeenAddresses: strings(p.lastSeenAddresses),
     lastSeenMode: p.lastSeenMode === 'pa' ? 'pa' : 'ga',
+    focusListFlaggedAddresses: strings(p.focusListFlaggedAddresses),
+    focusVisualizationFlaggedAddresses: strings(p.focusVisualizationFlaggedAddresses),
   };
 }
 
@@ -124,6 +133,7 @@ export function buildMonitorSearch(state: WorkspaceState): string {
   if (state.tab !== 'live') p.set('tab', state.tab);
   if (state.view !== 'none') p.set('panel', state.view);
   if (!state.filterOpen) p.set('fp', '0');
+  if (state.writeOpen) p.set('wp', '1');
   const f = state.filters;
   if (f.sources.length > 0) p.set('src', f.sources.join(','));
   if (f.targets.length > 0) p.set('tgt', f.targets.join(','));
@@ -138,6 +148,8 @@ export function buildMonitorSearch(state: WorkspaceState): string {
   if (state.plot.length > 0) p.set('plot', state.plot.join(','));
   if (state.lastSeenAddresses.length > 0) p.set('ls', state.lastSeenAddresses.join(','));
   if (state.lastSeenMode !== 'ga') p.set('lsm', state.lastSeenMode);
+  if (state.focusListFlaggedAddresses.length > 0) p.set('fl', state.focusListFlaggedAddresses.join(','));
+  if (state.focusVisualizationFlaggedAddresses.length > 0) p.set('fv', state.focusVisualizationFlaggedAddresses.join(','));
   if ([...p.keys()].length === 0) return '';
   p.set('view', 'monitor');
   return p.toString();
@@ -153,6 +165,7 @@ export function parseMonitorSearch(search: string): WorkspaceState | null {
     tab: p.get('tab') as WorkspaceTab,
     view: p.get('panel') as WorkspaceView,
     filterOpen: p.get('fp') !== '0',
+    writeOpen: p.get('wp') === '1',
     filters: {
       ...DEFAULT_FILTERS,
       sources: list(p.get('src')),
@@ -168,6 +181,8 @@ export function parseMonitorSearch(search: string): WorkspaceState | null {
     plot: list(p.get('plot')),
     lastSeenAddresses: list(p.get('ls')),
     lastSeenMode: (p.get('lsm') as 'ga' | 'pa') ?? 'ga',
+    focusListFlaggedAddresses: list(p.get('fl')),
+    focusVisualizationFlaggedAddresses: list(p.get('fv')),
   });
 }
 

@@ -422,9 +422,13 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
   const setPaused = useCallback(
     (paused: boolean) => {
       pausedRef.current = paused;
-      setPausedCount(0);
-      // Resuming reveals everything ingested while frozen.
-      if (!paused) publish();
+      // Navigation and other temporary pauses must not wipe the buffered-new
+      // count; the queued messages stay hidden until the user explicitly resumes
+      // by resetting the pill or returning to the live edge.
+      if (!paused) {
+        setPausedCount(0);
+        publish();
+      }
     },
     [publish],
   );

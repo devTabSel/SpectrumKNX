@@ -56,6 +56,7 @@ import {
   type SourceColumnLineConfig,
   type SourceDeviceMetadata,
 } from './utils/sourceColumnConfig';
+import { buildDeviceGaMap, expandVisualizationTargets } from './utils/visualizationTargets';
 import {
   DEFAULT_FILTERS,
   dptKey,
@@ -260,7 +261,7 @@ function App() {
   );
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isFilterOpen, setIsFilterOpen] = useState(initialWorkspace?.filterOpen ?? false);
-  const [focusListFlaggedAddresses, setFocusListFlaggedAddresses] = useState<string[]>([]);
+  const [focusListFlaggedAddresses, setFocusListFlaggedAddresses] = useState<string[]>(initialWorkspace?.focusListFlaggedAddresses ?? []);
   const [focusPanelWidth, setFocusPanelWidth] = useState(() => {
     const stored = Number(getPref('focusPanelWidth'));
     if (!Number.isFinite(stored)) return DEFAULT_FOCUS_PANEL_WIDTH;
@@ -317,7 +318,7 @@ function App() {
   const [statusDevice, setStatusDevice] = useState<DeviceNode | null>(null);
   const [latestTelegram, setLatestTelegram] = useState<Telegram | null>(null);
   const [isDatabaseOpen, setIsDatabaseOpen] = useState(initialWorkspace?.view === 'database');
-  const [isSendOpen, setIsSendOpen] = useState(false);
+  const [isSendOpen, setIsSendOpen] = useState(initialWorkspace?.writeOpen ?? false);
   const [backendVersion, setBackendVersion] = useState<string>('loading...');
   const [projectStatus, setProjectStatus] = useState<{
     upload_feature_active: boolean;
@@ -349,6 +350,7 @@ function App() {
     readSourceColumnConfigPref()
   );
   const [sourceDeviceMetadata, setSourceDeviceMetadata] = useState<Record<string, SourceDeviceMetadata>>({});
+  const [buildingDeviceGaMap, setBuildingDeviceGaMap] = useState<Record<string, string[]>>({});
   const [rateMode, setRateMode] = useState<'s' | 'm' | 'h'>((getPref('rateMode') as 's' | 'm' | 'h') || 's');
   // Restore the browser telegram cache (and fill the gap from the backend) on
   // startup. On by default; when off the view starts empty and shows only live
@@ -359,6 +361,39 @@ function App() {
   const [selectedVisualizationTargets, setSelectedVisualizationTargets] = useState<string[]>(
     initialWorkspace?.plot ?? [],
   );
+  const [focusVisualizationFlaggedAddresses, setFocusVisualizationFlaggedAddresses] = useState<string[]>(initialWorkspace?.focusVisualizationFlaggedAddresses ?? []);
+  const [focusAutoFlag, setFocusAutoFlag] = useState<'list' | 'visualize' | 'lastseen' | null>(null);
+  const [sourceFocusOnly, setSourceFocusOnly] = useState<boolean>(() => getPref('telegramTable.sourceFocusOnly') === '1');
+  const [targetFocusOnly, setTargetFocusOnly] = useState<boolean>(() => getPref('telegramTable.targetFocusOnly') === '1');
+  const [focusFilterReset, setFocusFilterReset] = useState(false);
+
+  useEffect(() => {
+    if (activePanel === 'list') setFocusAutoFlag('list');
+    else if (activePanel === 'visualizer') setFocusAutoFlag('visualize');
+    else if (activePanel === 'lastseen') setFocusAutoFlag('lastseen');
+    else setFocusAutoFlag(null);
+  }, [activePanel]);
+
+  useEffect(() => {
+    setPref('telegramTable.sourceFocusOnly', sourceFocusOnly ? '1' : '0');
+  }, [sourceFocusOnly]);
+  useEffect(() => {
+    setPref('telegramTable.targetFocusOnly', targetFocusOnly ? '1' : '0');
+  }, [targetFocusOnly]);
+  useEffect(() => {
+    if (focusListFlaggedAddresses.length > 0 || focusVisualizationFlaggedAddresses.length > 0) {
+      setFocusFilterReset(false);
+    }
+  }, [focusListFlaggedAddresses.length, focusVisualizationFlaggedAddresses.length]);
+
+  const resetFocusPanel = useCallback(() => {
+    setFocusMode('ga');
+    setFocusListFlaggedAddresses([]);
+    setFocusVisualizationFlaggedAddresses([]);
+    setSourceFocusOnly(false);
+    setTargetFocusOnly(false);
+    setFocusFilterReset(true);
+  }, []);
 
   // ── Live State ──────────────────────────────────────────────────────────────
   // Buffer + IndexedDB cache + coverage bookkeeping (#246): cached telegrams
@@ -523,13 +558,30 @@ function App() {
   useEffect(() => {
     if (!projectStatus?.project_loaded) {
       setSourceDeviceMetadata({});
+      setBuildingDeviceGaMap({});
       return;
     }
     fetch(apiUrl('/api/building'))
       .then(r => r.json())
-      .then(data => setSourceDeviceMetadata(buildSourceDeviceMetadataMap(data.tree || [], data.unassigned_devices || [])))
-      .catch(() => setSourceDeviceMetadata({}));
+      .then(data => {
+        const tree = data.tree || [];
+        const unassignedDevices = data.unassigned_devices || [];
+        setSourceDeviceMetadata(buildSourceDeviceMetadataMap(tree, unassignedDevices));
+        setBuildingDeviceGaMap(buildDeviceGaMap(tree, unassignedDevices));
+      })
+      .catch(() => {
+        setSourceDeviceMetadata({});
+        setBuildingDeviceGaMap({});
+      });
   }, [projectStatus?.project_loaded]);
+
+  const visualizationTargets = useMemo(
+    () => Array.from(new Set([
+      ...selectedVisualizationTargets,
+      ...expandVisualizationTargets(focusVisualizationFlaggedAddresses, buildingDeviceGaMap),
+    ])),
+    [selectedVisualizationTargets, focusVisualizationFlaggedAddresses, buildingDeviceGaMap],
+  );
 
   // ── Persist workspace (#211) ────────────────────────────────────────────────
   const workspaceView: WorkspaceView = isDatabaseOpen
@@ -542,17 +594,20 @@ function App() {
       tab: activeTab,
       view: workspaceView,
       filterOpen: isFilterOpen,
+      writeOpen: isSendOpen,
       filters: activeFilters,
       plot: selectedVisualizationTargets,
       lastSeenAddresses,
       lastSeenMode,
+      focusListFlaggedAddresses,
+      focusVisualizationFlaggedAddresses,
     };
     const handle = setTimeout(() => {
       if (isEmbedded()) saveWorkspace(workspace);
       else applyWorkspaceUrl(workspace);
     }, 500);
     return () => clearTimeout(handle);
-  }, [activeTab, workspaceView, isFilterOpen, activeFilters, selectedVisualizationTargets, lastSeenAddresses, lastSeenMode]);
+  }, [activeTab, workspaceView, isFilterOpen, isSendOpen, activeFilters, selectedVisualizationTargets, lastSeenAddresses, lastSeenMode, focusListFlaggedAddresses, focusVisualizationFlaggedAddresses]);
 
   // ── Persist UI Session State (#341) ──────────────────────────────────────────
   useEffect(() => {
@@ -1032,46 +1087,52 @@ function App() {
                   </span>
                 </div>
 
+                <div
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '0.2rem',
+                    padding: '0.2rem', borderRadius: '8px',
+                    background: 'var(--bg-subtle)', border: '1px solid var(--border-color)',
+                  }}
+                >
+                  {/* Focus panel toggle: a slide-in pane shown at the side of
+                      every main panel, not a main panel itself. */}
+                  <button
+                    className="icon-button"
+                    onClick={() => setIsFilterOpen(o => !o)}
+                    title="Toggle Focus panel"
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      padding: '0.4rem', borderRadius: '6px',
+                      background: isFilterOpen ? 'rgba(99,102,241,0.15)' : 'transparent',
+                      color: isFilterOpen ? 'var(--accent-primary)' : 'var(--text-dim)',
+                    }}
+                  >
+                    <Search size={18} />
+                  </button>
+
+                  {serverConfig?.status?.write_enabled && (
+                    <button
+                      className="icon-button"
+                      onClick={() => setIsSendOpen(o => !o)}
+                      title="toggle Write panel"
+                      style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        padding: '0.4rem', borderRadius: '6px',
+                        background: isSendOpen ? 'rgba(99,102,241,0.15)' : 'transparent',
+                        color: isSendOpen ? 'var(--accent-primary)' : 'var(--text-dim)',
+                      }}
+                    >
+                      <Send size={18} />
+                    </button>
+                  )}
+                </div>
+
                 {/* Main-panel switch (#374): the five panels close back to the
                     list; the Building opener also clears any drilled-in device. */}
                 <PanelSwitch
                   active={activePanel}
                   onChange={(p) => { if (p !== 'building') setStatusDevice(null); setActivePanel(p); setIsDatabaseOpen(false); }}
                 />
-
-                {/* Focus panel toggle: a slide-in pane shown at the side of
-                    every main panel, not a main panel itself. */}
-                <button
-                  className="icon-button"
-                  onClick={() => setIsFilterOpen(o => !o)}
-                  title="Toggle Focus panel"
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    padding: '0.4rem', borderRadius: '8px',
-                    border: '1px solid var(--border-color)',
-                    background: 'var(--bg-subtle)',
-                    color: isFilterOpen ? 'var(--accent-primary)' : 'var(--text-dim)',
-                  }}
-                >
-                  <Search size={18} />
-                </button>
-
-                {serverConfig?.status?.write_enabled && (
-                  <button
-                    className="icon-button"
-                    onClick={() => setIsSendOpen(o => !o)}
-                    title="toggle Write panel"
-                    style={{
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      padding: '0.4rem', borderRadius: '8px',
-                      border: '1px solid var(--border-color)',
-                      background: 'var(--bg-subtle)',
-                      color: isSendOpen ? 'var(--accent-primary)' : 'var(--text-dim)',
-                    }}
-                  >
-                    <Send size={18} />
-                  </button>
-                )}
               </>
             )}
           </div>
@@ -1398,7 +1459,11 @@ function App() {
                     onFocusModeChange={setFocusMode}
                     listFlaggedAddresses={focusListFlaggedAddresses}
                     onListFlaggedAddressesChange={setFocusListFlaggedAddresses}
+                    visualizationFlaggedAddresses={focusVisualizationFlaggedAddresses}
+                    onVisualizationFlaggedAddressesChange={setFocusVisualizationFlaggedAddresses}
                     activeMainPanel={activePanel}
+                    autoFlag={focusAutoFlag}
+                    onResetFocusPanel={resetFocusPanel}
                   />
                 </div>
               </div>
@@ -1416,8 +1481,8 @@ function App() {
                     // The main filter applies to the telegram list only; the
                     // Visualization Targets list every GA in the buffer (#361).
                     telegrams={liveTelegrams}
-                    selectedTargets={selectedVisualizationTargets}
-                    onTargetsChange={setSelectedVisualizationTargets}
+                    selectedTargets={visualizationTargets}
+                    onTargetsChange={() => {}}
                     onClose={() => setActivePanel('list')}
                     zoomRange={zoomRange}
                     onZoomRangeChange={setZoomRange}
@@ -1525,6 +1590,16 @@ function App() {
                       setIsFilterOpen(true);
                     }}
                     focusListAddresses={focusListFlaggedAddresses}
+                    sourceFocusOnly={sourceFocusOnly}
+                    onSourceFocusOnlyChange={(next) => {
+                      setFocusFilterReset(false);
+                      setSourceFocusOnly(next);
+                    }}
+                    targetFocusOnly={targetFocusOnly}
+                    onTargetFocusOnlyChange={(next) => {
+                      setFocusFilterReset(false);
+                      setTargetFocusOnly(next);
+                    }}
                     allBufferSourceCount={liveAllBufferSourceCount}
                     bufferCapacity={loadLimit}
                     allBufferMessageCount={sortedLiveTelegrams.length}

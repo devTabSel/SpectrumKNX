@@ -15,6 +15,7 @@ const sampleWorkspace = (): WorkspaceState => ({
   tab: 'live',
   view: 'visualizer',
   filterOpen: false,
+  writeOpen: true,
   filters: {
     ...DEFAULT_FILTERS,
     sources: ['1.2.3'],
@@ -30,6 +31,8 @@ const sampleWorkspace = (): WorkspaceState => ({
   plot: ['0/1/2'],
   lastSeenAddresses: ['0/1/2'],
   lastSeenMode: 'pa',
+  focusListFlaggedAddresses: ['0/1/3'],
+  focusVisualizationFlaggedAddresses: ['0/1/4'],
 });
 
 beforeEach(() => {
@@ -88,16 +91,19 @@ describe('monitor URL encoding', () => {
     const ws = sampleWorkspace();
     const search = buildMonitorSearch(ws);
     expect(search).toContain('view=monitor');
+    expect(search).toContain('fl=');
+    expect(search).toContain('fv=');
     expect(parseMonitorSearch('?' + search)).toEqual(ws);
   });
 
   it('encodes only non-default fields', () => {
     const search = buildMonitorSearch({
       ...DEFAULT_WORKSPACE,
+      writeOpen: true,
       filters: { ...DEFAULT_FILTERS, targets: ['0/1/2'] },
     });
     const p = new URLSearchParams(search);
-    expect([...p.keys()].sort()).toEqual(['tgt', 'view']);
+    expect([...p.keys()].sort()).toEqual(['tgt', 'view', 'wp']);
   });
 
   it('returns null for non-monitor queries', () => {
@@ -112,6 +118,17 @@ describe('monitor URL encoding', () => {
       ...DEFAULT_WORKSPACE,
       filters: { ...DEFAULT_FILTERS, dpts: ['1.001'] },
     });
+  });
+
+  it('round-trips a write panel open state', () => {
+    const ws: WorkspaceState = {
+      ...DEFAULT_WORKSPACE,
+      writeOpen: true,
+    };
+    const search = buildMonitorSearch(ws);
+    expect(parseMonitorSearch('?' + search)?.writeOpen).toBe(true);
+    saveWorkspace(ws);
+    expect(loadWorkspace()?.writeOpen).toBe(true);
   });
 
   it('round-trips a disabled Time-Delta-Context, keeping the stored values (#318)', () => {

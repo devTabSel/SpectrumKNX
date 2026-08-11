@@ -315,6 +315,35 @@ test('delta-context rows still appear when quick filter excludes every matched m
   expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Context Only'))).toBe(true);
 });
 
+test('rows keep when they match the focus filter even if they do not match the quick filter', () => {
+  const focusTelegram = makeTelegram({
+    timestamp: '2024-01-01T10:00:03.000Z',
+    source_address: '1.1.1',
+    target_address: '9/9/9',
+    target_name: 'Focus Only',
+    raw_hex: '0x03',
+  });
+  const { container } = render(
+    <TelegramTable
+      telegrams={[focusTelegram, ...TELEGRAMS]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ target: { top: '', bottom: 'regex:^no-match$' } }}
+      focusListAddresses={['1.1.1']}
+    />,
+  );
+
+  expect(screen.getByTitle('Show only telegrams whose source is flagged for the Telegram List in the Focus panel')).toBeInTheDocument();
+  fireEvent.click(screen.getByTitle('Show only telegrams whose source is flagged for the Telegram List in the Focus panel'));
+  expect([...container.querySelectorAll('.log-row')].some(r => r.textContent?.includes('Focus Only'))).toBe(true);
+});
+
 test('context-only rows do not show a message-context flag control, even when marked', () => {
   const contextTelegram = makeTelegram({
     timestamp: '2024-01-01T10:00:00.000Z',
@@ -804,6 +833,32 @@ test('quick-filter divider is orange when at least one row is filtered out', () 
       quickPatterns={{ target: { top: '', bottom: 'küche' } }}
     />,
   );
+
+  expect(screen.getByTestId('quick-filter-divider')).toHaveStyle({ background: '#f59e0b' });
+});
+
+test('quick-filter divider is orange when the Focus panel filter removes rows', () => {
+  const telegrams = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', source_address: '1.1.1', target_address: '1/2/3', target_name: 'Licht Küche', raw_hex: '0x03' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', source_address: '2.2.2', target_address: '1/2/4', target_name: 'Licht Flur', raw_hex: '0x02' }),
+  ];
+
+  render(
+    <TelegramTable
+      telegrams={telegrams}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled={false}
+      focusListAddresses={['1.1.1']}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show only telegrams whose source is flagged for the Telegram List in the Focus panel'));
 
   expect(screen.getByTestId('quick-filter-divider')).toHaveStyle({ background: '#f59e0b' });
 });

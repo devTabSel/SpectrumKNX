@@ -1,5 +1,6 @@
 import { render, screen, fireEvent } from '@testing-library/react';
-import { expect, test, vi } from 'vitest';
+import { useState } from 'react';
+import { beforeEach, expect, test, vi } from 'vitest';
 import { FilterPanel } from './FilterPanel';
 import { DEFAULT_FILTERS, type FilterOptions } from '../types/filters';
 
@@ -7,6 +8,10 @@ const EMPTY_OPTIONS: FilterOptions = {
   sources: [], targets: [], types: ['Write', 'Read', 'Response'], dpts: [],
   ga_group_names: {}, pa_line_names: {},
 };
+
+beforeEach(() => {
+  localStorage.clear();
+});
 
 test('shows the no-project notice and CTA when no project is loaded', () => {
   const onUploadProject = vi.fn();
@@ -216,6 +221,49 @@ test('checking an item pins it to the top of its section, like the reference fil
   expect(addresses).toEqual(['0/1/2', '0/1/1']);
 });
 
+test('pinning an item while the visualization panel is active keeps the UI responsive', () => {
+  const onFiltersChange = vi.fn();
+  render(
+    <FilterPanel
+      options={MULTI_OPTIONS}
+      activeFilters={DEFAULT_FILTERS}
+      onFiltersChange={onFiltersChange}
+      mode="live"
+      projectLoaded={true}
+      activeMainPanel="visualizer"
+    />
+  );
+
+  expect(() => fireEvent.click(screen.getByRole('checkbox', { name: 'Pin 0/1/2' }))).not.toThrow();
+  expect(onFiltersChange).toHaveBeenCalledWith(expect.objectContaining({ targets: ['0/1/2'] }));
+});
+
+test('pinning an item while the visualization panel is active does not auto-sync the visualization flag without ctrl-click', () => {
+  const Harness = () => {
+    const [activeFilters, setActiveFilters] = useState(DEFAULT_FILTERS);
+    const [visualizationFlaggedAddresses, setVisualizationFlaggedAddresses] = useState<string[]>([]);
+    return (
+      <FilterPanel
+        options={MULTI_OPTIONS}
+        activeFilters={activeFilters}
+        onFiltersChange={setActiveFilters}
+        mode="live"
+        projectLoaded={true}
+        activeMainPanel="visualizer"
+        visualizationFlaggedAddresses={visualizationFlaggedAddresses}
+        onVisualizationFlaggedAddressesChange={setVisualizationFlaggedAddresses}
+      />
+    );
+  };
+
+  render(<Harness />);
+
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Pin 0/1/2' }));
+
+  expect(screen.queryByTitle('Unmark for Visualization')).not.toBeInTheDocument();
+  expect(screen.getAllByTitle('Mark for Visualization')).toHaveLength(2);
+});
+
 // ── Compress toggle: hides zero-count entries (#400) ─────────────────────────
 
 test('the compress toggle hides entries whose live count badge reads "0"', () => {
@@ -241,6 +289,44 @@ test('the compress toggle hides entries whose live count badge reads "0"', () =>
 
   fireEvent.click(screen.getByTitle('Show all entries'));
   expect(screen.getByText('0/1/2')).toBeInTheDocument();
+});
+
+test('the compress toggle keeps entries visible while the badge counts are still loading', () => {
+  render(
+    <FilterPanel
+      options={MULTI_OPTIONS}
+      activeFilters={DEFAULT_FILTERS}
+      onFiltersChange={() => {}}
+      mode="live"
+      projectLoaded={true}
+    />
+  );
+
+  expect(screen.getByText('0/1/1')).toBeInTheDocument();
+  expect(screen.getByText('0/1/2')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByTitle('Show only entries with a non-zero badge count'));
+
+  expect(screen.getByText('0/1/1')).toBeInTheDocument();
+  expect(screen.getByText('0/1/2')).toBeInTheDocument();
+});
+
+test('show only pinned entries also includes rows with any active flag', () => {
+  render(
+    <FilterPanel
+      options={MULTI_OPTIONS}
+      activeFilters={DEFAULT_FILTERS}
+      onFiltersChange={() => {}}
+      mode="live"
+      projectLoaded={true}
+      listFlaggedAddresses={['0/1/2']}
+    />
+  );
+
+  fireEvent.click(screen.getByTitle('Show only pinned entries'));
+
+  expect(screen.getByText('0/1/2')).toBeInTheDocument();
+  expect(screen.queryByText('0/1/1')).not.toBeInTheDocument();
 });
 
 test('the search field uses the same regex-style matcher as the quick filter', () => {
@@ -314,6 +400,27 @@ test('a controlled focusMode drives which tab is shown and notifies changes', ()
 });
 
 // ── Table-like item rows: checkbox/icons/badge span both rows (#404) ────────
+
+test('the Visualization icon updates the controlled visualizer address list', () => {
+  const onVisualizationFlaggedAddressesChange = vi.fn();
+  render(
+    <FilterPanel
+      options={GA_OPTIONS}
+      activeFilters={ACTIVE}
+      onFiltersChange={() => {}}
+      mode="live"
+      projectLoaded={true}
+      visualizationFlaggedAddresses={[]}
+      onVisualizationFlaggedAddressesChange={onVisualizationFlaggedAddressesChange}
+    />
+  );
+
+  fireEvent.click(screen.getByTitle('Mark for Visualization'));
+  expect(onVisualizationFlaggedAddressesChange).toHaveBeenCalledWith(['0/1/2']);
+
+  fireEvent.click(screen.getByTitle('Unmark for Visualization'));
+  expect(onVisualizationFlaggedAddressesChange).toHaveBeenLastCalledWith([]);
+});
 
 test('the Telegram List/Visualization/Last Seen icons are real toggles that flag the item without navigating (#406)', () => {
   const onShowInTelegramList = vi.fn();
@@ -466,6 +573,252 @@ test('compact filter buttons are disabled when no matching flagged item exists',
   expect(enabledListButton).toHaveAttribute('aria-pressed', 'false');
 });
 
+test('compact list mode shows flagged entries before unflagged ones without hiding the unflagged entries', () => {
+  render(
+    <FilterPanel
+      options={MULTI_OPTIONS}
+      activeFilters={ACTIVE}
+      onFiltersChange={() => {}}
+      mode="live"
+      projectLoaded={true}
+      writeEnabled={true}
+      listFlaggedAddresses={['0/1/2']}
+    />
+  );
+
+  fireEvent.click(screen.getByTitle('Show only entries marked for the Telegram List'));
+
+  const addresses = screen.getAllByText(/^0\/1\/\d$/).map(el => el.textContent);
+  expect(addresses).toEqual(['0/1/2', '0/1/1']);
+});
+
+test('compact mode toggles stay active after the focus panel is remounted', () => {
+  const Harness = () => {
+    const [visible, setVisible] = useState(true);
+    return (
+      <>
+        <button onClick={() => setVisible(v => !v)}>toggle panel</button>
+        {visible ? (
+          <FilterPanel
+            options={MULTI_OPTIONS}
+            activeFilters={ACTIVE}
+            onFiltersChange={() => {}}
+            mode="live"
+            projectLoaded={true}
+            writeEnabled={true}
+            listFlaggedAddresses={['0/1/2']}
+          />
+        ) : null}
+      </>
+    );
+  };
+
+  render(<Harness />);
+
+  fireEvent.click(screen.getByTitle('Show only entries marked for the Telegram List'));
+  fireEvent.click(screen.getByRole('button', { name: 'toggle panel' }));
+  fireEvent.click(screen.getByRole('button', { name: 'toggle panel' }));
+
+  expect(screen.getByTitle('Show all entries')).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('badge compact toggles in one category stay independent from each other', () => {
+  const multiOptions: FilterOptions = {
+    ...GA_OPTIONS,
+    targets: [
+      { address: '0/1/2', name: 'Licht Küche', main: 1, sub: 1 },
+      { address: '0/1/3', name: 'Licht Bad', main: 1, sub: 1 },
+    ],
+    sources: [
+      { address: '1.1.1', name: 'Steuergerät', main: 0, sub: 0 },
+      { address: '1.1.2', name: 'Fernsensor', main: 0, sub: 0 },
+    ],
+  };
+
+  render(
+    <FilterPanel
+      options={multiOptions}
+      activeFilters={ACTIVE}
+      onFiltersChange={() => {}}
+      mode="live"
+      projectLoaded={true}
+      writeEnabled={true}
+      listFlaggedAddresses={['0/1/2']}
+      visualizationFlaggedAddresses={['0/1/3']}
+    />
+  );
+
+  fireEvent.click(screen.getByTitle('Show only entries marked for the Telegram List'));
+  expect(screen.getAllByTitle('Show all entries')).toHaveLength(1);
+
+  fireEvent.click(screen.getByTitle('Show only entries marked for Visualization'));
+  expect(screen.getAllByTitle('Show all entries')).toHaveLength(2);
+});
+
+test('devices badge filter shows either all project devices or only source-backed ones', () => {
+  const deviceOptions: FilterOptions = {
+    ...GA_OPTIONS,
+    sources: [
+      { address: '1.1.1', name: 'Steuergerät', main: 0, sub: 0 },
+      { address: '1.1.2', name: 'Fernsensor', main: 0, sub: 0 },
+      { address: '1.1.3', name: 'Bewegung', main: 0, sub: 0 },
+    ],
+  };
+
+  render(
+    <FilterPanel
+      options={deviceOptions}
+      activeFilters={{ ...ACTIVE, sources: ['1.1.1', '1.1.2', '1.1.3'] }}
+      onFiltersChange={() => {}}
+      mode="live"
+      projectLoaded={true}
+      writeEnabled={true}
+      focusMode="pa"
+      counts={{
+        sources: { '1.1.1': 2, '1.1.3': 1 },
+        targets: {},
+        types: {},
+        directions: {},
+        dpts: {},
+      }}
+    />
+  );
+
+  expect(screen.getByText('1.1.1')).toBeInTheDocument();
+  expect(screen.getByText('1.1.2')).toBeInTheDocument();
+  expect(screen.getByText('1.1.3')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByTitle('Show only entries with a non-zero badge count'));
+
+  expect(screen.getByText('1.1.1')).toBeInTheDocument();
+  expect(screen.queryByText('1.1.2')).not.toBeInTheDocument();
+  expect(screen.getByText('1.1.3')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByTitle('Show all entries'));
+
+  expect(screen.getByText('1.1.1')).toBeInTheDocument();
+  expect(screen.getByText('1.1.2')).toBeInTheDocument();
+  expect(screen.getByText('1.1.3')).toBeInTheDocument();
+});
+
+test('reset restores the focus panel to its initial state and clears the telegram table focus filters', () => {
+  const onResetFocusPanel = vi.fn();
+  const Harness = () => {
+    const [listFlaggedAddresses, setListFlaggedAddresses] = useState<string[]>(['0/1/2']);
+    const [visualizationFlaggedAddresses, setVisualizationFlaggedAddresses] = useState<string[]>(['0/1/3']);
+    const [activeFilterTargets, setActiveFilterTargets] = useState<string[]>(['0/1/2']);
+    const [searchValue, setSearchValue] = useState('0/1/2');
+
+    return (
+      <>
+        <input aria-label="search-trigger" value={searchValue} onChange={e => setSearchValue(e.target.value)} />
+        <FilterPanel
+          options={MULTI_OPTIONS}
+          activeFilters={{ ...ACTIVE, targets: activeFilterTargets }}
+          onFiltersChange={() => {}}
+          mode="live"
+          projectLoaded={true}
+          writeEnabled={true}
+          listFlaggedAddresses={listFlaggedAddresses}
+          visualizationFlaggedAddresses={visualizationFlaggedAddresses}
+          onListFlaggedAddressesChange={setListFlaggedAddresses}
+          onVisualizationFlaggedAddressesChange={setVisualizationFlaggedAddresses}
+          onResetFocusPanel={() => {
+            setListFlaggedAddresses([]);
+            setVisualizationFlaggedAddresses([]);
+            setActiveFilterTargets([]);
+            setSearchValue('');
+            onResetFocusPanel();
+          }}
+        />
+      </>
+    );
+  };
+
+  render(<Harness />);
+
+  const searchInput = screen.getByPlaceholderText('Search group addresses...');
+  fireEvent.change(searchInput, { target: { value: '0/1/2' } });
+  expect(searchInput).toHaveValue('0/1/2');
+
+  fireEvent.click(screen.getByTitle('Reset Focus panel'));
+
+  expect(onResetFocusPanel).toHaveBeenCalledTimes(1);
+  expect(screen.getByPlaceholderText('Search group addresses...')).toHaveValue('');
+  expect(screen.getAllByTitle('Mark for the Telegram List')).toHaveLength(2);
+  expect(screen.getAllByTitle('Mark for Visualization')).toHaveLength(2);
+});
+
+test('reset clears the pinned focus selection so rows return to the unpinned initial state', () => {
+  const Harness = () => {
+    const [filters, setFilters] = useState({
+      ...ACTIVE,
+      targets: ['0/1/2'],
+    });
+
+    return (
+      <FilterPanel
+        options={GA_OPTIONS}
+        activeFilters={filters}
+        onFiltersChange={next => setFilters(prev => ({ ...prev, ...next }))}
+        mode="live"
+        projectLoaded={true}
+        writeEnabled={true}
+      />
+    );
+  };
+
+  render(<Harness />);
+
+  expect(screen.getByRole('checkbox', { name: 'Pin 0/1/2' })).toBeChecked();
+
+  fireEvent.click(screen.getByTitle('Reset Focus panel'));
+
+  expect(screen.getByRole('checkbox', { name: 'Pin 0/1/2' })).not.toBeChecked();
+});
+
+test('compact mode is tracked separately per focus category and survives category switches', () => {
+  const multiOptions: FilterOptions = {
+    ...GA_OPTIONS,
+    targets: [
+      { address: '0/1/2', name: 'Licht Küche', main: 1, sub: 1 },
+      { address: '0/1/3', name: 'Licht Bad', main: 1, sub: 1 },
+    ],
+    sources: [
+      { address: '1.1.1', name: 'Steuergerät', main: 0, sub: 0 },
+      { address: '1.1.2', name: 'Fernsensor', main: 0, sub: 0 },
+    ],
+  };
+
+  const Harness = () => {
+    const [focusMode, setFocusMode] = useState<'ga' | 'pa'>('ga');
+    return (
+      <FilterPanel
+        options={multiOptions}
+        activeFilters={ACTIVE}
+        onFiltersChange={() => {}}
+        mode="live"
+        projectLoaded={true}
+        writeEnabled={true}
+        focusMode={focusMode}
+        onFocusModeChange={setFocusMode}
+        listFlaggedAddresses={['0/1/2']}
+      />
+    );
+  };
+
+  render(<Harness />);
+
+  fireEvent.click(screen.getByTitle('Show only entries marked for the Telegram List'));
+  expect(screen.getByTitle('Show all entries')).toHaveAttribute('aria-pressed', 'true');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Devices' }));
+  expect(screen.getByTitle('No entries marked for the Telegram List')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Group Addresses' }));
+  expect(screen.getByTitle('Show all entries')).toHaveAttribute('aria-pressed', 'true');
+});
+
 test('ctrl-clicking rows and toggling an action applies it to every selected row', () => {
   const multiOptions: FilterOptions = {
     ...GA_OPTIONS,
@@ -614,8 +967,7 @@ test('switching the active main panel does not mutate the flag state of pinned r
     />
   );
 
-  expect(onListFlaggedAddressesChange).toHaveBeenCalledWith(['0/1/2']);
-  onListFlaggedAddressesChange.mockClear();
+  expect(onListFlaggedAddressesChange).not.toHaveBeenCalled();
 
   rerender(
     <FilterPanel
@@ -658,9 +1010,7 @@ test('manually toggling the Telegram List flag on a non-pinned row survives the 
     />
   );
 
-  // 0/1/2 is pinned, so the active-panel sync auto-flags it for the Telegram List.
-  expect(onListFlaggedAddressesChange).toHaveBeenCalledWith(['0/1/2']);
-  onListFlaggedAddressesChange.mockClear();
+  expect(onListFlaggedAddressesChange).not.toHaveBeenCalled();
 
   rerender(
     <FilterPanel
@@ -698,6 +1048,35 @@ test('manually toggling the Telegram List flag on a non-pinned row survives the 
   );
 
   expect(screen.getAllByTitle('Unmark for the Telegram List')).toHaveLength(2);
+});
+
+test('ctrl-clicking a checkbox does not auto-delete the active-panel flag for a pinned row', () => {
+  const onListFlaggedAddressesChange = vi.fn();
+  const multiOptions: FilterOptions = {
+    ...GA_OPTIONS,
+    targets: [
+      { address: '0/1/2', name: 'Licht Küche', main: 1, sub: 1 },
+      { address: '0/1/3', name: 'Licht Bad', main: 1, sub: 1 },
+    ],
+  };
+
+  render(
+    <FilterPanel
+      options={multiOptions}
+      activeFilters={{ ...ACTIVE, sources: [], targets: ['0/1/2'] }}
+      onFiltersChange={() => {}}
+      mode="live"
+      projectLoaded={true}
+      writeEnabled={true}
+      activeMainPanel="list"
+      listFlaggedAddresses={['0/1/2']}
+      onListFlaggedAddressesChange={onListFlaggedAddressesChange}
+    />
+  );
+
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Pin 0/1/2' }), { ctrlKey: true });
+
+  expect(onListFlaggedAddressesChange).toHaveBeenLastCalledWith(['0/1/2']);
 });
 
 // ── Only the checkbox pins/unpins a row (#405) ───────────────────────────────
