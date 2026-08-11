@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { Visualizer } from './Visualizer';
 
@@ -34,9 +34,7 @@ vi.mock('./EventDotsChart', () => ({
 }));
 
 vi.mock('./TimeBrush', () => ({
-  TimeBrush: ({ onToggleAutoFollowRight }: { onToggleAutoFollowRight?: () => void }) => (
-    <button onClick={onToggleAutoFollowRight}>toggle follow</button>
-  ),
+  TimeBrush: () => <div data-testid="time-brush" />,
 }));
 
 describe('Visualizer', () => {
@@ -49,7 +47,7 @@ describe('Visualizer', () => {
     vi.useRealTimers();
   });
 
-  it('passes the live NOW timestamp to the charts when right-side follow is enabled', () => {
+  it('shows the live NOW label in the header while auto-follow is active', () => {
     const now = Date.now();
     render(
       <Visualizer
@@ -57,11 +55,101 @@ describe('Visualizer', () => {
         selectedTargets={[]}
         onTargetsChange={() => {}}
         onClose={() => {}}
+        listFollow={true}
+        pendingLiveCount={0}
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'toggle follow' }));
+    const expected = new Date(now).toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
 
-    expect(screen.getByTestId('mixed-chart')).toHaveTextContent(String(now));
+    expect(screen.getByTitle('Current NOW time')).toHaveTextContent(expected);
+    expect(screen.getByTestId('mixed-chart')).toBeInTheDocument();
+  });
+
+  it('keeps the NOW label updating in real time while auto-follow stays active', () => {
+    render(
+      <Visualizer
+        telegrams={[]}
+        selectedTargets={[]}
+        onTargetsChange={() => {}}
+        onClose={() => {}}
+        listFollow={true}
+        pendingLiveCount={0}
+      />,
+    );
+
+    const initial = new Date(Date.now()).toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+    expect(screen.getByTitle('Current NOW time')).toHaveTextContent(initial);
+
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+
+    const next = new Date(Date.now()).toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+    expect(screen.getByTitle('Current NOW time')).toHaveTextContent(next);
+  });
+
+  it('does not pause auto-follow for a click on the empty panel background', () => {
+    const onListFollowChange = vi.fn();
+    render(
+      <Visualizer
+        telegrams={[]}
+        selectedTargets={[]}
+        onTargetsChange={() => {}}
+        onClose={() => {}}
+        listFollow={true}
+        onListFollowChange={onListFollowChange}
+        pendingLiveCount={0}
+      />,
+    );
+
+    const chartArea = screen.getByTestId('visualization-chart-area');
+    fireEvent.click(chartArea, { detail: 1 });
+
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+
+    expect(onListFollowChange).not.toHaveBeenCalled();
+  });
+
+  it('does not pause auto-follow for a double-click on the chart area', () => {
+    const onListFollowChange = vi.fn();
+    render(
+      <Visualizer
+        telegrams={[]}
+        selectedTargets={[]}
+        onTargetsChange={() => {}}
+        onClose={() => {}}
+        listFollow={true}
+        onListFollowChange={onListFollowChange}
+        pendingLiveCount={0}
+      />,
+    );
+
+    const chartArea = screen.getByTestId('visualization-chart-area');
+    fireEvent.click(chartArea, { detail: 1 });
+    fireEvent.click(chartArea, { detail: 2 });
+
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+
+    expect(onListFollowChange).not.toHaveBeenCalled();
   });
 });

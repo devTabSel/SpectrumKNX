@@ -1,6 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useWebSocket, type Telegram, type ConnectionStateEvent } from './hooks/useWebSocket';
-import { parseViewUrl } from './utils/viewUrl';
 import {
   isEmbedded,
   loadWorkspace,
@@ -25,10 +24,10 @@ import {
 import { compileQuickFilters, DEFAULT_QUICK_FILTER_COLUMN_ENABLED, type QuickFilterColumnEnabled } from './utils/quickFilter';
 import { expandWithDeltaContext } from './utils/deltaContextExpansion';
 import { anchorKey } from './utils/anchorKey';
-import { findNearestVisibleVisualizationTelegram } from './utils/visualizationNavigation';
+import { findPreviousVisibleVisualizationTelegrams } from './utils/visualizationNavigation';
 import { readSortConfigPref, writeScopedSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
 import { readVisibleColumnsPref, writeVisibleColumnsPref, readColumnOrderPref, writeColumnOrderPref } from './utils/tablePrefs';
-import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, Search, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
+import { LayoutDashboard, Settings, Download, Trash2, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
 import { useTheme } from './hooks/useTheme';
@@ -36,7 +35,6 @@ import { apiUrl, wsUrl } from './utils/basePath';
 import { HistoryLoader } from './components/HistoryLoader';
 import { useTelegramCache } from './hooks/useTelegramCache';
 import { rangeToMs } from './utils/historyLoad';
-import { HistorySearch } from './components/HistorySearch';
 import { ImportExportView } from './components/ImportExportView';
 import { Visualizer } from './components/Visualizer';
 import { FilterPanel } from './components/FilterPanel';
@@ -105,7 +103,6 @@ const NavDropdown = ({ activeTab, isSettingsOpen, isDatabaseOpen, onChange }: { 
 
   const items = [
     { id: 'live', label: 'Group Monitor', icon: LayoutDashboard },
-    { id: 'history', label: 'History Search', icon: History },
     { id: 'import', label: 'Import / Export', icon: FolderInput },
     { id: 'database', label: 'Database Maintenance', icon: Database },
     { id: 'settings', label: 'Settings', icon: Settings }
@@ -232,13 +229,10 @@ const EMPTY_KEY_SET: ReadonlySet<string> = new Set();
 
 function App() {
   const [theme, setTheme] = useTheme();
-  // A view shared via URL (#150) starts on the History tab with its filters applied.
-  const [initialView] = useState(() => parseViewUrl(window.location.search));
-  // Workspace restore (#211): a shared viz link wins; otherwise the HA
-  // dashboard iframe restores from localStorage and a regular tab from the
-  // view=monitor URL it maintains below.
+  // Workspace restore (#211): the HA dashboard iframe restores from
+  // localStorage and a regular tab from the view=monitor URL it maintains below.
   const [initialWorkspace] = useState(() =>
-    initialView ? null : isEmbedded() ? loadWorkspace() : parseMonitorSearch(window.location.search),
+    isEmbedded() ? loadWorkspace() : parseMonitorSearch(window.location.search),
   );
   const [initialUiState] = useState(() => loadUiState() ?? DEFAULT_UI_STATE);
   const [quickFilterOpen, setQuickFilterOpen] = useState(initialUiState.quickFilter.open);
@@ -258,8 +252,8 @@ function App() {
   // Master enable/disable of the filter set (#370): when off the list shows all
   // telegrams while activeFilters is preserved.
   const [filtersEnabled, setFiltersEnabled] = useState(initialUiState.filtersEnabled);
-  const [activeTab, setActiveTab] = useState<'live' | 'history' | 'import'>(
-    initialView ? 'history' : initialWorkspace?.tab ?? 'live',
+  const [activeTab, setActiveTab] = useState<'live' | 'import'>(
+    initialWorkspace?.tab ?? 'live',
   );
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isFilterOpen, setIsFilterOpen] = useState(initialWorkspace?.filterOpen ?? false);
@@ -320,7 +314,7 @@ function App() {
 
   const [isHistoryLoaderOpen, setIsHistoryLoaderOpen] = useState(false);
   const [selectedVisualizationTargets, setSelectedVisualizationTargets] = useState<string[]>(
-    initialView?.plot ?? initialWorkspace?.plot ?? [],
+    initialWorkspace?.plot ?? [],
   );
 
   // ── Live State ──────────────────────────────────────────────────────────────
@@ -337,7 +331,17 @@ function App() {
     loadError: historyLoadError,
     clear: clearTelegrams,
   } = useTelegramCache(loadLimit, restoreOnStartup);
-  const [isPaused, setIsPaused] = useState(false);
+
+  // ── Autofollow / buffering (#391) ────────────────────────────────────────────
+  // The table's own autofollow pause (navigating the list, or a row-area
+  // mousedown) now doubles as the buffer pause: while paused, live telegrams
+  // keep arriving but stay out of the visible buffer, and the table's
+  // autofollow pill shows how many are waiting. Resuming (pill click, or
+  // scrolling to the live edge when sorted by time) reveals them.
+  const handleListFollowChange = useCallback((follow: boolean) => {
+    setListFollow(follow);
+    setCachePaused(!follow);
+  }, [setCachePaused]);
 
   // ── Rate Estimation ─────────────────────────────────────────────────────────
   const [busRate, setBusRate] = useState(0);
@@ -346,7 +350,7 @@ function App() {
   // ── Filter State ────────────────────────────────────────────────────────────
   const [filterOptions, setFilterOptions] = useState<FilterOptions>(EMPTY_FILTER_OPTIONS);
   const [activeFilters, setActiveFilters] = useState<ActiveFilters>(
-    initialView?.filters ?? initialWorkspace?.filters ?? DEFAULT_FILTERS,
+    initialWorkspace?.filters ?? DEFAULT_FILTERS,
   );
 
   // The Visualization is independent of the main filter (#361): editing the
@@ -491,9 +495,6 @@ function App() {
       ? 'none'
       : activePanel;
   useEffect(() => {
-    // A shared viz link owns the URL for this session; don't overwrite it or
-    // persist its transient state as the workspace.
-    if (initialView) return;
     const workspace: WorkspaceState = {
       tab: activeTab,
       view: workspaceView,
@@ -508,7 +509,7 @@ function App() {
       else applyWorkspaceUrl(workspace);
     }, 500);
     return () => clearTimeout(handle);
-  }, [initialView, activeTab, workspaceView, isFilterOpen, activeFilters, selectedVisualizationTargets, lastSeenAddresses, lastSeenMode]);
+  }, [activeTab, workspaceView, isFilterOpen, activeFilters, selectedVisualizationTargets, lastSeenAddresses, lastSeenMode]);
 
   // ── Persist UI Session State (#341) ──────────────────────────────────────────
   useEffect(() => {
@@ -563,13 +564,6 @@ function App() {
     return () => clearInterval(interval);
   }, [rateMode]);
 
-  // ── Pause / Resume ──────────────────────────────────────────────────────────
-  const togglePause = () => {
-    const next = !isPaused;
-    setCachePaused(next);
-    setIsPaused(next);
-  };
-
   const toggleColumn = (col: string) =>
     setVisibleColumns(prev => ({ ...prev, [col]: !prev[col] }));
 
@@ -583,7 +577,7 @@ function App() {
     const saved = getPref(`lastMarkedKey:${LIVE_TABLE_INSTANCE_ID}`);
     return saved ? saved : null;
   });
-  const [visualNavigationTelegramKey, setVisualNavigationTelegramKey] = useState<string | null>(null);
+  const [visualNavigationTelegramKeys, setVisualNavigationTelegramKeys] = useState<string[]>([]);
 
   // ── Per-message Time-Delta-Context flags (#319) ─────────────────────────────
   // Same lifting rationale as marks; each flagged telegram always anchors a
@@ -791,10 +785,10 @@ function App() {
     const flags = f.deltaContextEnabled ? new Set(flaggedTelegramKeys) : EMPTY_KEY_SET;
     const forcedContextReasons = new Map<string, 'marked' | 'visualization'>();
     for (const key of markedTelegramKeys) forcedContextReasons.set(key, 'marked');
-    if (visualNavigationTelegramKey) forcedContextReasons.set(visualNavigationTelegramKey, 'visualization');
+    for (const key of visualNavigationTelegramKeys) forcedContextReasons.set(key, 'visualization');
 
     return expandWithDeltaContext(sortedLiveTelegrams, matches, anchorKey, flags, deltaBeforeMs, deltaAfterMs, forcedContextReasons);
-  }, [sortedLiveTelegrams, activeFilters, filtersEnabled, flaggedTelegramKeys, markedTelegramKeys, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled, visualNavigationTelegramKey]);
+  }, [sortedLiveTelegrams, activeFilters, filtersEnabled, flaggedTelegramKeys, markedTelegramKeys, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumnEnabled, visualNavigationTelegramKeys]);
   const filteredLiveTelegrams = deltaExpandedLive.items;
   // Keys of rows shown only as context, not a real filter match, mapped to
   // the reason (#343, #380).
@@ -802,15 +796,24 @@ function App() {
 
   const handleChartTimeClick = useCallback((ms: number, chartTargets?: string[]) => {
     const scopeTargets = chartTargets && chartTargets.length > 0 ? chartTargets : selectedVisualizationTargets;
-    const nearest = findNearestVisibleVisualizationTelegram(liveTelegrams, scopeTargets, ms);
-    if (!nearest) return;
-    const key = anchorKey(nearest);
-    setVisualNavigationTelegramKey(key);
-    setListFollow(false);
-    setListAnchorKey(key);
-    setCenterOnTelegramKey(key);
+    const previous = findPreviousVisibleVisualizationTelegrams(liveTelegrams, scopeTargets, ms);
+    if (previous.length === 0) return;
+
+    const navigationKeys = previous.map(item => anchorKey(item.telegram));
+    const nearest = previous.reduce((best, item) => {
+      const currentDiff = Math.abs(new Date(item.telegram.timestamp).getTime() - ms);
+      const bestDiff = best ? Math.abs(new Date(best.telegram.timestamp).getTime() - ms) : Infinity;
+      return currentDiff < bestDiff ? item : best;
+    }, null as (typeof previous)[number] | null);
+    const nearestKey = nearest ? anchorKey(nearest.telegram) : navigationKeys[0] ?? null;
+    if (!nearestKey) return;
+
+    setVisualNavigationTelegramKeys(navigationKeys);
+    handleListFollowChange(false);
+    setListAnchorKey(nearestKey);
+    setCenterOnTelegramKey(nearestKey);
     setActivePanel('list');
-  }, [liveTelegrams, selectedVisualizationTargets]);
+  }, [liveTelegrams, selectedVisualizationTargets, handleListFollowChange]);
 
   const liveQuickFilterFiltersOutAny = useMemo(() => {
     if (!quickFilterOpen || !quickFilterEnabled) return false;
@@ -901,7 +904,7 @@ function App() {
                 } else {
                   setIsSettingsOpen(false);
                   setIsDatabaseOpen(false);
-                  setActiveTab(id as 'live' | 'history' | 'import');
+                  setActiveTab(id as 'live' | 'import');
                 }
               }}
             />
@@ -955,22 +958,11 @@ function App() {
                     >
                       <Download size={15} />
                     </button>
-                    <button
-                      className="icon-button"
-                      onClick={togglePause}
-                      title={isPaused ? 'Resume' : 'Pause'}
-                      style={{ color: isPaused ? 'var(--accent-primary)' : 'var(--text-dim)', padding: '0.15rem' }}
-                    >
-                      {isPaused ? <Play size={15} fill="currentColor" /> : <Pause size={15} fill="currentColor" />}
-                    </button>
                     <span style={{ color: 'var(--text-main)', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: '0.3rem', minWidth: '12ch', justifyContent: 'flex-end', fontVariantNumeric: 'tabular-nums' }}>
                       <span>{activeFilterCount ? filteredLiveTelegrams.length : liveTelegrams.length}</span>
                       {bufferLimitWarning}
                       <span style={{ color: 'var(--text-dim)', fontWeight: 400, visibility: activeFilterCount ? 'visible' : 'hidden' }}> / {liveTelegrams.length}</span>
                     </span>
-                  </span>
-                  <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: '#fbbf24', minWidth: '10ch', visibility: isPaused ? 'visible' : 'hidden' }}>
-                    Paused: <span style={{ fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>{pausedCount}</span>
                   </span>
                   <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-dim)' }}>
                     WS: <span style={{ color: isConnected ? 'var(--success)' : 'var(--error)', fontWeight: 500 }}>{isConnected ? 'Active' : 'Offline'}</span>
@@ -1338,6 +1330,9 @@ function App() {
                     writeEnabled={serverConfig?.status?.write_enabled}
                     onFilterGAs={handleFilterGAs}
                     onLastSeen={handleQuickLastSeen}
+                    listFollow={listFollow}
+                    onListFollowChange={handleListFollowChange}
+                    pendingLiveCount={pausedCount}
                   />
                 ) : isLastSeenOpen ? (
                   <LastSeenOverlay
@@ -1414,7 +1409,8 @@ function App() {
                     onDeltaContextChange={handleDeltaContextChange}
                     onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
                     listFollow={listFollow}
-                    onListFollowChange={setListFollow}
+                    onListFollowChange={handleListFollowChange}
+                    pendingLiveCount={pausedCount}
                     listAnchorKey={listAnchorKey}
                     onListAnchorKeyChange={setListAnchorKey}
                     centerOnKey={centerOnTelegramKey}
@@ -1427,7 +1423,7 @@ function App() {
                     onFlaggedKeysChange={setFlaggedTelegramKeys}
                     contextKeys={contextTelegramKeys}
                     onVisualizationContextClear={(key) => {
-                      setVisualNavigationTelegramKey(prev => prev === key ? null : prev);
+                      setVisualNavigationTelegramKeys(prev => prev.filter(item => item !== key));
                     }}
                     allBufferSourceCount={liveAllBufferSourceCount}
                     bufferCapacity={loadLimit}
@@ -1449,22 +1445,8 @@ function App() {
               </div>
             </div>
           </div>
-        ) : activeTab === 'import' ? (
-          <ImportExportView />
         ) : (
-          <HistorySearch
-            loadLimit={loadLimit}
-            filterOptions={filterOptions}
-            activeFilters={activeFilters}
-            onFiltersChange={handleFiltersChange}
-            onOpenSettings={() => setIsSettingsOpen(true)}
-            projectLoaded={projectStatus?.project_loaded}
-            selectedVisualizationTargets={selectedVisualizationTargets}
-            onVisualizationTargetsChange={setSelectedVisualizationTargets}
-            sourceColumnLines={sourceColumnLines}
-            sourceDeviceMetadata={sourceDeviceMetadata}
-            initialView={initialView}
-          />
+          <ImportExportView />
         )}
       </main>
 
@@ -1478,7 +1460,6 @@ function App() {
             void loadRange(startMs, endMs);
           }}
           limit={loadLimit}
-          mode="monitor"
         />
       )}
 

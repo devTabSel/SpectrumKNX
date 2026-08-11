@@ -128,6 +128,68 @@ test('Ctrl/Cmd+Shift+click on a contextual row additively marks only non-context
   expect(marked(container)).toEqual([true, true, true, false, true]);
 });
 
+test('clicking a non-contextual row preserves contextual-added marks', () => {
+  const contextualKey = anchorKey(TELEGRAMS[2]);
+  const regularKey = anchorKey(TELEGRAMS[4]);
+  const onMarkedKeysChange = vi.fn();
+  const { container } = renderTable({
+    contextKeys: new Map([[contextualKey, 'marked' as const]]),
+    markedKeys: [contextualKey, regularKey],
+    lastMarkedKey: regularKey,
+    onMarkedKeysChange,
+  });
+
+  fireEvent.click(rows(container)[0]);
+
+  expect(onMarkedKeysChange).toHaveBeenCalledWith([contextualKey, anchorKey(TELEGRAMS[0])]);
+});
+
+test('plain click on a normal row always sets it as the latest marked row', () => {
+  const { container } = renderTable();
+
+  fireEvent.click(rows(container)[2]);
+
+  expect(rows(container)[2].classList.contains('latest')).toBe(true);
+});
+
+test('plain click on an already marked normal row keeps it as the sole regular mark', () => {
+  const { container } = renderTable();
+
+  fireEvent.click(rows(container)[1]);
+  fireEvent.click(rows(container)[1]);
+
+  expect(marked(container)).toEqual([false, true, false, false, false]);
+  expect(rows(container)[1].classList.contains('latest')).toBe(true);
+});
+
+test('ctrl-shift-click on a contextual-added row preserves non-contextual marks', () => {
+  const contextualKey = anchorKey(TELEGRAMS[2]);
+  const regularKey = anchorKey(TELEGRAMS[4]);
+  const { container } = renderTable({
+    contextKeys: new Map([[contextualKey, 'marked' as const]]),
+    markedKeys: [contextualKey, regularKey],
+    lastMarkedKey: regularKey,
+  });
+
+  fireEvent.click(rows(container)[2], { ctrlKey: true, shiftKey: true });
+
+  expect(rows(container)[4].classList.contains('marked')).toBe(true);
+});
+
+test('ctrl-click followed by ctrl-shift-click also works for contextual-added rows', () => {
+  const firstKey = anchorKey(TELEGRAMS[1]);
+  const secondKey = anchorKey(TELEGRAMS[3]);
+  const { container } = renderTable({
+    contextKeys: new Map([[firstKey, 'marked' as const], [secondKey, 'marked' as const]]),
+  });
+
+  fireEvent.click(rows(container)[1], { ctrlKey: true });
+  fireEvent.click(rows(container)[3], { ctrlKey: true, shiftKey: true });
+
+  expect(rows(container)[1].classList.contains('marked')).toBe(true);
+  expect(rows(container)[3].classList.contains('marked')).toBe(true);
+});
+
 test('clear-marks pill appears only when marked and removes every mark', () => {
   const { container } = renderTable();
   expect(screen.queryByTitle('Clear all marks')).not.toBeInTheDocument();
@@ -149,6 +211,17 @@ test('clicking a row still pauses live-following (#266) while marking it', () =>
   expect(marked(container)[0]).toBe(true);
 });
 
+test('clicking a normal row pauses live-following and marks it as latest', () => {
+  const onListFollowChange = vi.fn();
+  const { container } = renderTable({ listFollow: true, onListFollowChange });
+
+  fireEvent.click(rows(container)[2]);
+
+  expect(onListFollowChange).toHaveBeenCalledWith(false);
+  expect(rows(container)[2].classList.contains('marked')).toBe(true);
+  expect(rows(container)[2].classList.contains('latest')).toBe(true);
+});
+
 test('clear-context-marks pill appears with count and clears all context marks', () => {
   const onFlaggedKeysChange = vi.fn();
   renderTable({
@@ -157,8 +230,26 @@ test('clear-context-marks pill appears with count and clears all context marks',
   });
 
   const clearContextPill = screen.getByTitle('Clear all context marks');
-  expect(clearContextPill).toHaveTextContent('Clear 2 context marks');
+  const contextPill = clearContextPill.closest('.clear-context-marks-pill');
+  expect(contextPill).toHaveTextContent('2 context marks');
 
   fireEvent.click(clearContextPill);
   expect(onFlaggedKeysChange).toHaveBeenCalledWith([]);
+});
+
+test('clear-context-marks pill also appears for visualization-context rows', () => {
+  const onVisualizationContextClear = vi.fn();
+  renderTable({
+    contextKeys: new Map([['k1', 'visualization' as const], ['k2', 'visualization' as const]]),
+    onVisualizationContextClear,
+  });
+
+  const clearContextPill = screen.getByTitle('Clear all context marks');
+  const contextPill = clearContextPill.closest('.clear-context-marks-pill');
+  expect(contextPill).toHaveTextContent('2 context marks');
+
+  fireEvent.click(clearContextPill);
+  expect(onVisualizationContextClear).toHaveBeenCalledTimes(2);
+  expect(onVisualizationContextClear).toHaveBeenCalledWith('k1');
+  expect(onVisualizationContextClear).toHaveBeenCalledWith('k2');
 });

@@ -5,8 +5,6 @@
 // or being individually marked in another main panel (marks are lifted
 // app-wide, so a row marked from the Visualizer, Last Seen, etc. always stays
 // visible here too, independent of the delta-context window/toggle).
-// Shared by the live Group Monitor and History Search views so the algorithm
-// can't drift.
 
 interface Timestamped {
   timestamp: string;

@@ -5,6 +5,7 @@ import { makeTelegram } from '../test/telegramFactory';
 import type { Telegram } from '../hooks/useWebSocket';
 import { DEFAULT_FILTERS } from '../types/filters';
 import { anchorKey } from '../utils/anchorKey';
+import { seriesColor } from '../utils/seriesColors';
 
 // jsdom has no layout: give the virtualizer a viewport and rows a rect so it
 // renders items and the anchor logic finds rows.
@@ -112,7 +113,7 @@ test('clicking a row pauses live-following (#266)', () => {
   );
 
   // Anchored away from the live edge: the jump-to-live pill appears.
-  expect(screen.getByText(/1 new telegram/)).toBeInTheDocument();
+  expect(screen.getByText(/1 new/)).toBeInTheDocument();
 });
 
 test('live follow does not resume after a pause when the list changes', () => {
@@ -185,7 +186,7 @@ test('newest-on-bottom: clicking a row stays anchored while the full buffer evic
   );
 
   // The list stayed anchored rather than snapping to the (bottom) live edge.
-  expect(screen.getByText(/1 new telegram/)).toBeInTheDocument();
+  expect(screen.getByText(/1 new/)).toBeInTheDocument();
 });
 
 test('without a click the table keeps following the live edge', () => {
@@ -202,7 +203,7 @@ test('without a click the table keeps following the live edge', () => {
       onQuickVisualize={vi.fn()}
     />,
   );
-  expect(screen.queryByText(/new telegram/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/new/)).not.toBeInTheDocument();
 });
 
 test('a paused view does not auto-scroll when the list rerenders', () => {
@@ -436,7 +437,7 @@ test('delta-sort exclusive mode (#311): activates on click, pauses live-follow, 
       onListFollowChange={onListFollowChange}
     />,
   );
-  expect(screen.queryByText(/new telegram/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/new/)).not.toBeInTheDocument();
 
   // Clicking a real column header exits delta-sort and restores live-follow.
   fireEvent.click(screen.getByText('SOURCE').closest('button')!);
@@ -1315,7 +1316,9 @@ test('context rows: a "visualization" reason gets a green context bar and dedica
   const row = container.querySelector(`[data-akey="${key}"]`)! as HTMLElement;
   expect(row.classList.contains('context-visualization')).toBe(true);
   expect(row).toHaveAttribute('title', 'Navigation target from the visualization');
-  expect(row.style.boxShadow).toContain('#22c55e');
+  expect(row.style.boxShadow).toContain(seriesColor(rows[0].target_address));
+  expect(row.style.background).toContain('color-mix');
+  expect(row.style.background).toContain('var(--warning');
 });
 
 test('ctrl/cmd-click on a visualization-context row clears its context reason', () => {

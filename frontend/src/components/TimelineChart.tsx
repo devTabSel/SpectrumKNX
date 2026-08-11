@@ -6,6 +6,7 @@ import { LockOpen } from 'lucide-react';
 import type { ChartBucket } from '../hooks/useChartData';
 import { useThemeTick } from '../hooks/useTheme';
 import { computeSharedLeftGutter } from '../utils/chartGutter';
+import { seriesColor } from '../utils/seriesColors';
 import { spansMultipleDays, formatAxisTime, formatFullTime } from '../utils/timeFormat';
 import { isRightSideHoverActive, setRightSideHoverSource, subscribeRightSideHover } from '../utils/rightSideHoverSync';
 
@@ -27,11 +28,13 @@ interface TimelineChartProps {
   /** Shared left-axis gutter (#... ) so every chart's X-axis starts at the same
    * pixel column; falls back to this chart's own bucket when not provided. */
   leftGutter?: number;
+  /** Hide the right-side current-value band when no live NOW context is available. */
+  showCurrentValueBand?: boolean;
 }
 
 const syncCursor = uPlot.sync('knx-time-axis');
 
-export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, maxTime, showDots, autoFollow = false, onZoomRangeChange, onTimeClick, leftGutter: sharedLeftGutter, rightLabelTime }) => {
+export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, maxTime, showDots, autoFollow = false, onZoomRangeChange, onTimeClick, leftGutter: sharedLeftGutter, rightLabelTime, showCurrentValueBand = false }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const [width, setWidth] = useState(800);
@@ -84,6 +87,8 @@ export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, m
   const { series, timestamps } = bucket;
   const oldestBufferMs = timestamps.length > 0 ? timestamps[0] : null;
   const newestBufferMs = timestamps.length > 0 ? timestamps[timestamps.length - 1] : null;
+  const visibleLeftMs = minTime ?? oldestBufferMs;
+  const visibleRightMs = maxTime ?? newestBufferMs;
   const data: uPlot.AlignedData = [
     timestamps.map(t => t / 1000),
     ...series.map(s => s.data)
@@ -500,13 +505,32 @@ export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, m
                 }}
               >
                 <div style={{
-                  fontWeight: 400,
-                  color: 'var(--text-main)',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }} title={s.name}>
-                  {s.name}
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  minWidth: 0,
+                }}>
+                  <div
+                    data-testid={`timeline-series-dot-${sIdx}`}
+                    style={{
+                      width: '8px',
+                      height: '8px',
+                      borderRadius: '50%',
+                      background: seriesColor(s.address),
+                      flexShrink: 0,
+                      marginTop: '2px',
+                    }}
+                  />
+                  <div style={{
+                    fontWeight: 400,
+                    color: 'var(--text-main)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    minWidth: 0,
+                  }} title={s.name}>
+                    {s.name}
+                  </div>
                 </div>
                 <div
                   ref={el => { valueRefs.current[sIdx] = el; }}
@@ -523,49 +547,51 @@ export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, m
             );
           })}
         </div>
-        <div style={{
-          position: 'absolute',
-          left: `calc(100% - ${rightRulerPad}px + 14px)`,
-          top: `${plotTop + rowGap}px`,
-          width: `${Math.max(0, rightRulerPad - 18)}px`,
-          display: 'flex',
-          flexDirection: 'column',
-          pointerEvents: 'none',
-          zIndex: 10,
-        }}>
-          {series.map((s) => {
-            const lastVal = s.data[s.data.length - 1];
-            return (
-              <div
-                key={`right-${s.address}`}
-                style={{
-                  height: `${rowHeight}px`,
-                  marginBottom: `${rowGap}px`,
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                }}
-              >
+        {showCurrentValueBand && (
+          <div style={{
+            position: 'absolute',
+            left: `calc(100% - ${rightRulerPad}px + 14px)`,
+            top: `${plotTop + rowGap}px`,
+            width: `${Math.max(0, rightRulerPad - 18)}px`,
+            display: 'flex',
+            flexDirection: 'column',
+            pointerEvents: 'none',
+            zIndex: 10,
+          }}>
+            {series.map((s) => {
+              const lastVal = s.data[s.data.length - 1];
+              return (
                 <div
+                  key={`right-${s.address}`}
                   style={{
-                    width: '100%',
-                    height: `${barHeight}px`,
-                    marginTop: `${laneInnerPad}px`,
-                    background: lastVal === 1 ? '#22c55e' : lastVal === 0 ? '#ef4444' : 'transparent',
-                    border: lastVal === 1 || lastVal === 0 ? 'none' : '1px solid var(--border-color)',
-                    color: lastVal === 1 || lastVal === 0 ? '#ffffff' : 'var(--text-dim)',
-                    fontSize: '0.7rem',
-                    fontWeight: 400,
-                    textAlign: 'center',
-                    lineHeight: `${barHeight}px`,
+                    height: `${rowHeight}px`,
+                    marginBottom: `${rowGap}px`,
+                    display: 'flex',
+                    alignItems: 'flex-start',
                   }}
                 >
-                  {lastVal === 1 ? 'On' : lastVal === 0 ? 'Off' : '-'}
+                  <div
+                    style={{
+                      width: '100%',
+                      height: `${barHeight}px`,
+                      marginTop: `${laneInnerPad}px`,
+                      background: lastVal === 1 ? '#22c55e' : lastVal === 0 ? '#ef4444' : 'transparent',
+                      border: lastVal === 1 || lastVal === 0 ? 'none' : '1px solid var(--border-color)',
+                      color: lastVal === 1 || lastVal === 0 ? '#ffffff' : 'var(--text-dim)',
+                      fontSize: '0.7rem',
+                      fontWeight: 400,
+                      textAlign: 'center',
+                      lineHeight: `${barHeight}px`,
+                    }}
+                  >
+                    {lastVal === 1 ? 'On' : lastVal === 0 ? 'Off' : '-'}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
-        <div ref={containerRef} style={{ width: '100%', overflow: 'visible' }}>
+              );
+            })}
+          </div>
+        )}
+        <div ref={containerRef} data-chart-root style={{ width: '100%', overflow: 'visible' }}>
            {/* Re-fit to new data only while not zoomed (#340): keeps a new telegram
                visible instead of dropping off a frozen scale. When the user has
                zoomed, autoFollow is false so the range is preserved (#281). */}
@@ -574,7 +600,7 @@ export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, m
         {/* Plot bounds markers for the chart area. */}
         <div style={{ ...edgeLineStyle, left: `${LEFT_GUTTER}px` }} />
         <div style={{ ...edgeLineStyle, right: `${rightRulerPad}px` }} />
-        {oldestBufferMs != null && (
+        {visibleLeftMs != null && (
           <div
             style={{
               position: 'absolute',
@@ -590,12 +616,12 @@ export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, m
               pointerEvents: 'none',
               zIndex: 6,
             }}
-            title="Oldest telegram in buffer"
+            title="Oldest telegram in visible range"
           >
-            {formatFullTime(oldestBufferMs, multiDay)}
+            {formatFullTime(visibleLeftMs, multiDay)}
           </div>
         )}
-        {newestBufferMs != null && (
+        {visibleRightMs != null && (
           <div
             style={{
               position: 'absolute',
@@ -611,28 +637,9 @@ export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, m
               zIndex: 6,
               whiteSpace: 'nowrap',
             }}
-            title="Newest telegram in buffer"
+            title="Newest telegram in visible range"
           >
-            {formatFullTime(newestBufferMs, multiDay)}
-          </div>
-        )}
-        {rightLabelTime != null && (
-          <div
-            style={{
-              position: 'absolute',
-              right: '8px',
-              bottom: '24px',
-              fontSize: '0.68rem',
-              lineHeight: 1,
-              color: 'var(--accent-primary)',
-              fontVariantNumeric: 'tabular-nums',
-              pointerEvents: 'none',
-              zIndex: 6,
-              whiteSpace: 'nowrap',
-            }}
-            title="Current NOW time"
-          >
-            {formatFullTime(rightLabelTime, multiDay)}
+            {formatFullTime(visibleRightMs, multiDay)}
           </div>
         )}
       </div>

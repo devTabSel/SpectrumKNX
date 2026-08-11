@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, fireEvent } from '@testing-library/react';
 import { expect, test, vi } from 'vitest';
 import { TimeBrush } from './TimeBrush';
 
@@ -77,23 +77,4 @@ test('double-clicking a handle snaps that limit to min/max (#267)', () => {
 
   fireEvent.doubleClick(rightHandle);
   expect(onChangeMock).toHaveBeenLastCalledWith([initialVal[0], maxTime]);
-});
-
-test('renders right-side AutoFollow toggle and triggers callback', () => {
-  const onToggle = vi.fn();
-
-  render(
-    <TimeBrush
-      minTime={minTime}
-      maxTime={maxTime}
-      value={initialVal}
-      onChange={vi.fn()}
-      telegrams={[]}
-      autoFollowRight={false}
-      onToggleAutoFollowRight={onToggle}
-    />
-  );
-
-  fireEvent.click(screen.getByRole('button', { name: 'Enable auto-follow' }));
-  expect(onToggle).toHaveBeenCalledTimes(1);
 });

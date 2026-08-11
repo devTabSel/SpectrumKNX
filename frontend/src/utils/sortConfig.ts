@@ -101,8 +101,7 @@ const compareValues = (key: SortKey, a: Telegram, b: Telegram): number => {
 };
 
 /**
- * Sorts telegrams by a (possibly multi-level) config. Shared by the live
- * Group Monitor and History Search views so their comparators can't drift.
+ * Sorts telegrams by a (possibly multi-level) config.
  */
 export function sortTelegrams(items: Telegram[], config: SortConfig): Telegram[] {
   const levels = effectiveSortLevels(config);

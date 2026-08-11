@@ -129,13 +129,13 @@ describe('monitor URL encoding', () => {
 
 describe('applyWorkspaceUrl', () => {
   it('reflects a non-default workspace into the address bar', () => {
-    applyWorkspaceUrl({ ...DEFAULT_WORKSPACE, tab: 'history' });
+    applyWorkspaceUrl({ ...DEFAULT_WORKSPACE, tab: 'import' });
     expect(window.location.search).toContain('view=monitor');
-    expect(window.location.search).toContain('tab=history');
+    expect(window.location.search).toContain('tab=import');
   });
 
   it('clears the query again for a default workspace', () => {
-    applyWorkspaceUrl({ ...DEFAULT_WORKSPACE, tab: 'history' });
+    applyWorkspaceUrl({ ...DEFAULT_WORKSPACE, tab: 'import' });
     applyWorkspaceUrl(DEFAULT_WORKSPACE);
     expect(window.location.search).toBe('');
   });

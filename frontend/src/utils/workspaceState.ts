@@ -18,7 +18,7 @@ import { getBasePath } from './basePath';
  * and are deliberately not part of the workspace.
  */
 
-export type WorkspaceTab = 'live' | 'history' | 'import';
+export type WorkspaceTab = 'live' | 'import';
 export type WorkspaceView = 'none' | 'visualizer' | 'lastseen' | 'statistics' | 'building' | 'database';
 
 export interface WorkspaceState {
@@ -44,7 +44,7 @@ export const DEFAULT_WORKSPACE: WorkspaceState = {
 
 export const WORKSPACE_STORAGE_KEY = 'spectrum-knx-workspace';
 
-const TABS: WorkspaceTab[] = ['live', 'history', 'import'];
+const TABS: WorkspaceTab[] = ['live', 'import'];
 const VIEWS: WorkspaceView[] = ['none', 'visualizer', 'lastseen', 'statistics', 'building', 'database'];
 
 /**

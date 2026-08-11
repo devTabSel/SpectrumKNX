@@ -4,8 +4,10 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
 import { ChevronUp, ChevronDown, Filter, Search, LineChart, X, Clock, Circle, CircleDot } from 'lucide-react';
 import { type ActiveFilters } from '../types/filters';
+import { seriesColor } from '../utils/seriesColors';
 import { SendToGaPopover } from './SendToGaPopover';
 import { GotoTimeControl } from './GotoTimeControl';
+import { AutoFollowPill } from './AutoFollowPill';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
 import { anchorKey } from '../utils/anchorKey';
@@ -146,6 +148,10 @@ interface TelegramTableProps {
   // Lifted Follow / Anchor state (#203, #341)
   listFollow?: boolean;
   onListFollowChange?: (follow: boolean) => void;
+  /** Count of live telegrams buffered upstream while follow is paused (e.g.
+   * from the app's telegram cache), shown in the autofollow pill instead of
+   * the table's own edge-diff count so it works under any sort order. */
+  pendingLiveCount?: number;
   listAnchorKey?: string | null;
   onListAnchorKeyChange?: (key: string | null) => void;
   centerOnKey?: string | null;
@@ -382,6 +388,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   quickFilterFiltersOutAny,
   onDeltaContextChange,
   listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
+  pendingLiveCount,
   centerOnKey, onCenterOnKeyConsumed,
   markedKeys, onMarkedKeysChange, lastMarkedKey, onLastMarkedKeyChange,
   infoBarOpen, onInfoBarOpenChange,
@@ -691,6 +698,22 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const flaggedSet = useMemo(() => new Set(flaggedKeysList), [flaggedKeysList]);
   const lastFlaggedKeyRef = useRef<string | null>(null);
 
+  const visualizationContextKeys = useMemo(() => {
+    if (!contextKeys) return [] as string[];
+    return [...contextKeys.entries()]
+      .filter(([, reason]) => reason === 'visualization')
+      .map(([key]) => key);
+  }, [contextKeys]);
+
+  const clearContextMarks = useCallback(() => {
+    if (flaggedKeysList.length > 0) {
+      setFlaggedKeysList([]);
+    }
+    for (const key of visualizationContextKeys) {
+      onVisualizationContextClear?.(key);
+    }
+  }, [flaggedKeysList.length, onVisualizationContextClear, setFlaggedKeysList, visualizationContextKeys]);
+
   const quickMatches = useMemo(
     () => compileQuickFilters(currentPatterns, currentQuickColumnEnabled),
     [currentPatterns, currentQuickColumnEnabled],
@@ -776,6 +799,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const [deltaSortDirection, setDeltaSortDirection] = useState<'asc' | 'desc'>('desc');
   const [deltaFrozenRows, setDeltaFrozenRows] = useState<TelegramRow[] | null>(null);
   const [valueRowFilter, setValueRowFilter] = useState<'none' | 'marked' | 'flagged'>('none');
+  const [viewportVersion, setViewportVersion] = useState(0);
+  // Bumped to force a re-render so the marks-pill anchor visibility (computed
+  // from the live scroll position at render time) recomputes on scroll.
+  void viewportVersion;
   const applyFlaggedKeysList = useCallback((nextKeys: string[]) => {
     setFlaggedKeysList(nextKeys);
     if (valueRowFilter === 'flagged' && nextKeys.length === 0) {
@@ -931,6 +958,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     const range = e.shiftKey;
     const contextReason = contextKeys?.get(key);
     const clickedIsDeltaContext = isDeltaContextualKey(key);
+    const clickedIsMarkedContext = contextReason === 'marked';
+    const contextualMarkedKeys = markedKeysList.filter(rowKey => contextKeys?.get(rowKey) === 'marked');
+    const regularMarkedKeys = markedKeysList.filter(rowKey => contextKeys?.get(rowKey) !== 'marked');
     if (additive || range) {
       e.preventDefault();
       window.getSelection()?.removeAllRanges();
@@ -954,14 +984,29 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         rangeKeys = telegramRows
           .slice(lo, hi + 1)
           .map(r => anchorKey(r))
-          .filter(rowKey => !isDeltaContextualKey(rowKey));
+          .filter(rowKey => {
+            if (clickedIsMarkedContext) {
+              return contextKeys?.get(rowKey) === 'marked';
+            }
+            if (isDeltaContextualKey(rowKey)) return false;
+            return contextKeys?.get(rowKey) !== 'marked';
+          });
       }
       if (rangeKeys.length === 0) return;
-      nextKeys = additive ? [...new Set([...markedKeysList, ...rangeKeys])] : rangeKeys;
+      nextKeys = [...new Set([...regularMarkedKeys, ...contextualMarkedKeys, ...rangeKeys])];
     } else if (additive) {
-      nextKeys = markedSet.has(key) ? markedKeysList.filter(markedKey => markedKey !== key) : [...markedKeysList, key];
+      const currentCategoryKeys = clickedIsMarkedContext ? contextualMarkedKeys : regularMarkedKeys;
+      const toggledCategoryKeys = currentCategoryKeys.includes(key)
+        ? currentCategoryKeys.filter(markedKey => markedKey !== key)
+        : [...currentCategoryKeys, key];
+      nextKeys = clickedIsMarkedContext
+        ? [...new Set([...regularMarkedKeys, ...toggledCategoryKeys])]
+        : [...new Set([...contextualMarkedKeys, ...toggledCategoryKeys])];
     } else {
-      nextKeys = [key];
+      if (clickedIsMarkedContext) return;
+      nextKeys = markedSet.has(key)
+        ? [key]
+        : [...contextualMarkedKeys, key];
     }
 
     setMarkedKeysList(nextKeys);
@@ -973,16 +1018,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
   }, [contextKeys, isDeltaContextualKey, lastMarked, markedKeysList, markedSet, onVisualizationContextClear, rowMarksEnabled, setLastMarked, setMarkedKeysList, telegramRows, valueRowFilter]);
 
-  // Message-context flags follow the row-click semantics: plain click sets only
-  // this row, ctrl/cmd toggles just this row, shift sets a range, and
-  // ctrl/cmd+shift applies the range-begin flag state to the whole range.
+  // Message-context flags are a standalone toggle control: clicks affect only
+  // the flag state for the relevant rows and never trigger row-mark selection.
   const handleFlagClick = useCallback((e: React.MouseEvent, key: string) => {
-    if (!rowFlagsEnabled) return;
+    e.preventDefault();
     e.stopPropagation();
+    if (!rowFlagsEnabled) return;
     const additive = e.ctrlKey || e.metaKey;
     const range = e.shiftKey;
     if (additive || range) {
-      e.preventDefault();
       window.getSelection()?.removeAllRanges();
     }
     const el = parentRef.current;
@@ -995,20 +1039,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       atEdgeRef.current = false;
       onListFollowChange?.(false);
       onListAnchorKeyChange?.(key);
+      setFollowPaused(true);
       setNewSinceAnchor(0);
-    }
-    const currentIdx = telegramRows.findIndex(r => anchorKey(r) === key);
-    if (currentIdx !== -1) {
-      // Ctrl/cmd-click on the message-context control is additive-only for row
-      // marks: it may add a mark, but never remove an existing one.
-      if (additive && !range) {
-        if (!markedSet.has(key)) {
-          setMarkedKeysList([...markedKeysList, key]);
-        }
-        setLastMarked(key);
-      } else {
-        applyRowMarkSelection(e, key, currentIdx);
-      }
     }
 
     let nextKeys: string[];
@@ -1030,17 +1062,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       } else {
         nextKeys = [...new Set(rangeKeys)];
       }
-    } else if (additive) {
+    } else {
       nextKeys = flaggedSet.has(key)
         ? flaggedKeysList.filter(flaggedKey => flaggedKey !== key)
         : [...flaggedKeysList, key];
-    } else {
-      nextKeys = [key];
     }
 
     applyFlaggedKeysList(nextKeys);
     lastFlaggedKeyRef.current = key;
-  }, [applyFlaggedKeysList, applyRowMarkSelection, flaggedSet, flaggedKeysList, markedSet, markedKeysList, onListAnchorKeyChange, onListFollowChange, rowFlagsEnabled, setLastMarked, setMarkedKeysList, telegramRows]);
+  }, [applyFlaggedKeysList, flaggedSet, flaggedKeysList, onListAnchorKeyChange, onListFollowChange, rowFlagsEnabled, telegramRows]);
 
   // ── Global Time-Delta-Context tristate (#318, #319) ─────────────────────────
   // Reflects the per-message flags among the currently visible rows: none set,
@@ -1204,6 +1234,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     },
   });
 
+  useLayoutEffect(() => {
+    if (parentRef.current) {
+      setViewportVersion(v => v + 1);
+    }
+  }, [telegramRows.length, virtualizer.getTotalSize()]);
+
   // ── ETS-style scroll anchoring (#202) ───────────────────────────────────────
   // Auto-scroll only while the scrollbar sits at the live edge (top for
   // newest-first, bottom for oldest-first). Scrolled away, the viewed rows are
@@ -1223,6 +1259,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const liveEdge = primarySort?.direction === 'asc' ? 'bottom' : 'top';
   const atEdgeRef = useRef(listFollow ?? true);
   const [newSinceAnchor, setNewSinceAnchor] = useState(0);
+  // Reactive mirror of atEdgeRef so the autofollow pill can re-render on
+  // pause/resume regardless of sort (edge-diffing alone only works for the
+  // timestamp sort).
+  const [followPaused, setFollowPaused] = useState(() => !(listFollow ?? true));
   // The row pinned to the top of the viewport while anchored, and its offset
   // from the scroll-container top. Captured from user scrolls only.
   const anchorRef = useRef<{ key: string; offset: number } | null>(
@@ -1234,12 +1274,26 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // this offset accumulates those shifts and is added back to the index parity.
   const [stripeOffset, setStripeOffset] = useState(0);
 
-  // Sync props to refs
+  const pauseFollow = useCallback(() => {
+    atEdgeRef.current = false;
+    onListFollowChange?.(false);
+    setFollowPaused(true);
+  }, [onListFollowChange]);
+
+  const resumeFollow = useCallback(() => {
+    atEdgeRef.current = true;
+    onListFollowChange?.(true);
+    setNewSinceAnchor(0);
+    setFollowPaused(false);
+  }, [onListFollowChange]);
+
+  // Sync props to refs. A parent prop of false pauses follow; a prop of true
+  // does not override a user-triggered pause until the user explicitly resumes.
   useEffect(() => {
-    if (listFollow !== undefined) {
-      atEdgeRef.current = listFollow;
+    if (listFollow === false) {
+      pauseFollow();
     }
-  }, [listFollow]);
+  }, [listFollow, pauseFollow]);
 
   useEffect(() => {
     if (listAnchorKey !== undefined) {
@@ -1296,18 +1350,30 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const handleScroll = () => {
     // Ignore the scrolls our own compensation triggers.
     if (programmaticScrollRef.current) return;
-    const atEdge = checkAtEdge();
-    if (atEdge !== atEdgeRef.current) {
-      atEdgeRef.current = atEdge;
-      onListFollowChange?.(atEdge);
-    }
-    if (atEdge) {
-      setNewSinceAnchor(0);
-      anchorRef.current = null;
-      onListAnchorKeyChange?.(null);
+    if (isTimeSort) {
+      // A live edge exists: reaching it resumes follow automatically, moving
+      // away pauses it, mirroring the pre-unification behavior.
+      const atEdge = checkAtEdge();
+      if (atEdge !== atEdgeRef.current) {
+        if (atEdge) {
+          resumeFollow();
+        } else {
+          pauseFollow();
+        }
+      }
+      if (atEdge) {
+        anchorRef.current = null;
+        onListAnchorKeyChange?.(null);
+      } else {
+        captureAnchor();
+      }
     } else {
+      // No live edge outside the timestamp sort — any scroll is navigation;
+      // only an explicit pill click resumes (#391).
+      if (atEdgeRef.current) pauseFollow();
       captureAnchor();
     }
+    setViewportVersion(v => v + 1);
   };
 
   // Clicking a row (a) marks it (#310) and (b) pauses live-following just like
@@ -1317,12 +1383,17 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // marked/unmarked.
   const handleRowClick = (e: React.MouseEvent, key: string, index: number, isDeltaContextOnly: boolean) => {
     if (isDeltaContextOnly && !e.shiftKey) return;
+    const contextReason = contextKeys?.get(key);
+    const isPlainRowClick = !e.ctrlKey && !e.metaKey && !e.shiftKey;
+    const shouldSetLastMarked = isPlainRowClick && !isDeltaContextOnly && contextReason !== 'marked' && contextReason !== 'visualization';
     applyRowMarkSelection(e, key, index);
+    if (shouldSetLastMarked) {
+      setLastMarked(key);
+    }
 
-    // ── Pause live-following on an edge click (#266), unchanged ──
-    if (!isTimeSort || !atEdgeRef.current) return;
-    atEdgeRef.current = false;
-    onListFollowChange?.(false);
+    // ── Pause live-following on a row click, any sort (#391) ──
+    if (!atEdgeRef.current) return;
+    pauseFollow();
     captureAnchor();
   };
 
@@ -1332,11 +1403,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   };
 
   const jumpToLive = () => {
-    atEdgeRef.current = true;
-    onListFollowChange?.(true);
+    resumeFollow();
     anchorRef.current = null;
     onListAnchorKeyChange?.(null);
-    setNewSinceAnchor(0);
     scrollToEdge();
   };
 
@@ -1345,17 +1414,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // and the quick info bar's click-to-jump metrics (#282, #311).
   const gotoIndex = (idx: number) => {
     if (idx < 0 || idx >= telegramRows.length) return;
-    atEdgeRef.current = false;
-    onListFollowChange?.(false);
-    setNewSinceAnchor(0);
+    pauseFollow();
     markProgrammatic();
     virtualizer.scrollToIndex(idx, { align: 'center' });
     // Pin the row we land on once the virtualizer has settled the scroll (rows
     // are dynamically measured, so give it two frames before capturing).
     requestAnimationFrame(() => requestAnimationFrame(() => {
       captureAnchor();
-      atEdgeRef.current = false;
-      onListFollowChange?.(false);
+      pauseFollow();
     }));
   };
 
@@ -1421,14 +1487,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       // instead of treating the second one as a real sortConfig change.
       return () => { sortEffectMounted.current = false; };
     }
-    setNewSinceAnchor(0);
     setStripeOffset(0);
     anchorRef.current = null;
     onListAnchorKeyChange?.(null);
     const atEdge = checkAtEdge();
-    if (atEdge !== atEdgeRef.current) {
-      atEdgeRef.current = atEdge;
-      onListFollowChange?.(atEdge);
+    if (atEdge === false && atEdgeRef.current) {
+      pauseFollow();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effectiveSortConfig]);
@@ -1439,9 +1503,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     if (restoredRef.current || telegramRows.length === 0) return;
     restoredRef.current = true;
 
-    if (atEdgeRef.current) {
-      scrollToEdge();
-    } else if (listAnchorKey) {
+    if (!atEdgeRef.current) return;
+    if (listAnchorKey) {
       const idx = telegramRows.findIndex(t => anchorKey(t) === listAnchorKey);
       if (idx !== -1) {
         markProgrammatic();
@@ -1469,6 +1532,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
     atEdgeRef.current = false;
     onListFollowChange?.(false);
+    setFollowPaused(true);
     setNewSinceAnchor(0);
     markProgrammatic();
     virtualizer.scrollToIndex(idx, { align: 'center' });
@@ -1524,7 +1588,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
 
     setNewSinceAnchor(n => n + added);
-    pinAnchor();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [telegramRows]);
 
@@ -2535,43 +2598,154 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           below the header, not over it. */}
       <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-      {/* Jump-to-live pill — shown while anchored away from the edge (#202) */}
-      {isTimeSort && newSinceAnchor > 0 && (
-        <button
+      {/* Jump-to-live / autofollow pill — shown while paused, in any sort order (#391) */}
+      {(pendingLiveCount !== undefined ? (followPaused && !deltaSortActive) : isTimeSort) && (
+        <AutoFollowPill
+          count={pendingLiveCount ?? newSinceAnchor}
           onClick={jumpToLive}
-          className="jump-to-live-pill"
           style={{
             position: 'absolute', left: '50%', transform: 'translateX(-50%)',
             [liveEdge]: '1rem', zIndex: 20,
           }}
-          title="Jump back to the live edge"
-        >
-          {liveEdge === 'top' ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-          {newSinceAnchor.toLocaleString()} new telegram{newSinceAnchor === 1 ? '' : 's'}
-        </button>
+        />
       )}
 
       {/* Clear marks/context-marks pills — shown while entries exist (#310, #319) */}
-      {((rowMarksEnabled && markedKeysList.length > 0) || (rowFlagsEnabled && flaggedKeysList.length > 0)) && (
+      {((rowMarksEnabled && markedKeysList.length > 0) || (rowFlagsEnabled && (flaggedKeysList.length > 0 || visualizationContextKeys.length > 0))) && (
         <div style={{ position: 'absolute', right: '1rem', top: '0.75rem', zIndex: 20, display: 'flex', flexDirection: 'column', gap: '0.35rem', alignItems: 'flex-end' }}>
-          {rowMarksEnabled && markedKeysList.length > 0 && (
-            <button
-              onClick={clearMarks}
-              className="clear-marks-pill"
-              title="Clear all marks"
-            >
-              <X size={13} /> Clear {markedKeysList.length} mark{markedKeysList.length === 1 ? '' : 's'}
-            </button>
-          )}
-          {rowFlagsEnabled && flaggedKeysList.length > 0 && (
-            <button
-              onClick={() => applyFlaggedKeysList([])}
-              className="clear-context-marks-pill"
-              title="Clear all context marks"
-            >
-              <X size={13} /> Clear {flaggedKeysList.length} context mark{flaggedKeysList.length === 1 ? '' : 's'}
-            </button>
-          )}
+          {rowMarksEnabled && markedKeysList.length > 0 && (() => {
+            const virtualItems = virtualizer.getVirtualItems();
+            const scrollTop = parentRef.current?.scrollTop ?? 0;
+            const viewportHeight = parentRef.current?.clientHeight ?? 0;
+            const scrollBottom = scrollTop + viewportHeight;
+            const firstVisibleVirtual =
+              virtualItems.find(v => v.start >= scrollTop && (v.start + v.size) <= scrollBottom)
+              ?? virtualItems.find(v => (v.start + v.size) > scrollTop)
+              ?? virtualItems[0];
+            const firstVisibleRowIndex = firstVisibleVirtual?.index ?? -1;
+            const lastVisibleRowIndex = virtualItems.at(-1)?.index ?? firstVisibleRowIndex;
+            const markedRowIndices = telegramRows.reduce<number[]>((acc, row, index) => {
+              if (markedSet.has(anchorKey(row))) acc.push(index);
+              return acc;
+            }, []);
+            const aboveVisible = markedRowIndices.filter(index => index < firstVisibleRowIndex).at(-1);
+            const belowVisible = markedRowIndices.find(index => index > lastVisibleRowIndex);
+            return (
+              <div className="clear-marks-pill" title="Marked rows">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    clearMarks();
+                  }}
+                  className="clear-marks-pill-clear"
+                  title="Clear all marks"
+                  aria-label="Clear all marks"
+                >
+                  <X size={13} />
+                </button>
+                <span>{markedKeysList.length} mark{markedKeysList.length === 1 ? '' : 's'}</span>
+                {aboveVisible !== undefined && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      gotoIndex(aboveVisible);
+                    }}
+                    className="clear-marks-pill-anchor"
+                    title="Jump to the nearest marked row above the visible area"
+                    aria-label="Jump to marked row above"
+                  >
+                    <ChevronUp size={12} />
+                  </button>
+                )}
+                {belowVisible !== undefined && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      gotoIndex(belowVisible);
+                    }}
+                    className="clear-marks-pill-anchor"
+                    title="Jump to the nearest marked row below the visible area"
+                    aria-label="Jump to marked row below"
+                  >
+                    <ChevronDown size={12} />
+                  </button>
+                )}
+              </div>
+            );
+          })()}
+          {rowFlagsEnabled && (flaggedKeysList.length > 0 || visualizationContextKeys.length > 0) && (() => {
+            const virtualItems = virtualizer.getVirtualItems();
+            const scrollTop = parentRef.current?.scrollTop ?? 0;
+            const viewportHeight = parentRef.current?.clientHeight ?? 0;
+            const scrollBottom = scrollTop + viewportHeight;
+            const firstVisibleVirtual =
+              virtualItems.find(v => v.start >= scrollTop && (v.start + v.size) <= scrollBottom)
+              ?? virtualItems.find(v => (v.start + v.size) > scrollTop)
+              ?? virtualItems[0];
+            const firstVisibleRowIndex = firstVisibleVirtual?.index ?? -1;
+            const lastVisibleRowIndex = virtualItems.at(-1)?.index ?? firstVisibleRowIndex;
+            const contextAnchorRowIndices = telegramRows.reduce<number[]>((acc, row, index) => {
+              const key = anchorKey(row);
+              if (flaggedSet.has(key) || contextKeys?.get(key) === 'visualization') acc.push(index);
+              return acc;
+            }, []);
+            const aboveVisible = contextAnchorRowIndices.filter(index => index < firstVisibleRowIndex).at(-1);
+            const belowVisible = contextAnchorRowIndices.find(index => index > lastVisibleRowIndex);
+            return (
+              <div className="clear-context-marks-pill" title="Context marks">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    clearContextMarks();
+                  }}
+                  className="clear-marks-pill-clear"
+                  title="Clear all context marks"
+                  aria-label="Clear all context marks"
+                >
+                  <X size={13} />
+                </button>
+                <span>{flaggedKeysList.length + visualizationContextKeys.length} context mark{flaggedKeysList.length + visualizationContextKeys.length === 1 ? '' : 's'}</span>
+                {aboveVisible !== undefined && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      gotoIndex(aboveVisible);
+                    }}
+                    className="clear-marks-pill-anchor"
+                    title="Jump to the nearest context-marked row above the visible area"
+                    aria-label="Jump to context-marked row above"
+                  >
+                    <ChevronUp size={12} />
+                  </button>
+                )}
+                {belowVisible !== undefined && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      gotoIndex(belowVisible);
+                    }}
+                    className="clear-marks-pill-anchor"
+                    title="Jump to the nearest context-marked row below the visible area"
+                    aria-label="Jump to context-marked row below"
+                  >
+                    <ChevronDown size={12} />
+                  </button>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -2579,6 +2753,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       <div
         ref={parentRef}
         onScroll={handleScroll}
+        onClick={(e) => {
+          if (e.target === e.currentTarget) {
+            if (atEdgeRef.current) {
+              pauseFollow();
+              captureAnchor();
+            }
+          }
+        }}
         // overflow-anchor off: we compensate scrollTop manually on prepend (#202),
         // so the browser's native anchoring must not also move the viewport.
         style={{ flex: 1, overflowY: 'auto', position: 'relative', overflowAnchor: 'none' }}
@@ -2623,12 +2805,17 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               const isDeltaContextOnly = contextReason === 'delta' && !marked;
               const contextBarColor = hasContext
                 ? (contextReason === 'delta'
-                    ? 'var(--warning, #f59e0b)'
+                    ? 'color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent)'
                     : contextReason === 'marked'
-                    ? 'var(--accent-primary)'
-                    : contextReason === 'visualization'
-                      ? '#22c55e'
-                      : undefined)
+                      ? (latest
+                        ? 'color-mix(in srgb, var(--accent-primary) 60%, transparent)'
+                        : 'color-mix(in srgb, var(--accent-primary) 40%, transparent)')
+                      : contextReason === 'visualization'
+                        ? seriesColor(t.target_address)
+                        : undefined)
+                : undefined;
+              const contextualBackgroundColor = isContext
+                ? 'color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent)'
                 : undefined;
               const flagged = flaggedSet.has(key);
               return (
@@ -2636,6 +2823,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   key={virtualRow.key}
                   data-index={virtualRow.index}
                   data-akey={key}
+                  onMouseDown={(e) => {
+                    if (e.button !== 0) return;
+                    const target = e.target as HTMLElement;
+                    const isInsideControl = target.closest('button, input, select, textarea, [role="button"], [data-row-control]');
+                    if (isInsideControl) return;
+                    if (!atEdgeRef.current) return;
+                    pauseFollow();
+                    captureAnchor();
+                  }}
                   onClick={(e) => handleRowClick(e, key, virtualRow.index, isDeltaContextOnly)}
                   ref={virtualizer.measureElement}
                   style={{
@@ -2649,15 +2845,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     fontSize: '0.8125rem',
                     // Marked rows get an accent wash that overrides the zebra
                     // stripe; the latest click is washed more strongly.
-                    // Context-only rows get a distinct (warning-hued) wash
-                    // instead, so they read apart from real matches.
+                    // Context-only rows always use the warning-hued wash so they
+                    // read as contextual additions instead of ordinary matches.
                     // color-mix adapts to the theme's accent/warning colors.
-                    background: latest
-                      ? 'color-mix(in srgb, var(--accent-primary) 34%, transparent)'
-                      : marked
-                        ? 'color-mix(in srgb, var(--accent-primary) 16%, transparent)'
-                        : isContext
-                          ? 'color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent)'
+                    background: isContext
+                      ? contextualBackgroundColor
+                      : latest
+                        ? 'color-mix(in srgb, var(--accent-primary) 34%, transparent)'
+                        : marked
+                          ? 'color-mix(in srgb, var(--accent-primary) 16%, transparent)'
                           : (virtualRow.index + stripeOffset) % 2 === 0 ? 'var(--bg-subtle)' : 'transparent',
                     // A thin vertical bar tags context rows forced by marks.
                     boxShadow: contextBarColor ? `inset 3px 0 0 0 ${contextBarColor}` : undefined,
@@ -2686,7 +2882,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                         title={flagged
                           ? 'Always show context around this message — click to unflag (ctrl/cmd-click to apply to all marked rows)'
                           : 'Always show context around this message, regardless of the active filters (ctrl/cmd-click to apply to all marked rows)'}
-                        onClick={e => handleFlagClick(e, key)}
+                        onClick={e => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          handleFlagClick(e, key);
+                        }}
                       >
                         {flagged ? <CircleDot size={12} /> : <Circle size={12} />}
                       </button>
@@ -2780,29 +2980,8 @@ style.textContent = `
     color: var(--accent-primary);
   }
 
-  .jump-to-live-pill {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    padding: 0.35rem 0.85rem;
-    border: 1px solid var(--accent-primary);
-    border-radius: 999px;
-    background: var(--accent-primary);
-    color: white;
-    font-size: 0.75rem;
-    font-weight: 600;
-    cursor: pointer;
-    box-shadow: var(--shadow-lg);
-    transition: transform 0.15s, filter 0.15s;
-  }
-
-  .jump-to-live-pill:hover {
-    filter: brightness(1.08);
-    transform: translateX(-50%) scale(1.03);
-  }
-
   .clear-marks-pill {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 0.3rem;
     padding: 0.3rem 0.7rem;
@@ -2812,7 +2991,6 @@ style.textContent = `
     color: var(--text-dim);
     font-size: 0.72rem;
     font-weight: 600;
-    cursor: pointer;
     box-shadow: var(--shadow-lg);
     transition: color 0.15s, border-color 0.15s;
   }
@@ -2822,8 +3000,26 @@ style.textContent = `
     border-color: var(--accent-primary);
   }
 
+  .clear-marks-pill-clear,
+  .clear-marks-pill-anchor {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    padding: 0;
+    margin: 0;
+  }
+
+  .clear-marks-pill-clear:hover,
+  .clear-marks-pill-anchor:hover {
+    color: var(--accent-primary);
+  }
+
   .clear-context-marks-pill {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 0.3rem;
     padding: 0.3rem 0.7rem;
@@ -2833,7 +3029,6 @@ style.textContent = `
     color: var(--text-dim);
     font-size: 0.72rem;
     font-weight: 600;
-    cursor: pointer;
     box-shadow: var(--shadow-lg);
     transition: color 0.15s, border-color 0.15s;
   }

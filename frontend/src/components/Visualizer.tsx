@@ -6,13 +6,14 @@ import { MixedChart } from './MixedChart';
 import { TimelineChart } from './TimelineChart';
 import { EventDotsChart } from './EventDotsChart';
 import { TimeBrush } from './TimeBrush';
+import { AutoFollowPill } from './AutoFollowPill';
 import { Download, Link2, Check, X, LineChart, CircleDot } from 'lucide-react';
 import { getPref, setPref } from '../utils/prefs';
 import { clearSeriesHidden } from '../utils/legendVisibility';
 import { expandDegenerateRange } from '../utils/timeRange';
 import { splitLockedBuckets } from '../utils/chartLock';
 import { computeSharedLeftGutter } from '../utils/chartGutter';
-import { spansMultipleDays } from '../utils/timeFormat';
+import { formatFullTime, spansMultipleDays } from '../utils/timeFormat';
 
 interface VisualizerProps {
   telegrams: Telegram[];
@@ -32,14 +33,24 @@ interface VisualizerProps {
   writeEnabled?: boolean;
   onFilterGAs?: (addresses: string[]) => void;
   onLastSeen?: (address: string | string[], mode: 'ga' | 'pa') => void;
+
+  // Shared buffer-pause state (#391): the same autofollow pause driving the
+  // telegram list's live buffer, so pausing on either main panel is reflected
+  // on both — one buffer, one pause state, one pill.
+  listFollow?: boolean;
+  onListFollowChange?: (follow: boolean) => void;
+  /** Telegrams buffered upstream while paused, shown in the autofollow pill. */
+  pendingLiveCount?: number;
 }
 
 export const Visualizer: React.FC<VisualizerProps> = ({
   telegrams, selectedTargets, onTargetsChange, onClose, getShareLink, embed = false,
   zoomRange, onZoomRangeChange, onTimeClick, writeEnabled, onFilterGAs, onLastSeen,
+  listFollow, onListFollowChange, pendingLiveCount,
 }) => {
 
   const chartWrapperRef = useRef<HTMLDivElement>(null);
+  const pendingSingleClickRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
 
   // Datatype chosen per group address for GAs with no DPT in the project, so
   // their raw payloads can be decoded and plotted (#315). Persisted so the
@@ -126,11 +137,17 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   const [edgePinned, setEdgePinned] = useState<{ left: boolean; right: boolean }>({ left: false, right: false });
   const [liveNowMs, setLiveNowMs] = useState(() => Date.now());
 
+  // Whether this view is currently following live data: the shared buffer's
+  // pause state when provided (#391, one buffer/pause/pill for every main
+  // panel), otherwise this instance's own edge-pin for standalone use (e.g.
+  // the embed view, which has no shared buffer to bind to).
+  const isFollowing = listFollow !== undefined ? listFollow : edgePinned.right;
+
   useEffect(() => {
-    if (!edgePinned.right) return;
+    if (!isFollowing) return;
     const id = window.setInterval(() => setLiveNowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [edgePinned.right]);
+  }, [isFollowing]);
 
   const applyZoomRange = (next: [number, number] | null, pinOverride?: { left: boolean; right: boolean }) => {
     setInternalZoomRange(next);
@@ -164,18 +181,77 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     return activeRange[1];
   }, [activeRange, edgePinned.right, liveNowMs]);
 
-  const toggleRightAutoFollow = () => {
+  const pauseAutoFollow = () => {
     if (minTime === null || maxTime === null) return;
-    if (edgePinned.right) {
-      const frozenRange: [number, number] = [activeRange[0], activeRange[1]];
-      applyZoomRange(frozenRange, { left: edgePinned.left, right: false });
-      return;
-    }
+    const frozenRange: [number, number] = [activeRange[0], activeRange[1]];
+    applyZoomRange(frozenRange, { left: edgePinned.left, right: false });
+    onListFollowChange?.(false);
+  };
 
+  const resumeAutoFollow = () => {
+    if (minTime === null || maxTime === null) return;
     const nextRange: [number, number] = [activeRange[0], maxTime];
     const eps = Math.max(1000, (maxTime - minTime) * 0.005);
     applyZoomRange(nextRange, { left: nextRange[0] <= minTime + eps, right: true });
+    onListFollowChange?.(true);
   };
+
+  const toggleRightAutoFollow = () => {
+    if (isFollowing) pauseAutoFollow(); else resumeAutoFollow();
+  };
+
+  // An external pause (e.g. triggered from the telegram list) freezes this
+  // view too — the buffer's pause state is a single source of truth shared by
+  // every main panel. Resuming is always user-triggered, never implied by the
+  // prop flipping back to true (mirrors the telegram list's sticky pause).
+  useEffect(() => {
+    if (listFollow === false && edgePinned.right) {
+      const frozenRange: [number, number] = [activeRange[0], activeRange[1]];
+      applyZoomRange(frozenRange, { left: edgePinned.left, right: false });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listFollow]);
+
+  // A single click anywhere in a chart pauses autofollow, mirroring the
+  // telegram list's row-area pause behavior, while a double-click is left
+  // alone so it can keep the zoom reset path intact.
+  const clearPendingSingleClick = () => {
+    if (pendingSingleClickRef.current != null) {
+      window.clearTimeout(pendingSingleClickRef.current);
+      pendingSingleClickRef.current = null;
+    }
+  };
+
+  const handleChartAreaClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isFollowing) return;
+    const target = e.target as HTMLElement | null;
+    const clickedOnChart = !!target?.closest('[data-chart-root]');
+    if (!clickedOnChart) return;
+
+    if (e.detail === 2) {
+      clearPendingSingleClick();
+      return;
+    }
+    if (e.detail !== 1) return;
+
+    clearPendingSingleClick();
+    pendingSingleClickRef.current = window.setTimeout(() => {
+      pendingSingleClickRef.current = null;
+      pauseAutoFollow();
+    }, 220);
+  };
+
+  // Telegrams that arrived after the right edge was frozen, used only when no
+  // shared buffer count is provided (standalone use).
+  const pendingSinceFreeze = useMemo(() => {
+    if (edgePinned.right) return 0;
+    const frozenEdge = activeRange[1];
+    let count = 0;
+    for (const t of telegrams) {
+      if (new Date(t.timestamp).getTime() > frozenEdge) count++;
+    }
+    return count;
+  }, [telegrams, edgePinned.right, activeRange]);
 
   // Align the TimeBrush ruler's ends with each chart's left gutter / right
   // ruler-pad vertical marker lines (#358): both sit CHART_OUTER_INSET (the
@@ -233,15 +309,41 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   // instead of dropping off a frozen scale (#340). A user zoom freezes it (#281).
   const autoFollow = currentZoomRange === null;
 
-  const rightLabelTime = edgePinned.right ? liveNowMs : null;
+  const rightLabelTime = isFollowing ? liveNowMs : null;
+  const showCurrentValueBand = isFollowing;
+
+  const hasTimeDomain = minTime !== null && maxTime !== null && minTime < maxTime;
+  const showAutoFollowPill = hasTimeDomain && !isFollowing;
+  const showNowLabel = hasTimeDomain && isFollowing && rightLabelTime != null;
+  const nowLabel = showNowLabel && (
+    <div
+      title="Current NOW time"
+      style={{
+        padding: '0.35rem 0.7rem',
+        border: '1px solid var(--border-color)',
+        borderRadius: '999px',
+        background: 'var(--bg-inset)',
+        color: 'var(--accent-primary)',
+        fontSize: '0.75rem',
+        fontWeight: 600,
+        fontVariantNumeric: 'tabular-nums',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {formatFullTime(rightLabelTime, spansMultipleDays(activeRange[0], chartMaxTime))}
+    </div>
+  );
+  const autoFollowPill = showAutoFollowPill && (
+    <AutoFollowPill count={pendingLiveCount ?? pendingSinceFreeze} onClick={toggleRightAutoFollow} />
+  );
 
   const charts = (
-    <div ref={chartWrapperRef} style={{ flex: 1, overflowY: 'auto', padding: embed ? '0.75rem' : '1.5rem' }}>
+    <div ref={chartWrapperRef} data-testid="visualization-chart-area" onClick={handleChartAreaClick} style={{ flex: 1, overflowY: 'auto', padding: embed ? '0.75rem' : '1.5rem' }}>
       {displayBuckets.map(g => (
         g.bucket.isBinary ? (
-          <TimelineChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime} showDots={showDots} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))} leftGutter={sharedLeftGutter} rightLabelTime={rightLabelTime} />
+          <TimelineChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime} showDots={showDots} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))} leftGutter={sharedLeftGutter} rightLabelTime={rightLabelTime} showCurrentValueBand={showCurrentValueBand} />
         ) : g.bucket.isEvents ? (
-          <EventDotsChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))} leftGutter={sharedLeftGutter} rightLabelTime={rightLabelTime} />
+          <EventDotsChart key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime} autoFollow={autoFollow} onZoomRangeChange={setZoomRange} onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))} leftGutter={sharedLeftGutter} rightLabelTime={rightLabelTime} showCurrentValueBand={showCurrentValueBand} />
         ) : (
           <MixedChart
             key={g.key} bucket={g.bucket} minTime={activeRange[0]} maxTime={chartMaxTime}
@@ -253,6 +355,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
             onTimeClick={(ms) => onTimeClick?.(ms, g.bucket.series.map(s => s.address))}
             leftGutter={sharedLeftGutter}
             rightLabelTime={rightLabelTime}
+            showCurrentValueBand={showCurrentValueBand}
           />
         )
       ))}
@@ -270,19 +373,20 @@ export const Visualizer: React.FC<VisualizerProps> = ({
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg-subtle)' }}>
         {/* Pan & zoom timeline sits above the charts it controls (#308). */}
         {minTime !== null && maxTime !== null && minTime < maxTime && (
-          <TimeBrush
-            minTime={minTime}
-            maxTime={maxTime}
-            value={activeRange}
-            onChange={setZoomRange}
-            telegrams={telegrams}
-            leftPinned={edgePinned.left}
-            rightPinned={edgePinned.right}
-            leftInset={rulerLeftInset}
-            rightInset={rulerRightInset}
-            autoFollowRight={edgePinned.right}
-            onToggleAutoFollowRight={toggleRightAutoFollow}
-          />
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem' }}>
+            <div style={{ flex: 1 }}>
+              <TimeBrush
+                minTime={minTime}
+                maxTime={maxTime}
+                value={activeRange}
+                onChange={setZoomRange}
+                telegrams={telegrams}
+                leftPinned={edgePinned.left}
+                rightPinned={edgePinned.right}
+              />
+            </div>
+            {autoFollowPill}
+          </div>
         )}
         {charts}
       </div>
@@ -329,59 +433,76 @@ export const Visualizer: React.FC<VisualizerProps> = ({
                     rightPinned={edgePinned.right}
                     leftInset={rulerLeftInset}
                     rightInset={rulerRightInset}
-                    autoFollowRight={edgePinned.right}
-                    onToggleAutoFollowRight={toggleRightAutoFollow}
                     compact
                   />
                 </div>
               </div>
             )}
 
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.9rem', position: 'relative', zIndex: 2, pointerEvents: 'none' }}>
-              <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: '0.45rem', pointerEvents: 'auto' }}>
-                <h3 style={{ fontSize: '1rem', margin: 0 }}>Visualization</h3>
+            <div style={{ display: 'flex', alignItems: 'center', position: 'relative', zIndex: 2, pointerEvents: 'none' }}>
+              {/* Left zone spans the row's start up to the ruler's left edge, so
+                  the buttons can center in the gap after the title (#391). */}
+              <div style={{ width: Math.max(0, rulerLeftInset - chartsWrapperPad), flexShrink: 0, display: 'flex', alignItems: 'center', pointerEvents: 'auto' }}>
+                <h3 style={{ fontSize: '1rem', margin: 0, flexShrink: 0 }}>Visualization</h3>
                 {buckets.length > 0 && (
+                  <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.3rem' }}>
+                  <button
+                    onClick={toggleStepped}
+                    title={stepped ? 'Switch to linear interpolation' : 'Switch to stepped (hold-last-value)'}
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      width: 24, height: 24, border: '1px solid var(--border-color)',
+                      borderRadius: '6px', cursor: 'pointer',
+                      background: stepped ? 'rgba(99,102,241,0.15)' : 'transparent',
+                      color: stepped ? 'var(--accent-primary)' : 'var(--text-dim)',
+                    }}
+                  >
+                    <LineChart size={12} />
+                  </button>
+                  <button
+                    onClick={toggleDots}
+                    title={showDots ? 'Hide telegram dots' : 'Show a dot at each telegram (makes cyclic repeats visible)'}
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      width: 24, height: 24, border: '1px solid var(--border-color)',
+                      borderRadius: '6px', cursor: 'pointer',
+                      background: showDots ? 'rgba(99,102,241,0.15)' : 'transparent',
+                      color: showDots ? 'var(--accent-primary)' : 'var(--text-dim)',
+                    }}
+                  >
+                    <CircleDot size={12} />
+                  </button>
                   <button
                     className="icon-button"
                     onClick={exportPng}
                     title="Print / PDF Export"
-                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 30, height: 30, border: '1px solid var(--border-color)', borderRadius: '7px' }}
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: 24, height: 24, border: '1px solid var(--border-color)', borderRadius: '6px' }}
                   >
-                    <Download size={15} />
+                    <Download size={12} />
                   </button>
+                  </div>
                 )}
               </div>
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', flexShrink: 0, pointerEvents: 'auto' }}>
-              {buckets.length > 0 && (
-                <>
-                <button
-                  onClick={toggleStepped}
-                  title={stepped ? 'Switch to linear interpolation' : 'Switch to stepped (hold-last-value)'}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    width: 30, height: 30, border: '1px solid var(--border-color)',
-                    borderRadius: '7px', cursor: 'pointer',
-                    background: stepped ? 'rgba(99,102,241,0.15)' : 'transparent',
-                    color: stepped ? 'var(--accent-primary)' : 'var(--text-dim)',
-                  }}
-                >
-                  <LineChart size={15} />
-                </button>
-                <button
-                  onClick={toggleDots}
-                  title={showDots ? 'Hide telegram dots' : 'Show a dot at each telegram (makes cyclic repeats visible)'}
-                  style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    width: 30, height: 30, border: '1px solid var(--border-color)',
-                    borderRadius: '7px', cursor: 'pointer',
-                    background: showDots ? 'rgba(99,102,241,0.15)' : 'transparent',
-                    color: showDots ? 'var(--accent-primary)' : 'var(--text-dim)',
-                  }}
-                >
-                  <CircleDot size={15} />
-                </button>
-                {getShareLink && (
+              {/* Middle spacer over the ruler track itself, non-interactive. */}
+              <div style={{ flex: 1 }} />
+
+              {/* Right zone spans the ruler's right edge up to the row's end, so
+                  the pill can center in the gap before copy-link/close (#391).
+                  justifyContent keeps close pinned top-right even without a
+                  pill/copy-link filler to push it there. */}
+              <div style={{ width: Math.max(0, rulerRightInset - chartsWrapperPad), flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', pointerEvents: 'auto' }}>
+              {showAutoFollowPill && (
+                <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+                  {autoFollowPill}
+                </div>
+              )}
+              {nowLabel && (
+                <div style={{ flex: 1, display: 'flex', justifyContent: 'center' }}>
+                  {nowLabel}
+                </div>
+              )}
+              {getShareLink && buckets.length > 0 && (
                   <button
                     className="icon-button"
                     onClick={() => void copyShareLink()}
@@ -394,8 +515,6 @@ export const Visualizer: React.FC<VisualizerProps> = ({
                   >
                     {linkCopied ? <><Check size={16} /> Copied</> : <><Link2 size={16} /> Copy link</>}
                   </button>
-                )}
-                </>
               )}
               {/* Close X in the panel header, like every other main panel (#347). */}
               <button

@@ -35,6 +35,8 @@ interface MixedChartProps {
   /** Shared left-axis gutter (#... ) so every chart's X-axis starts at the same
    * pixel column; falls back to this chart's own bucket when not provided. */
   leftGutter?: number;
+  /** Hide the right-side current-value band when no live NOW context is available. */
+  showCurrentValueBand?: boolean;
 }
 
 // Ensure we have a shared sync cursor across all charts
@@ -42,7 +44,7 @@ const syncCursor = uPlot.sync('knx-time-axis');
 
 export const MixedChart: React.FC<MixedChartProps> = ({
   bucket, minTime, maxTime, stepped, showDots, autoFollow = false, onZoomRangeChange,
-  groupLabel, locked, onToggleLock, onTimeClick, leftGutter: sharedLeftGutter, rightLabelTime,
+  groupLabel, locked, onToggleLock, onTimeClick, leftGutter: sharedLeftGutter, rightLabelTime, showCurrentValueBand = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
@@ -74,6 +76,8 @@ export const MixedChart: React.FC<MixedChartProps> = ({
   const { unit, isBinary, timestamps, series } = bucket;
   const oldestBufferMs = timestamps.length > 0 ? timestamps[0] : null;
   const newestBufferMs = timestamps.length > 0 ? timestamps[timestamps.length - 1] : null;
+  const visibleLeftMs = minTime ?? oldestBufferMs;
+  const visibleRightMs = maxTime ?? newestBufferMs;
   const chartHeight = isBinary ? Math.max(150, series.length * 50) : 300;
   const leftGutter = useMemo(
     () => sharedLeftGutter ?? computeSharedLeftGutter([bucket]),
@@ -458,7 +462,7 @@ export const MixedChart: React.FC<MixedChartProps> = ({
         },
         y: scaleConfig
       },
-      plugins: [currentValueMarkersPlugin()],
+      plugins: showCurrentValueBand ? [currentValueMarkersPlugin()] : [],
       axes: [
         {
           // Wider minimum tick spacing when labels carry a date, so the
@@ -503,7 +507,7 @@ export const MixedChart: React.FC<MixedChartProps> = ({
       ]
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [structureKey, rightRulerPad, chartHeight]);
+  }, [structureKey, rightRulerPad, chartHeight, showCurrentValueBand]);
 
   // Apply x-range changes to the live chart instance instead of rebuilding
   // `options` (which would destroy/recreate the whole uPlot and blink) —
@@ -627,7 +631,7 @@ export const MixedChart: React.FC<MixedChartProps> = ({
             );
           })}
         </div>
-        <div ref={containerRef} style={{ width: '100%', overflow: 'hidden', position: 'relative' }}>
+        <div ref={containerRef} data-chart-root style={{ width: '100%', overflow: 'hidden', position: 'relative' }}>
            {/* Re-fit to new data only while not zoomed (#340): keeps a new telegram
                visible instead of dropping off a frozen scale. When the user has
                zoomed, autoFollow is false so the range is preserved (#281). */}
@@ -636,7 +640,7 @@ export const MixedChart: React.FC<MixedChartProps> = ({
         {/* Plot bounds markers for the chart area. */}
         <div style={{ ...edgeLineStyle, left: `${leftGutter}px` }} />
         <div style={{ ...edgeLineStyle, right: `${rightRulerPad}px` }} />
-        {oldestBufferMs != null && (
+        {visibleLeftMs != null && (
           <div
             style={{
               position: 'absolute',
@@ -652,12 +656,12 @@ export const MixedChart: React.FC<MixedChartProps> = ({
               pointerEvents: 'none',
               zIndex: 6,
             }}
-            title="Oldest telegram in buffer"
+            title="Oldest telegram in visible range"
           >
-            {formatFullTime(oldestBufferMs, multiDay)}
+            {formatFullTime(visibleLeftMs, multiDay)}
           </div>
         )}
-        {newestBufferMs != null && (
+        {visibleRightMs != null && (
           <div
             style={{
               position: 'absolute',
@@ -673,28 +677,9 @@ export const MixedChart: React.FC<MixedChartProps> = ({
               zIndex: 6,
               whiteSpace: 'nowrap',
             }}
-            title="Newest telegram in buffer"
+            title="Newest telegram in visible range"
           >
-            {formatFullTime(newestBufferMs, multiDay)}
-          </div>
-        )}
-        {rightLabelTime != null && (
-          <div
-            style={{
-              position: 'absolute',
-              right: '8px',
-              bottom: '24px',
-              fontSize: '0.68rem',
-              lineHeight: 1,
-              color: 'var(--accent-primary)',
-              fontVariantNumeric: 'tabular-nums',
-              pointerEvents: 'none',
-              zIndex: 6,
-              whiteSpace: 'nowrap',
-            }}
-            title="Current NOW time"
-          >
-            {formatFullTime(rightLabelTime, multiDay)}
+            {formatFullTime(visibleRightMs, multiDay)}
           </div>
         )}
       </div>

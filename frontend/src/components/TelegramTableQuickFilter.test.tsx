@@ -431,6 +431,37 @@ test('a non-delta contextual row keeps its colored bar even when it passes the q
   expect(contextRow?.style.boxShadow).toContain('var(--accent-primary)');
 });
 
+test('contextual rows use the delta-context background even when they are also marked', () => {
+  const contextTelegram = makeTelegram({
+    timestamp: '2024-01-01T10:00:00.000Z',
+    target_address: '9/9/9',
+    target_name: 'Context Background',
+    raw_hex: '0x49',
+  });
+  const key = anchorKey(contextTelegram);
+  const { container } = render(
+    <TelegramTable
+      telegrams={[...TELEGRAMS, contextTelegram]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 0, deltaContextEnabled: true }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+      quickPatterns={{ target: { top: '', bottom: 'küche' } }}
+      contextKeys={new Map([[key, 'marked' as const]])}
+      markedKeys={[key]}
+      lastMarkedKey={key}
+    />,
+  );
+
+  const contextRow = [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Context Background')) as HTMLElement | undefined;
+  expect(contextRow).toBeDefined();
+  expect(contextRow?.style.background).toContain('var(--warning, #f59e0b)');
+});
+
 test('changing delta before/after re-evaluates and keeps contextual rows remixed', () => {
   const anchorTelegram = makeTelegram({
     timestamp: '2024-01-01T10:00:03.000Z',
@@ -1048,7 +1079,7 @@ test('row message-context controls are hidden when quick filter excludes no mess
   expect(container.querySelector('button[title*="click to unflag"]')).toBeFalsy();
 });
 
-test('plain click on a message-context flag keeps only that row flagged', () => {
+test('plain click on a message-context flag toggles the flag state for the clicked row', () => {
   const { container } = renderTable();
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
   const rows = [...container.querySelectorAll('.log-row')];
@@ -1057,48 +1088,48 @@ test('plain click on a message-context flag keeps only that row flagged', () => 
   fireEvent.click(rows[1].querySelector('button[title*="Always show context"]')!);
 
   const activeFlags = container.querySelectorAll('.log-row button[title*="click to unflag"]');
-  expect(activeFlags).toHaveLength(1);
+  expect(activeFlags).toHaveLength(2);
   expect(rows[1].querySelector('button[title*="click to unflag"]')).toBeTruthy();
 });
 
-test('plain click on a message-context control marks only that row', () => {
+test('plain click on a message-context control toggles only that row flag without changing row marks', () => {
   const { container } = renderTable();
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
   const rows = [...container.querySelectorAll('.log-row')];
 
   fireEvent.click(rows[1].querySelector('button[title*="Always show context"]')!);
 
-  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(1);
-  expect(rows[1].className).toContain('marked');
+  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(0);
+  expect(container.querySelectorAll('.log-row button[title*="click to unflag"]')).toHaveLength(1);
+  expect(rows[1].querySelector('button[title*="click to unflag"]')).toBeTruthy();
+
+  fireEvent.click(rows[1].querySelector('button[title*="click to unflag"]')!);
+  expect(container.querySelectorAll('.log-row button[title*="click to unflag"]')).toHaveLength(0);
 });
 
-test('ctrl-click on a message-context control never removes existing row marks', () => {
+test('ctrl-click on a message-context control toggles the flag without affecting row marks', () => {
   const { container } = renderTable();
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
   const rows = [...container.querySelectorAll('.log-row')];
 
   fireEvent.click(rows[0].querySelector('button[title*="Always show context"]')!);
   fireEvent.click(rows[2].querySelector('button[title*="Always show context"]')!, { ctrlKey: true });
-  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(2);
+  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(0);
 
   fireEvent.click(rows[2].querySelector('button[title*="click to unflag"]')!, { ctrlKey: true });
-  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(2);
-  expect(rows[0].className).toContain('marked');
-  expect(rows[2].className).toContain('marked');
+  expect(container.querySelectorAll('.log-row button[title*="click to unflag"]')).toHaveLength(1);
+  expect(rows[0].querySelector('button[title*="click to unflag"]')).toBeTruthy();
 });
 
-test('shift and ctrl+shift on a message-context control apply row-click range marking semantics', () => {
+test('shift and ctrl+shift on a message-context control apply range flag semantics without row marks', () => {
   const { container } = renderTable();
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
   const rows = [...container.querySelectorAll('.log-row')];
 
   fireEvent.click(rows[0].querySelector('button[title*="Always show context"]')!);
   fireEvent.click(rows[2].querySelector('button[title*="Always show context"]')!, { shiftKey: true });
-  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(3);
-
-  fireEvent.click(rows[0].querySelector('button[title*="click to unflag"]')!, { ctrlKey: true });
-  fireEvent.click(rows[2].querySelector('button[title*="Always show context"]')!, { ctrlKey: true, shiftKey: true });
-  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(3);
+  expect(container.querySelectorAll('.log-row button[title*="click to unflag"]')).toHaveLength(3);
+  expect(container.querySelectorAll('.log-row.marked')).toHaveLength(0);
 });
 
 test('flagging a row pauses live-follow and anchors that row before list changes', () => {

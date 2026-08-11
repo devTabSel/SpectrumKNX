@@ -38,8 +38,7 @@ test('shows the five main-panel tabs with Telegram List active by default (#374)
   expect(list).toHaveAttribute('aria-selected', 'true');
 });
 
-test('play/pause and the filter toggle live with the Telegram List (#374)', async () => {
+test('the filter toggle lives with the Telegram List (#374)', async () => {
   render(<App />);
   expect(screen.queryByRole('button', { name: 'Focus panel toggle temporarily disabled' })).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument();
 });
