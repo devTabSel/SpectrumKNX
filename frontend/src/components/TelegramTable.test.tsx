@@ -236,8 +236,9 @@ test('scrolling back to the live edge resumes auto-follow when the paused buffer
   expect(onListFollowChange).toHaveBeenCalledWith(true);
 });
 
-test('scrolling back to the live edge does not resume auto-follow while the paused buffer is still non-empty', () => {
+test('scrolling back to the live edge merges the paused buffer without re-enabling autofollow', () => {
   const onListFollowChange = vi.fn();
+  const onFlushPausedBuffer = vi.fn();
   const { container } = render(
     <TelegramTable
       telegrams={makeList(25, 24)}
@@ -250,6 +251,7 @@ test('scrolling back to the live edge does not resume auto-follow while the paus
       listFollow={false}
       pendingLiveCount={3}
       onListFollowChange={onListFollowChange}
+      onFlushPausedBuffer={onFlushPausedBuffer}
     />,
   );
 
@@ -259,7 +261,125 @@ test('scrolling back to the live edge does not resume auto-follow while the paus
   scrollContainer.scrollTop = 0;
   fireEvent.scroll(scrollContainer);
 
+  expect(onFlushPausedBuffer).toHaveBeenCalledTimes(1);
   expect(onListFollowChange).not.toHaveBeenCalledWith(true);
+});
+
+test('scrolling back to the live edge with a backlog pins the current row instead of releasing the anchor', () => {
+  const onFlushPausedBuffer = vi.fn();
+  const onListAnchorKeyChange = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      pendingLiveCount={3}
+      onFlushPausedBuffer={onFlushPausedBuffer}
+      onListAnchorKeyChange={onListAnchorKeyChange}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  scrollContainer.scrollTop = 0;
+  fireEvent.scroll(scrollContainer);
+
+  expect(onFlushPausedBuffer).toHaveBeenCalledTimes(1);
+  // The currently visible row must stay pinned (not released to null) so the
+  // merge below can correct scrollTop by the new rows' height instead of
+  // silently landing on the newest telegram (#391).
+  expect(onListAnchorKeyChange).toHaveBeenCalledWith(expect.any(String));
+  expect(onListAnchorKeyChange).not.toHaveBeenCalledWith(null);
+});
+
+test('wheel-scrolling further into the live edge merges the paused buffer even though scrollTop cannot move', () => {
+  const onFlushPausedBuffer = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      pendingLiveCount={3}
+      onFlushPausedBuffer={onFlushPausedBuffer}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  scrollContainer.scrollTop = 0;
+
+  // Already pinned at the top (live) edge — scrolling further up doesn't move
+  // scrollTop, so no native `scroll` event fires; the wheel gesture itself
+  // must still trigger the merge (#391).
+  fireEvent.wheel(scrollContainer, { deltaY: -100 });
+
+  expect(onFlushPausedBuffer).toHaveBeenCalledTimes(1);
+});
+
+test('wheel-scrolling away from the live edge does not merge the paused buffer', () => {
+  const onFlushPausedBuffer = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      pendingLiveCount={3}
+      onFlushPausedBuffer={onFlushPausedBuffer}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  scrollContainer.scrollTop = 0;
+
+  fireEvent.wheel(scrollContainer, { deltaY: 100 });
+
+  expect(onFlushPausedBuffer).not.toHaveBeenCalled();
+});
+
+test('wheel-scrolling further into a bottom-anchored (ascending) live edge merges the paused buffer', () => {
+  const onFlushPausedBuffer = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'asc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      pendingLiveCount={3}
+      onFlushPausedBuffer={onFlushPausedBuffer}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  scrollContainer.scrollTop = 1400; // already at the bottom (live) edge
+
+  fireEvent.wheel(scrollContainer, { deltaY: 100 });
+
+  expect(onFlushPausedBuffer).toHaveBeenCalledTimes(1);
 });
 
 test('scrolling away from the live edge does not resume auto-follow for top- or bottom-sorted time lists', () => {

@@ -421,6 +421,12 @@ function App() {
     setCachePaused(!follow);
   }, [setCachePaused]);
 
+  const handleFlushPausedBuffer = useCallback(() => {
+    // Make the paused backlog visible without turning live-follow back on, so
+    // the current viewport stays anchored while the queue drains.
+    setCachePaused(false);
+  }, [setCachePaused]);
+
   // ── Rate Estimation ─────────────────────────────────────────────────────────
   const [busRate, setBusRate] = useState(0);
   const arrivalTimesRef = useRef<number[]>([]);
@@ -1571,6 +1577,7 @@ function App() {
                     onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
                     listFollow={listFollow}
                     onListFollowChange={handleListFollowChange}
+                    onFlushPausedBuffer={handleFlushPausedBuffer}
                     pendingLiveCount={pausedCount}
                     listAnchorKey={listAnchorKey}
                     onListAnchorKeyChange={setListAnchorKey}

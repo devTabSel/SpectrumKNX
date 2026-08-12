@@ -148,6 +148,10 @@ interface TelegramTableProps {
   // Lifted Follow / Anchor state (#203, #341)
   listFollow?: boolean;
   onListFollowChange?: (follow: boolean) => void;
+  /** Flushes the paused backlog into the visible live view without turning
+   * autop-follow back on, so the user can catch up while keeping the current
+   * viewport anchored. */
+  onFlushPausedBuffer?: () => void;
   /** Count of live telegrams buffered upstream while follow is paused (e.g.
    * from the app's telegram cache), shown in the autofollow pill instead of
    * the table's own edge-diff count so it works under any sort order. */
@@ -402,7 +406,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   quickFilterColumnEnabled, onQuickFilterColumnEnabledChange,
   quickFilterFiltersOutAny,
   onDeltaContextChange,
-  listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
+  listFollow, onListFollowChange, onFlushPausedBuffer, listAnchorKey, onListAnchorKeyChange,
   pendingLiveCount,
   centerOnKey, onCenterOnKeyConsumed,
   markedKeys, onMarkedKeysChange, lastMarkedKey, onLastMarkedKeyChange,
@@ -1438,6 +1442,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
   };
 
+  // Pins the currently visible row, then hands the queued backlog over to the
+  // live buffer, so the merge below can correct scrollTop by the new rows'
+  // height instead of jumping to the newest telegram (#391).
+  const flushPausedBufferAtEdge = () => {
+    captureAnchor();
+    onFlushPausedBuffer?.();
+  };
+
   const handleScroll = () => {
     // Ignore the scrolls our own compensation triggers.
     if (programmaticScrollRef.current) return;
@@ -1448,9 +1460,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       if (!atEdge) {
         pauseFollow();
         captureAnchor();
+      } else if ((listFollow ?? true) === false && (pendingLiveCount ?? 0) > 0) {
+        flushPausedBufferAtEdge();
       } else {
-        const bufferEmpty = (pendingLiveCount ?? 0) === 0;
-        if (bufferEmpty && (listFollow ?? true) === false) {
+        // When the user re-enters the live edge, any queued backlog is merged
+        // into the visible list without moving the viewport. The user is only
+        // returned to active live-follow when the backlog is empty.
+        if ((listFollow ?? true) === false) {
           resumeFollow();
         }
         anchorRef.current = null;
@@ -1463,6 +1479,20 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       captureAnchor();
     }
     setViewportVersion(v => v + 1);
+  };
+
+  // A native `scroll` event never fires when the container is already pinned
+  // at its edge and the user scrolls further in that direction — nothing
+  // moves, so `handleScroll` wouldn't run. Catch that gesture here so a
+  // queued backlog is still merged in while the user sits at the edge (#391).
+  const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
+    if (!isTimeSort) return;
+    if ((listFollow ?? true) !== false) return;
+    if ((pendingLiveCount ?? 0) <= 0) return;
+    if (!checkAtEdge()) return;
+    const towardEdge = liveEdge === 'top' ? e.deltaY < 0 : e.deltaY > 0;
+    if (!towardEdge) return;
+    flushPausedBufferAtEdge();
   };
 
   // Clicking a row (a) marks it (#310) and (b) pauses live-following just like
@@ -2728,8 +2758,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           below the header, not over it. */}
       <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-      {/* Jump-to-live / autofollow pill — shown while paused, in any sort order (#391) */}
-      {(pendingLiveCount !== undefined ? (followPaused && !deltaSortActive) : isTimeSort) && (
+      {/* Jump-to-live / autofollow pill — shown whenever autofollow is paused,
+          regardless of sort mode or whether the upstream buffer is still draining. */}
+      {followPaused && (
         <AutoFollowPill
           count={pendingLiveCount ?? newSinceAnchor}
           onClick={jumpToLive}
@@ -2883,6 +2914,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       <div
         ref={parentRef}
         onScroll={handleScroll}
+        onWheel={handleWheel}
         onClick={(e) => {
           if (e.target === e.currentTarget) {
             if (atEdgeRef.current) {
