@@ -78,3 +78,43 @@ test('double-clicking a handle snaps that limit to min/max (#267)', () => {
   fireEvent.doubleClick(rightHandle);
   expect(onChangeMock).toHaveBeenLastCalledWith([initialVal[0], maxTime]);
 });
+
+test('disabled ignores drag and double-click, so a degenerate range cannot be "zoomed"', () => {
+  const onChangeMock = vi.fn();
+
+  const { container } = render(
+    <TimeBrush
+      minTime={minTime}
+      maxTime={maxTime}
+      value={initialVal}
+      onChange={onChangeMock}
+      telegrams={[]}
+      disabled
+    />
+  );
+
+  const track = container.querySelector('div[style*="position: relative"][style*="height: 30px"]');
+  track!.getBoundingClientRect = () => ({
+    width: 500,
+    left: 0,
+    right: 500,
+    top: 0,
+    bottom: 30,
+    height: 30,
+    x: 0,
+    y: 0,
+    toJSON: () => {},
+  });
+
+  const middle = container.querySelector('div[style*="rgba(99, 102, 241, 0.08)"]');
+  expect(middle).toBeTruthy();
+
+  fireEvent.mouseDown(middle!, { clientX: 200, button: 0 });
+  fireEvent.mouseMove(window, { clientX: 250 });
+  expect(onChangeMock).not.toHaveBeenCalled();
+
+  const [leftHandle, rightHandle] = container.querySelectorAll('div[style*="width: 10px"]');
+  fireEvent.doubleClick(leftHandle);
+  fireEvent.doubleClick(rightHandle);
+  expect(onChangeMock).not.toHaveBeenCalled();
+});

@@ -17,6 +17,10 @@ interface TimeBrushProps {
   rightInset?: number;
   /** Compact inline mode for embedding the ruler into the Visualizer header row. */
   compact?: boolean;
+  /** Disables dragging/resizing (#391): there's nothing to zoom into when the
+   * underlying data spans a single instant, so `minTime`/`maxTime` here are
+   * just a padded placeholder domain, not a real range. */
+  disabled?: boolean;
 }
 
 export const TimeBrush: React.FC<TimeBrushProps> = ({
@@ -30,6 +34,7 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
   leftInset = 24,
   rightInset = 24,
   compact = false,
+  disabled = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dragMode, setDragMode] = useState<'left' | 'right' | 'middle' | null>(null);
@@ -70,6 +75,7 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
   }, [density]);
 
   const handleStartDrag = (mode: 'left' | 'right' | 'middle', clientX: number) => {
+    if (disabled) return;
     setDragMode(mode);
     dragStartRef.current = { x: clientX, val: [...value] };
   };
@@ -148,8 +154,10 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
           border: '1px solid var(--border-color)',
           borderRadius: 6,
           overflow: 'hidden',
-          cursor: dragMode === 'middle' ? 'grabbing' : 'default',
+          cursor: disabled ? 'not-allowed' : (dragMode === 'middle' ? 'grabbing' : 'default'),
+          opacity: disabled ? 0.55 : 1,
         }}
+        title={disabled ? 'Zooming is unavailable — the visible data spans a single instant.' : undefined}
       >
         {/* Sparkline background */}
         <svg
@@ -183,7 +191,7 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
             background: 'rgba(99, 102, 241, 0.08)',
             borderLeft: '1px solid var(--accent-primary)',
             borderRight: '1px solid var(--accent-primary)',
-            cursor: dragMode === 'middle' ? 'grabbing' : 'grab',
+            cursor: disabled ? 'not-allowed' : (dragMode === 'middle' ? 'grabbing' : 'grab'),
             boxSizing: 'border-box',
           }}
         >
@@ -200,18 +208,21 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
             handleStartDrag('left', e.clientX);
           }}
           onDoubleClick={(e) => {
+            if (disabled) return;
             e.stopPropagation();
             onChange([minTime, value[1]]);
           }}
-          title={leftPinned
-            ? 'Pinned to the oldest data — follows as the buffer purges. Drag to unpin.'
-            : 'Drag to adjust · double-click to pin to the oldest data'}
+          title={disabled
+            ? undefined
+            : leftPinned
+              ? 'Pinned to the oldest data — follows as the buffer purges. Drag to unpin.'
+              : 'Drag to adjust · double-click to pin to the oldest data'}
           style={{
             position: 'absolute',
             left: `calc(${leftPct}% - 5px)`,
             width: 10,
             height: '100%',
-            cursor: 'ew-resize',
+            cursor: disabled ? 'not-allowed' : 'ew-resize',
             zIndex: 10,
             display: 'flex',
             alignItems: 'center',
@@ -238,18 +249,21 @@ export const TimeBrush: React.FC<TimeBrushProps> = ({
             handleStartDrag('right', e.clientX);
           }}
           onDoubleClick={(e) => {
+            if (disabled) return;
             e.stopPropagation();
             onChange([value[0], maxTime]);
           }}
-          title={rightPinned
-            ? 'Pinned to the live edge — follows as new telegrams arrive. Drag to unpin.'
-            : 'Drag to adjust · double-click to pin to the live edge'}
+          title={disabled
+            ? undefined
+            : rightPinned
+              ? 'Pinned to the live edge — follows as new telegrams arrive. Drag to unpin.'
+              : 'Drag to adjust · double-click to pin to the live edge'}
           style={{
             position: 'absolute',
             left: `calc(${rightPct}% - 5px)`,
             width: 10,
             height: '100%',
-            cursor: 'ew-resize',
+            cursor: disabled ? 'not-allowed' : 'ew-resize',
             zIndex: 10,
             display: 'flex',
             alignItems: 'center',

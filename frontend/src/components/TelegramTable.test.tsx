@@ -328,6 +328,36 @@ test('wheel-scrolling further into the live edge merges the paused buffer even t
   expect(onFlushPausedBuffer).toHaveBeenCalledTimes(1);
 });
 
+test('wheel-scrolling further into the live edge resumes auto-follow when the paused buffer is empty', () => {
+  const onListFollowChange = vi.fn();
+  const onFlushPausedBuffer = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      pendingLiveCount={0}
+      onListFollowChange={onListFollowChange}
+      onFlushPausedBuffer={onFlushPausedBuffer}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  scrollContainer.scrollTop = 0;
+
+  fireEvent.wheel(scrollContainer, { deltaY: -100 });
+
+  expect(onListFollowChange).toHaveBeenCalledWith(true);
+  expect(onFlushPausedBuffer).not.toHaveBeenCalled();
+});
+
 test('wheel-scrolling away from the live edge does not merge the paused buffer', () => {
   const onFlushPausedBuffer = vi.fn();
   const { container } = render(
@@ -380,6 +410,100 @@ test('wheel-scrolling further into a bottom-anchored (ascending) live edge merge
   fireEvent.wheel(scrollContainer, { deltaY: 100 });
 
   expect(onFlushPausedBuffer).toHaveBeenCalledTimes(1);
+});
+
+test('grabbing the scrollbar thumb at the live edge merges the paused buffer even though scrollTop cannot move', () => {
+  const onFlushPausedBuffer = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      pendingLiveCount={3}
+      onFlushPausedBuffer={onFlushPausedBuffer}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  Object.defineProperty(scrollContainer, 'offsetWidth', { configurable: true, value: 1000 });
+  Object.defineProperty(scrollContainer, 'clientWidth', { configurable: true, value: 985 });
+  scrollContainer.scrollTop = 0;
+
+  // A native scrollbar thumb drag dispatches neither `scroll` nor `wheel`
+  // when it's already pinned to the boundary it's dragged towards — the
+  // mousedown landing on the container, in the scrollbar gutter, must still
+  // trigger the merge (#391).
+  fireEvent.mouseDown(scrollContainer, { clientX: 995 });
+
+  expect(onFlushPausedBuffer).toHaveBeenCalledTimes(1);
+});
+
+test('grabbing the scrollbar thumb at the live edge resumes auto-follow when the paused buffer is empty', () => {
+  const onListFollowChange = vi.fn();
+  const onFlushPausedBuffer = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      pendingLiveCount={0}
+      onListFollowChange={onListFollowChange}
+      onFlushPausedBuffer={onFlushPausedBuffer}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  Object.defineProperty(scrollContainer, 'offsetWidth', { configurable: true, value: 1000 });
+  Object.defineProperty(scrollContainer, 'clientWidth', { configurable: true, value: 985 });
+  scrollContainer.scrollTop = 0;
+
+  fireEvent.mouseDown(scrollContainer, { clientX: 995 });
+
+  expect(onListFollowChange).toHaveBeenCalledWith(true);
+  expect(onFlushPausedBuffer).not.toHaveBeenCalled();
+});
+
+test('mousedown inside the content area (not the scrollbar) does not merge the paused buffer', () => {
+  const onFlushPausedBuffer = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(25, 24)}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'desc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      pendingLiveCount={3}
+      onFlushPausedBuffer={onFlushPausedBuffer}
+    />,
+  );
+
+  const scrollContainer = container.querySelector('div[style*="overflow-y: auto"]') as HTMLElement;
+  Object.defineProperty(scrollContainer, 'scrollHeight', { configurable: true, value: 2000 });
+  Object.defineProperty(scrollContainer, 'clientHeight', { configurable: true, value: 600 });
+  Object.defineProperty(scrollContainer, 'offsetWidth', { configurable: true, value: 1000 });
+  Object.defineProperty(scrollContainer, 'clientWidth', { configurable: true, value: 985 });
+  scrollContainer.scrollTop = 0;
+
+  fireEvent.mouseDown(scrollContainer, { clientX: 500 });
+
+  expect(onFlushPausedBuffer).not.toHaveBeenCalled();
 });
 
 test('scrolling away from the live edge does not resume auto-follow for top- or bottom-sorted time lists', () => {
@@ -1080,6 +1204,37 @@ test('quick info value shows buffer/msg totals and filtered/context/marked/conte
   expect(screen.getByText('2 filtered (1)')).toBeInTheDocument();
 });
 
+test('quick info value does not undercount the filtered total for a genuinely-matching visualization-navigation row (#391)', () => {
+  const rows: Telegram[] = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', raw_hex: '0xC1' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', raw_hex: '0xC2' }),
+  ];
+  // 'visualization' is forced onto its row even when that row is a genuine
+  // filter match (deltaContextExpansion.ts) — it must not be treated as
+  // "context-only" here, or an unfiltered buffer would wrongly show as filtered.
+  const contextKeys = new Map([[anchorKey(rows[0]), 'visualization' as const]]);
+
+  render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      contextKeys={contextKeys}
+      bufferCapacity={100000}
+      allBufferMessageCount={2}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+
+  expect(screen.getByText('msg: 2 / buf: 100000, marks:')).toBeInTheDocument();
+  expect(screen.queryByText(/filtered/)).not.toBeInTheDocument();
+});
+
 test('quick info value mark/context-mark buttons toggle row filtering', () => {
   const rows: Telegram[] = [
     makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', raw_hex: '0xB1' }),
@@ -1568,6 +1723,26 @@ test('ctrl/cmd-click on a visualization-context row clears its context reason', 
 
   expect(onVisualizationContextClear).toHaveBeenCalledWith(key);
   expect(row.classList.contains('marked')).toBe(false);
+});
+
+test('the context-marks pill stays hidden when the row-level context control isn\'t shown, even with flagged rows (#391)', () => {
+  const rows = makeList(3, 2);
+  const flagged = [anchorKey(rows[1])];
+
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      flaggedKeys={flagged}
+    />,
+  );
+
+  expect(container.querySelector('.clear-context-marks-pill')).toBeNull();
 });
 
 // ── SOURCE/TARGET header "Focus" checkboxes (#401) ───────────────────────────

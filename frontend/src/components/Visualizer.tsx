@@ -12,7 +12,7 @@ import { clearSeriesHidden } from '../utils/legendVisibility';
 import { expandDegenerateRange } from '../utils/timeRange';
 import { splitLockedBuckets } from '../utils/chartLock';
 import { computeSharedLeftGutter } from '../utils/chartGutter';
-import { formatFullTime, spansMultipleDays } from '../utils/timeFormat';
+import { formatFullTime } from '../utils/timeFormat';
 
 interface VisualizerProps {
   telegrams: Telegram[];
@@ -124,6 +124,16 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     // so the time axis renders real times instead of collapsing to 00:00 (#239).
     return expandDegenerateRange(minTime ?? 0, maxTime ?? 0);
   }, [minTime, maxTime]);
+
+  // The ruler needs the same padding as the charts: without it, a single
+  // telegram (minTime === maxTime) hid the ruler entirely (#391).
+  const rulerDomain = useMemo<[number, number] | null>(() => {
+    if (minTime === null || maxTime === null) return null;
+    return minTime < maxTime ? [minTime, maxTime] : defaultRange;
+  }, [minTime, maxTime, defaultRange]);
+  // Zooming has nothing to zoom into when the data spans a single instant —
+  // the padded rulerDomain is a display-only placeholder, not a real range.
+  const rulerZoomDisabled = minTime !== null && maxTime !== null && !(minTime < maxTime);
 
   const [internalZoomRange, setInternalZoomRange] = useState<[number, number] | null>(null);
   const currentZoomRange = zoomRange !== undefined ? zoomRange : internalZoomRange;
@@ -258,8 +268,9 @@ export const Visualizer: React.FC<VisualizerProps> = ({
   // padding away from the shared column edge, then the gutter/pad itself.
   const CHART_OUTER_INSET = 17;
   const chartsWrapperPad = embed ? 12 : 24;
-  const rulerMultiDay = spansMultipleDays(activeRange[0], chartMaxTime);
-  const chartRightRulerPad = rulerMultiDay ? 240 : 160;
+  // Fixed regardless of whether the data spans multiple days, matching the
+  // charts' own fixed pad, so the vertical marker lines never shift (#391).
+  const chartRightRulerPad = 160;
   const rulerLeftInset = chartsWrapperPad + CHART_OUTER_INSET + sharedLeftGutter;
   const rulerRightInset = chartsWrapperPad + CHART_OUTER_INSET + chartRightRulerPad;
 
@@ -337,7 +348,9 @@ export const Visualizer: React.FC<VisualizerProps> = ({
         whiteSpace: 'nowrap',
       }}
     >
-      {formatFullTime(rightLabelTime, spansMultipleDays(activeRange[0], chartMaxTime))}
+      {/* The NOW label always shows time-only, even across multi-day ranges —
+          it's always "right now", so a date prefix would be redundant (#391). */}
+      {formatFullTime(rightLabelTime, false)}
     </div>
   );
   const autoFollowPill = showAutoFollowPill && (
@@ -379,17 +392,18 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     return (
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg-subtle)' }}>
         {/* Pan & zoom timeline sits above the charts it controls (#308). */}
-        {minTime !== null && maxTime !== null && minTime < maxTime && (
+        {rulerDomain && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.75rem' }}>
             <div style={{ flex: 1 }}>
               <TimeBrush
-                minTime={minTime}
-                maxTime={maxTime}
+                minTime={rulerDomain[0]}
+                maxTime={rulerDomain[1]}
                 value={activeRange}
                 onChange={setZoomRange}
                 telegrams={telegrams}
                 leftPinned={edgePinned.left}
                 rightPinned={edgePinned.right}
+                disabled={rulerZoomDisabled}
               />
             </div>
             {autoFollowPill}
@@ -406,7 +420,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
         {/* Chart Area */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: 'var(--bg-subtle)' }}>
           <div style={{ padding: '1rem 1.5rem', position: 'relative', borderBottom: '1px solid var(--border-color)' }}>
-            {minTime !== null && maxTime !== null && minTime < maxTime && (
+            {rulerDomain && (
               <div
                 style={{
                   position: 'absolute',
@@ -418,8 +432,8 @@ export const Visualizer: React.FC<VisualizerProps> = ({
               >
                 <div style={{ width: '100%', pointerEvents: 'auto' }}>
                   <TimeBrush
-                    minTime={minTime}
-                    maxTime={maxTime}
+                    minTime={rulerDomain[0]}
+                    maxTime={rulerDomain[1]}
                     value={activeRange}
                     onChange={setZoomRange}
                     telegrams={telegrams}
@@ -428,6 +442,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({
                     leftInset={rulerLeftInset}
                     rightInset={rulerRightInset}
                     compact
+                    disabled={rulerZoomDisabled}
                   />
                 </div>
               </div>

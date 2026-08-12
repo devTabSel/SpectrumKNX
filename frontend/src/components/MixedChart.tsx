@@ -10,6 +10,7 @@ import { isSeriesHidden, setSeriesHidden } from '../utils/legendVisibility';
 import { computeSharedLeftGutter } from '../utils/chartGutter';
 import { spansMultipleDays, formatAxisTime, formatFullTime } from '../utils/timeFormat';
 import { isRightSideHoverActive, setRightSideHoverSource, subscribeRightSideHover } from '../utils/rightSideHoverSync';
+import { floorDataIdx } from '../utils/chartCursor';
 
 interface MixedChartProps {
   bucket: ChartBucket;
@@ -86,7 +87,9 @@ export const MixedChart: React.FC<MixedChartProps> = ({
 
   // Show a date alongside times once the visible range crosses midnight (#281).
   const multiDay = minTime != null && maxTime != null && spansMultipleDays(minTime, maxTime);
-  const rightRulerPad = multiDay ? 240 : 160;
+  // Fixed regardless of `multiDay` so the right-edge vertical marker line
+  // doesn't shift as the visible range crosses (or un-crosses) midnight (#391).
+  const rightRulerPad = 160;
 
   // Prepare data array: [ [x], [y1], [y2] ]
   // We divide timestamps by 1000 since uPlot expects unix seconds by default
@@ -175,18 +178,40 @@ export const MixedChart: React.FC<MixedChartProps> = ({
     const gridStroke = style.getPropertyValue('--border-subtle').trim();
     const axisStroke = style.getPropertyValue('--text-dim').trim();
 
-    // Configure Y-Axis scale limits based on smart defaults
+    // Configure Y-Axis scale limits based on smart defaults. Custom `range`
+    // (rather than uPlot's default, in-view-only auto-range) so the held-over
+    // value from the telegram just before the visible window is still
+    // counted — that value is what's actually drawn at the left edge (#391).
+    // Always tightly fits the actual value range (no forced zero floor), so
+    // the plotted line uses the maximum available chart area (#391).
     let scaleConfig: uPlot.Scale = {};
-    if (!isBinary && (unit === '%' || unit === 'Hz' || unit === 'W')) {
-      scaleConfig = {
-        auto: true,
-        range: (_u, _min, max) => {
-          const hardMin = 0;
-          return [hardMin, max > hardMin ? max * 1.1 : 100];
-        }
-      };
-    } else if (isBinary) {
+    if (isBinary) {
       scaleConfig = { auto: false, range: [-0.1, 1.1] };
+    } else {
+      scaleConfig = {
+        range: (u) => {
+          const xs = u.data[0] as number[];
+          if (xs.length === 0) return [0, 1];
+          const xMin = u.scales.x.min ?? xs[0];
+          const xMax = u.scales.x.max ?? xs[xs.length - 1];
+          const startIdx = Math.max(0, floorDataIdx(xs, xMin));
+          let min = Infinity;
+          let max = -Infinity;
+          for (let sIdx = 1; sIdx < u.data.length; sIdx++) {
+            if (isSeriesHidden(series[sIdx - 1]?.address)) continue;
+            const ys = u.data[sIdx] as (number | null)[];
+            for (let i = startIdx; i < xs.length && xs[i] <= xMax; i++) {
+              const v = ys[i];
+              if (v != null) {
+                if (v < min) min = v;
+                if (v > max) max = v;
+              }
+            }
+          }
+          if (min === Infinity) return [0, 1];
+          return uPlot.rangeNum(min, max, 0.1, true);
+        },
+      };
     }
 
     const currentValueMarkersPlugin = () => ({
@@ -265,12 +290,15 @@ export const MixedChart: React.FC<MixedChartProps> = ({
         }],
         setCursor: [
           (u) => {
-            const idx = u.cursor.idx;
-            const cursorActive = u.cursor.left != null && u.cursor.left >= 0 && idx != null;
+            const cursorActive = u.cursor.left != null && u.cursor.left >= 0;
             cursorActiveRef.current = cursorActive;
+            // The preceding (not nearest) data point: uPlot's own cursor.idx
+            // can round up to a future telegram, which the hover legend must
+            // never show ahead of time (#391).
+            const idx = cursorActive ? floorDataIdx(u.data[0] as number[], u.posToVal(u.cursor.left!, 'x')) : -1;
             const showCurrent = rightSideHoverRef.current;
             series.forEach((s, sIdx) => {
-              const val = showCurrent ? s.data[s.data.length - 1] : cursorActive ? s.data[idx] : null;
+              const val = showCurrent ? s.data[s.data.length - 1] : idx >= 0 ? s.data[idx] : null;
               const el = legendValueRefs.current[sIdx];
               if (el) {
                 el.textContent = val == null ? '' : isBinary ? (val === 1 ? 'On' : 'Off') : `${val} ${unit}`;
@@ -281,22 +309,23 @@ export const MixedChart: React.FC<MixedChartProps> = ({
         setSelect: [
           (u) => {
             if (Math.abs(u.select.width) < 0.5) return;
-            const plotLeft = u.bbox.left;
-            const plotWidth = u.bbox.width;
-            if (plotWidth <= 0) return;
-            const plotRight = plotLeft + plotWidth;
+            // u.select is in CSS pixels already relative to the plot area's own
+            // left edge (0 = plot left); u.bbox is in device pixels for the
+            // whole canvas — mixing the two produced an offset selection (#391).
+            const plotWidthCss = u.bbox.width / uPlot.pxRatio;
+            if (plotWidthCss <= 0) return;
             const rawA = u.select.left;
             const rawB = u.select.left + u.select.width;
             const unclampedLeft = Math.min(rawA, rawB);
             const unclampedRight = Math.max(rawA, rawB);
-            const leftPx = Math.max(plotLeft, Math.min(plotRight, unclampedLeft));
-            const rightPx = Math.max(leftPx, Math.min(plotRight, unclampedRight));
+            const leftPx = Math.max(0, Math.min(plotWidthCss, unclampedLeft));
+            const rightPx = Math.max(leftPx, Math.min(plotWidthCss, unclampedRight));
             const selectWidth = rightPx - leftPx;
             if (Math.abs(u.select.left - leftPx) > 0.5 || Math.abs(u.select.width - selectWidth) > 0.5) {
               u.setSelect({ left: leftPx, width: selectWidth, top: u.select.top, height: u.select.height }, false);
             }
-            const min = u.posToVal(leftPx - plotLeft, 'x');
-            const max = u.posToVal(rightPx - plotLeft, 'x');
+            const min = u.posToVal(leftPx, 'x');
+            const max = u.posToVal(rightPx, 'x');
             onZoomRangeChange?.([min * 1000, max * 1000]);
           }
         ],

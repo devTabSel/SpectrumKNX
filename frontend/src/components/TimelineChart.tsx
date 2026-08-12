@@ -9,6 +9,7 @@ import { computeSharedLeftGutter } from '../utils/chartGutter';
 import { seriesColor } from '../utils/seriesColors';
 import { spansMultipleDays, formatAxisTime, formatFullTime } from '../utils/timeFormat';
 import { isRightSideHoverActive, setRightSideHoverSource, subscribeRightSideHover } from '../utils/rightSideHoverSync';
+import { floorDataIdx } from '../utils/chartCursor';
 
 interface TimelineChartProps {
   bucket: ChartBucket;
@@ -100,7 +101,9 @@ export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, m
     () => sharedLeftGutter ?? computeSharedLeftGutter([bucket]),
     [sharedLeftGutter, bucket],
   );
-  const rightRulerPad = multiDay ? 240 : 160;
+  // Fixed regardless of `multiDay` so the right-edge vertical marker line
+  // doesn't shift as the visible range crosses (or un-crosses) midnight (#391).
+  const rightRulerPad = 160;
 
   const rowHeight = 30;
   const rowGap = 4;
@@ -210,14 +213,17 @@ export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, m
       hooks: {
         setCursor: [
           (u) => {
-            const idx = u.cursor.idx;
-            const cursorActive = u.cursor.left != null && u.cursor.left >= 0 && idx != null;
+            const cursorActive = u.cursor.left != null && u.cursor.left >= 0;
             cursorActiveRef.current = cursorActive;
+            // The preceding (not nearest) data point: uPlot's own cursor.idx
+            // can round up to a future telegram, which the hover legend must
+            // never show ahead of time (#391).
+            const idx = cursorActive ? floorDataIdx(u.data[0] as number[], u.posToVal(u.cursor.left!, 'x')) : -1;
             const showCurrent = rightSideHoverRef.current;
             series.forEach((s, sIdx) => {
               const el = valueRefs.current[sIdx];
               if (!el) return;
-              const val = showCurrent ? s.data[s.data.length - 1] : cursorActive ? s.data[idx] : null;
+              const val = showCurrent ? s.data[s.data.length - 1] : idx >= 0 ? s.data[idx] : null;
               el.textContent = val === 1 ? 'On' : val === 0 ? 'Off' : '';
               el.style.color = val === 1 ? '#22c55e' : val === 0 ? '#ef4444' : 'var(--text-dim)';
             });
@@ -226,22 +232,23 @@ export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, m
         setSelect: [
           (u) => {
             if (Math.abs(u.select.width) < 0.5) return;
-            const plotLeft = u.bbox.left;
-            const plotWidth = u.bbox.width;
-            if (plotWidth <= 0) return;
-            const plotRight = plotLeft + plotWidth;
+            // u.select is in CSS pixels already relative to the plot area's own
+            // left edge (0 = plot left); u.bbox is in device pixels for the
+            // whole canvas — mixing the two produced an offset selection (#391).
+            const plotWidthCss = u.bbox.width / uPlot.pxRatio;
+            if (plotWidthCss <= 0) return;
             const rawA = u.select.left;
             const rawB = u.select.left + u.select.width;
             const unclampedLeft = Math.min(rawA, rawB);
             const unclampedRight = Math.max(rawA, rawB);
-            const leftPx = Math.max(plotLeft, Math.min(plotRight, unclampedLeft));
-            const rightPx = Math.max(leftPx, Math.min(plotRight, unclampedRight));
+            const leftPx = Math.max(0, Math.min(plotWidthCss, unclampedLeft));
+            const rightPx = Math.max(leftPx, Math.min(plotWidthCss, unclampedRight));
             const selectWidth = rightPx - leftPx;
             if (Math.abs(u.select.left - leftPx) > 0.5 || Math.abs(u.select.width - selectWidth) > 0.5) {
               u.setSelect({ left: leftPx, width: selectWidth, top: u.select.top, height: u.select.height }, false);
             }
-            const min = u.posToVal(leftPx - plotLeft, 'x');
-            const max = u.posToVal(rightPx - plotLeft, 'x');
+            const min = u.posToVal(leftPx, 'x');
+            const max = u.posToVal(rightPx, 'x');
             onZoomRangeChange?.([min * 1000, max * 1000]);
           }
         ],

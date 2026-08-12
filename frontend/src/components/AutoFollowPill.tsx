@@ -1,7 +1,8 @@
 import React from 'react';
 
 export interface AutoFollowPillProps {
-  /** Telegrams buffered while paused (#391); the pill is hidden when this is 0. */
+  /** Telegrams buffered while paused (#391); shown as "paused" once this is 0
+   * — the pill stays visible the whole time auto-follow is off. */
   count: number;
   onClick: () => void;
   title?: string;
@@ -11,7 +12,6 @@ export interface AutoFollowPillProps {
 /** Reusable "paused, N buffered — click to resume" pill shared by the telegram
  * list and the visualization panel, so both reflect the same buffer pause. */
 export const AutoFollowPill: React.FC<AutoFollowPillProps> = ({ count, onClick, title = 'Resume auto-follow', style }) => {
-  if (count <= 0) return null;
   return (
     <button
       onClick={onClick}
@@ -19,7 +19,7 @@ export const AutoFollowPill: React.FC<AutoFollowPillProps> = ({ count, onClick, 
       style={style}
       title={title}
     >
-      {count.toLocaleString()} new
+      {count > 0 ? `${count.toLocaleString()} new` : 'paused'}
     </button>
   );
 };

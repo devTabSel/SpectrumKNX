@@ -1,9 +1,10 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { Visualizer } from './Visualizer';
+import { useChartData } from '../hooks/useChartData';
 
 vi.mock('../hooks/useChartData', () => ({
-  useChartData: () => ({
+  useChartData: vi.fn(() => ({
     buckets: [{
       unit: 'temp',
       isBinary: false,
@@ -14,7 +15,7 @@ vi.mock('../hooks/useChartData', () => ({
     minTime: 1_700_000_000_000,
     maxTime: 1_700_000_000_500,
     addressToUnit: { '1/1/1': 'temp' },
-  }),
+  })),
 }));
 
 vi.mock('./VisualizerSidebar', () => ({
@@ -34,7 +35,7 @@ vi.mock('./EventDotsChart', () => ({
 }));
 
 vi.mock('./TimeBrush', () => ({
-  TimeBrush: () => <div data-testid="time-brush" />,
+  TimeBrush: ({ disabled }: { disabled?: boolean }) => <div data-testid="time-brush" data-disabled={disabled ? 'true' : 'false'} />,
 }));
 
 describe('Visualizer', () => {
@@ -69,6 +70,42 @@ describe('Visualizer', () => {
 
     expect(screen.getByTitle('Current NOW time')).toHaveTextContent(expected);
     expect(screen.getByTestId('mixed-chart')).toBeInTheDocument();
+  });
+
+  it('never shows a date in the NOW label, even across a multi-day range', () => {
+    vi.mocked(useChartData).mockReturnValueOnce({
+      buckets: [{
+        unit: 'temp',
+        isBinary: false,
+        isEvents: false,
+        timestamps: [1_700_000_000_000],
+        series: [{ address: '1/1/1', name: 'Temp', data: [42], real: [true] }],
+      }],
+      minTime: 1_700_000_000_000,
+      maxTime: 1_700_000_000_000 + 3 * 24 * 60 * 60 * 1000,
+      addressToUnit: { '1/1/1': 'temp' },
+    });
+
+    const now = Date.now();
+    render(
+      <Visualizer
+        telegrams={[]}
+        selectedTargets={['1/1/1']}
+        onTargetsChange={() => {}}
+        onClose={() => {}}
+        listFollow={true}
+        pendingLiveCount={0}
+      />,
+    );
+
+    const expected = new Date(now).toLocaleTimeString(undefined, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+
+    expect(screen.getByTitle('Current NOW time').textContent).toBe(expected);
   });
 
   it('keeps the NOW label updating in real time while auto-follow stays active', () => {
@@ -167,5 +204,50 @@ describe('Visualizer', () => {
 
     expect(screen.getByTestId('visualization-chart-area')).toBeInTheDocument();
     expect(screen.queryByTestId('sidebar')).not.toBeInTheDocument();
+  });
+
+  it('still shows the pan & zoom ruler for a single telegram (degenerate time range), but disables zooming', () => {
+    vi.mocked(useChartData).mockReturnValueOnce({
+      buckets: [{
+        unit: 'temp',
+        isBinary: false,
+        isEvents: false,
+        timestamps: [1_700_000_000_000],
+        series: [{ address: '1/1/1', name: 'Temp', data: [42], real: [true] }],
+      }],
+      minTime: 1_700_000_000_000,
+      maxTime: 1_700_000_000_000,
+      addressToUnit: { '1/1/1': 'temp' },
+    });
+
+    render(
+      <Visualizer
+        telegrams={[]}
+        selectedTargets={['1/1/1']}
+        onTargetsChange={() => {}}
+        onClose={() => {}}
+        listFollow={true}
+        pendingLiveCount={0}
+      />,
+    );
+
+    const ruler = screen.getByTestId('time-brush');
+    expect(ruler).toBeInTheDocument();
+    expect(ruler).toHaveAttribute('data-disabled', 'true');
+  });
+
+  it('keeps zooming enabled on the ruler for a real (non-degenerate) time range', () => {
+    render(
+      <Visualizer
+        telegrams={[]}
+        selectedTargets={['1/1/1']}
+        onTargetsChange={() => {}}
+        onClose={() => {}}
+        listFollow={true}
+        pendingLiveCount={0}
+      />,
+    );
+
+    expect(screen.getByTestId('time-brush')).toHaveAttribute('data-disabled', 'false');
   });
 });

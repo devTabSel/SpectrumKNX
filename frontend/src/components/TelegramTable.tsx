@@ -1244,7 +1244,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     const matchedDirections = new Set<string>();
     let contextCount = 0;
     telegramRows.forEach((t, i) => {
-      const isContextOnly = !!contextKeys?.has(anchorKey(t));
+      // A 'visualization' reason marks the navigated-to row for highlighting
+      // even when it's a genuine filter match (deltaContextExpansion.ts), so
+      // it must not be treated as "context-only" here — only 'delta'/'marked'
+      // reliably mean the row wouldn't otherwise be shown (#391).
+      const contextReason = contextKeys?.get(anchorKey(t));
+      const isContextOnly = contextReason === 'delta' || contextReason === 'marked';
       if (new Date(t.timestamp) < new Date(telegramRows[oldestIdx].timestamp)) oldestIdx = i;
       if (new Date(t.timestamp) > new Date(telegramRows[newestIdx].timestamp)) newestIdx = i;
       if (t.deltaMs != null) {
@@ -1450,6 +1455,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     onFlushPausedBuffer?.();
   };
 
+  // Reaching the live edge while paused: resumes autofollow outright if the
+  // backlog is already empty, otherwise merges it in without resuming (#391).
+  const resumeOrFlushAtEdge = () => {
+    if ((pendingLiveCount ?? 0) > 0) {
+      flushPausedBufferAtEdge();
+    } else {
+      resumeFollow();
+    }
+  };
+
   const handleScroll = () => {
     // Ignore the scrolls our own compensation triggers.
     if (programmaticScrollRef.current) return;
@@ -1488,11 +1503,28 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     if (!isTimeSort) return;
     if ((listFollow ?? true) !== false) return;
-    if ((pendingLiveCount ?? 0) <= 0) return;
     if (!checkAtEdge()) return;
     const towardEdge = liveEdge === 'top' ? e.deltaY < 0 : e.deltaY > 0;
     if (!towardEdge) return;
-    flushPausedBufferAtEdge();
+    resumeOrFlushAtEdge();
+  };
+
+  // Same gap as the wheel case, for the native scrollbar thumb: dragging it
+  // further past a boundary it's already pinned to doesn't move scrollTop
+  // either, so neither `scroll` nor `wheel` fires. Grabbing the thumb (a
+  // mousedown landing on the container itself, in the scrollbar gutter) while
+  // already at the edge is treated the same way (#391).
+  const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!isTimeSort) return;
+    if ((listFollow ?? true) !== false) return;
+    const el = parentRef.current;
+    if (!el || e.target !== el) return;
+    const scrollbarWidth = el.offsetWidth - el.clientWidth;
+    if (scrollbarWidth <= 0) return;
+    const rect = el.getBoundingClientRect();
+    if (e.clientX < rect.right - scrollbarWidth) return;
+    if (!checkAtEdge()) return;
+    resumeOrFlushAtEdge();
   };
 
   // Clicking a row (a) marks it (#310) and (b) pauses live-following just like
@@ -2772,7 +2804,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       )}
 
       {/* Clear marks/context-marks pills — shown while entries exist (#310, #319) */}
-      {((rowMarksEnabled && markedKeysList.length > 0) || (rowFlagsEnabled && (flaggedKeysList.length > 0 || visualizationContextKeys.length > 0))) && (
+      {((rowMarksEnabled && markedKeysList.length > 0) || (rowFlagsEnabled && ((showRowMessageContextControl && flaggedKeysList.length > 0) || visualizationContextKeys.length > 0))) && (
         <div style={{ position: 'absolute', right: '1rem', top: '0.75rem', zIndex: 20, display: 'flex', flexDirection: 'column', gap: '0.35rem', alignItems: 'flex-end' }}>
           {rowMarksEnabled && markedKeysList.length > 0 && (() => {
             const virtualItems = virtualizer.getVirtualItems();
@@ -2840,7 +2872,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               </div>
             );
           })()}
-          {rowFlagsEnabled && (flaggedKeysList.length > 0 || visualizationContextKeys.length > 0) && (() => {
+          {rowFlagsEnabled && ((showRowMessageContextControl && flaggedKeysList.length > 0) || visualizationContextKeys.length > 0) && (() => {
+            // Flags aren't reachable without their row-level control, so they
+            // don't count towards the pill while it's hidden (#391).
+            const visibleFlaggedCount = showRowMessageContextControl ? flaggedKeysList.length : 0;
             const virtualItems = virtualizer.getVirtualItems();
             const scrollTop = parentRef.current?.scrollTop ?? 0;
             const viewportHeight = parentRef.current?.clientHeight ?? 0;
@@ -2853,7 +2888,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             const lastVisibleRowIndex = virtualItems.at(-1)?.index ?? firstVisibleRowIndex;
             const contextAnchorRowIndices = telegramRows.reduce<number[]>((acc, row, index) => {
               const key = anchorKey(row);
-              if (flaggedSet.has(key) || contextKeys?.get(key) === 'visualization') acc.push(index);
+              if ((showRowMessageContextControl && flaggedSet.has(key)) || contextKeys?.get(key) === 'visualization') acc.push(index);
               return acc;
             }, []);
             const aboveVisible = contextAnchorRowIndices.filter(index => index < firstVisibleRowIndex).at(-1);
@@ -2873,7 +2908,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 >
                   <X size={13} />
                 </button>
-                <span>{flaggedKeysList.length + visualizationContextKeys.length} context mark{flaggedKeysList.length + visualizationContextKeys.length === 1 ? '' : 's'}</span>
+                <span>{visibleFlaggedCount + visualizationContextKeys.length} context mark{visibleFlaggedCount + visualizationContextKeys.length === 1 ? '' : 's'}</span>
                 {aboveVisible !== undefined && (
                   <button
                     type="button"
@@ -2915,6 +2950,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         ref={parentRef}
         onScroll={handleScroll}
         onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
         onClick={(e) => {
           if (e.target === e.currentTarget) {
             if (atEdgeRef.current) {
