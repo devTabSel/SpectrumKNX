@@ -238,6 +238,7 @@ async def get_telegrams(
     source_address: str | None = None,
     target_address: str | None = None,
     telegram_type: str | None = None,
+    direction: str | None = None,
     dpt_main: str | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
@@ -249,6 +250,7 @@ async def get_telegrams(
     source_list = [s.strip() for s in source_address.split(",")] if source_address else []
     target_list = [s.strip() for s in target_address.split(",")] if target_address else []
     type_list = [s.strip() for s in telegram_type.split(",")] if telegram_type else []
+    direction_list = [s.strip() for s in direction.split(",") if s.strip()] if direction else []
 
     # Map simplified types to technical names
     type_map_reverse = {"Write": "GroupValueWrite", "Read": "GroupValueRead", "Response": "GroupValueResponse"}
@@ -268,6 +270,7 @@ async def get_telegrams(
         sources=source_list,
         destinations=target_list,
         telegram_types=type_list_db,
+        directions=direction_list,
         dpts=dpt_pairs,
         start_time=start_time,
         end_time=end_time,
@@ -444,9 +447,8 @@ def _aggregate_statistics(
     return {"total": sum(ga_counts.values()), "by_ga": by_ga, "by_pa": by_pa}
 
 
-@router.get("/api/statistics")
-async def get_statistics():
-    """Returns telegram counts grouped by group address and physical address."""
+async def _telegram_pair_counts() -> list:
+    """(source, destination, count) rows for every pair stored in the database."""
     sql = text("""
         SELECT s_lk.value AS source_address, d_lk.value AS destination, COUNT(*) AS cnt
         FROM telegrams t
@@ -454,10 +456,96 @@ async def get_statistics():
         JOIN string_lookup d_lk ON t.destination_id = d_lk.id
         GROUP BY s_lk.value, d_lk.value
     """)
-
     async with engine.connect() as conn:
         result = await conn.execute(sql)
-        rows = result.fetchall()
+        return list(result.fetchall())
+
+
+def _address_totals(rows: list) -> dict[str, dict[str, int]]:
+    """Sum pair rows into one total per source address and one per destination."""
+    sources: dict[str, int] = {}
+    targets: dict[str, int] = {}
+    for source, destination, cnt in rows:
+        n = int(cnt)
+        sources[source] = sources.get(source, 0) + n
+        targets[destination] = targets.get(destination, 0) + n
+    return {"sources": sources, "targets": targets}
+
+
+async def _telegram_dimension_counts() -> tuple[list, list, list]:
+    """(type, count), (direction, count) and (dpt main, dpt sub, count) rows."""
+    type_sql = text("""
+        SELECT lk.value AS telegramtype, COUNT(*) AS cnt
+        FROM telegrams t
+        JOIN string_lookup lk ON t.telegramtype_id = lk.id
+        GROUP BY lk.value
+    """)
+    direction_sql = text("""
+        SELECT lk.value AS direction, COUNT(*) AS cnt
+        FROM telegrams t
+        JOIN string_lookup lk ON t.direction_id = lk.id
+        GROUP BY lk.value
+    """)
+    dpt_sql = text("""
+        SELECT dpt_main, dpt_sub, COUNT(*) AS cnt
+        FROM telegrams
+        WHERE dpt_main IS NOT NULL
+        GROUP BY dpt_main, dpt_sub
+    """)
+    async with engine.connect() as conn:
+        types = list((await conn.execute(type_sql)).fetchall())
+        directions = list((await conn.execute(direction_sql)).fetchall())
+        dpts = list((await conn.execute(dpt_sql)).fetchall())
+    return types, directions, dpts
+
+
+def _category_totals(type_rows: list, direction_rows: list, dpt_rows: list) -> dict[str, dict[str, int]]:
+    """Map stored type, direction and DPT rows onto the filter-panel keys.
+
+    A subtype is counted on its own key and again on the bare main type, matching
+    the buffer counters. A telegram that only has a main type stays on that key.
+    """
+    types: dict[str, int] = {}
+    for name, cnt in type_rows:
+        if not name:
+            continue
+        label = get_simplified_type(str(name))
+        types[label] = types.get(label, 0) + int(cnt)
+
+    directions: dict[str, int] = {}
+    for name, cnt in direction_rows:
+        if not name:
+            continue
+        directions[str(name)] = directions.get(str(name), 0) + int(cnt)
+
+    dpts: dict[str, int] = {}
+    for main, sub, cnt in dpt_rows:
+        if main is None:
+            continue
+        n = int(cnt)
+        bare = str(int(main))
+        if sub is None:
+            dpts[bare] = dpts.get(bare, 0) + n
+        else:
+            key = f"{int(main)}.{int(sub):03d}"
+            dpts[key] = dpts.get(key, 0) + n
+            dpts[bare] = dpts.get(bare, 0) + n
+    return {"types": types, "directions": directions, "dpts": dpts}
+
+
+@router.get("/api/telegram-counts")
+async def get_telegram_counts():
+    """Telegram totals stored in the database, for every filter category."""
+    totals = _address_totals(await _telegram_pair_counts())
+    types, directions, dpts = await _telegram_dimension_counts()
+    totals.update(_category_totals(types, directions, dpts))
+    return totals
+
+
+@router.get("/api/statistics")
+async def get_statistics():
+    """Returns telegram counts grouped by group address and physical address."""
+    rows = await _telegram_pair_counts()
 
     ga_name_map: dict[str, str | None] = {}
     pa_name_map: dict[str, str | None] = {}

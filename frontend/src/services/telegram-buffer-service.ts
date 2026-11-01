@@ -1,12 +1,20 @@
 import type { TelegramEntry } from '../utils/telegramId';
 
+/** Timestamps currently on screen. Entries inside it are not evicted to make room. */
+export interface ProtectedSpan {
+  startMs: number;
+  endMs: number;
+}
+
 /**
  * In-memory telegram buffer with ring-buffer behavior, ported from the
  * Home Assistant knx-frontend Group Monitor (#246).
  *
  * - Chronological insertion with a fast-path append for live telegrams.
  * - Deduplicating `merge()` for historical loads.
- * - Automatic overflow eviction of the oldest entries.
+ * - Automatic overflow eviction of the oldest entries, unless a protected
+ *   time span is set: then entries outside that span go first, and a new
+ *   telegram that would only fit by evicting the span is dropped.
  * - Immutable `snapshot` for safe use as React state.
  */
 export class TelegramBufferService {
@@ -14,8 +22,20 @@ export class TelegramBufferService {
 
   private _maxSize: number;
 
+  /** Null while the list follows the live edge: overflow drops the oldest. */
+  private _protected: ProtectedSpan | null = null;
+
   constructor(maxSize = 2000) {
     this._maxSize = maxSize;
+  }
+
+  /** Keep this time span resident. Pass null while following the live edge. */
+  setProtectedRange(span: ProtectedSpan | null): void {
+    this._protected = span;
+  }
+
+  get protectedRange(): ProtectedSpan | null {
+    return this._protected;
   }
 
   /**
@@ -36,10 +56,7 @@ export class TelegramBufferService {
       this._buffer.sort((a, b) => a.ts - b.ts);
     }
 
-    if (this._buffer.length > this._maxSize) {
-      return this._buffer.splice(0, this._buffer.length - this._maxSize);
-    }
-    return [];
+    return this.trim(new Set(entryArray.map(e => e.id)));
   }
 
   /**
@@ -59,10 +76,49 @@ export class TelegramBufferService {
    */
   setMaxSize(size: number): TelegramEntry[] {
     this._maxSize = size;
-    if (this._buffer.length > size) {
-      return this._buffer.splice(0, this._buffer.length - size);
+    return this.trim(new Set());
+  }
+
+  /**
+   * Drops entries for which `keep` is false.
+   * @returns The entries that were removed.
+   */
+  retain(keep: (entry: TelegramEntry) => boolean): TelegramEntry[] {
+    const removed: TelegramEntry[] = [];
+    const kept: TelegramEntry[] = [];
+    for (const entry of this._buffer) {
+      if (keep(entry)) kept.push(entry);
+      else removed.push(entry);
     }
-    return [];
+    this._buffer = kept;
+    return removed;
+  }
+
+  /**
+   * Shrinks to `maxSize`. Without a protected span the oldest entries go.
+   * With one, the oldest entries outside the span go first. Incoming entries
+   * that still don't fit are dropped instead of the span.
+   */
+  private trim(incomingIds: ReadonlySet<string>): TelegramEntry[] {
+    if (this._buffer.length <= this._maxSize) return [];
+    const protect = this._protected;
+    if (!protect) {
+      return this._buffer.splice(0, this._buffer.length - this._maxSize);
+    }
+
+    const removed: TelegramEntry[] = [];
+    const outside = (entry: TelegramEntry) => entry.ts < protect.startMs || entry.ts > protect.endMs;
+    while (this._buffer.length > this._maxSize) {
+      const idx = this._buffer.findIndex(outside);
+      if (idx === -1) break;
+      removed.push(this._buffer.splice(idx, 1)[0]);
+    }
+    while (this._buffer.length > this._maxSize) {
+      const idx = this._buffer.findIndex(entry => incomingIds.has(entry.id));
+      if (idx === -1) break;
+      removed.push(this._buffer.splice(idx, 1)[0]);
+    }
+    return removed;
   }
 
   get maxSize(): number {

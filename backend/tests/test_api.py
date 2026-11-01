@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from knx_telegram_store import StoredTelegram, TelegramQueryResult
 
 import knx_daemon
-from api import _aggregate_statistics
+from api import _address_totals, _aggregate_statistics, _category_totals
 from main import app
 
 client = TestClient(app)
@@ -19,6 +19,46 @@ def test_get_update_endpoint():
     assert response.status_code == 200
     assert response.json()["latest"] == "v1.11.0"
     mock_update.assert_awaited_once()
+
+
+def test_address_totals_sum_each_source_and_destination():
+    rows = [
+        ("1.1.1", "1/2/3", 10),
+        ("1.1.2", "1/2/3", 4),
+        ("1.1.1", "1/2/4", 1),
+    ]
+    assert _address_totals(rows) == {
+        "sources": {"1.1.1": 11, "1.1.2": 4},
+        "targets": {"1/2/3": 14, "1/2/4": 1},
+    }
+
+
+def test_category_totals_simplify_types_and_roll_up_dpts():
+    assert _category_totals(
+        [("GroupValueWrite", 5), ("GroupValueRead", 2), ("GroupValueResponse", 1), ("Other", 4)],
+        [("Incoming", 8), ("Outgoing", 4), (None, 1)],
+        [(1, 1, 3), (1, None, 2), (9, 1, 4)],
+    ) == {
+        "types": {"Write": 5, "Read": 2, "Response": 1, "Other": 4},
+        "directions": {"Incoming": 8, "Outgoing": 4},
+        "dpts": {"1.001": 3, "1": 5, "9.001": 4, "9": 4},
+    }
+
+
+@patch("api._telegram_dimension_counts", new_callable=AsyncMock)
+@patch("api._telegram_pair_counts", new_callable=AsyncMock)
+def test_telegram_counts_endpoint(mock_pairs, mock_dimensions):
+    mock_pairs.return_value = [("1.1.1", "0/1/2", 3)]
+    mock_dimensions.return_value = ([("GroupValueWrite", 3)], [("Incoming", 3)], [(1, 1, 3)])
+    response = client.get("/api/telegram-counts")
+    assert response.status_code == 200
+    assert response.json() == {
+        "sources": {"1.1.1": 3},
+        "targets": {"0/1/2": 3},
+        "types": {"Write": 3},
+        "directions": {"Incoming": 3},
+        "dpts": {"1.001": 3, "1": 3},
+    }
 
 
 def test_aggregate_statistics_builds_drilldown_children():
@@ -288,6 +328,18 @@ def test_get_telegrams_dpt_filter_pairs(mock_query):
     query = mock_query.call_args.args[0]
     assert query.dpts == [(1, 1), (9, 1), (5, None)]
     assert query.dpt_mains == []
+
+
+@patch("database.store.query", new_callable=AsyncMock)
+def test_get_telegrams_direction_filter(mock_query):
+    """Direction is a real query constraint, same as source and type."""
+    mock_query.return_value = TelegramQueryResult(telegrams=[], total_count=0, limit_reached=False)
+
+    response = client.get("/api/telegrams?direction=Incoming,Outgoing")
+    assert response.status_code == 200
+
+    query = mock_query.call_args.args[0]
+    assert query.directions == ["Incoming", "Outgoing"]
 
 
 def _stored_telegram(destination: str, value: float) -> StoredTelegram:

@@ -27,15 +27,46 @@ test('shows the five main-panel tabs with Telegram List active by default (#374)
   render(<App />);
   const tabs = await screen.findAllByRole('tab');
   expect(tabs.map(t => t.getAttribute('title'))).toEqual([
-    'Telegram List',
-    'Visualization',
     'Statistics',
     'Building Structure',
+    'Telegram List',
+    'Visualization',
     'Last Seen Values',
   ]);
   // 'list' is the default; every panel's close returns here.
   const list = screen.getByRole('tab', { name: 'Telegram List' });
   expect(list).toHaveAttribute('aria-selected', 'true');
+  const header = screen.getByRole('button', { name: 'Toggle filter panel' }).parentElement!.parentElement as HTMLElement;
+  expect(header).toContainElement(list);
+  expect(header).toHaveTextContent('Telegram List');
+  expect(header).toContainElement(screen.getByRole('tab', { name: 'Visualization' }));
+  expect(header).toContainElement(screen.getByRole('tab', { name: 'Last Seen Values' }));
+  expect(header).not.toContainElement(screen.getByRole('tab', { name: 'Statistics' }));
+});
+
+test('the list header stays above visualization and last seen', async () => {
+  render(<App />);
+  const headerOf = () => screen.getByRole('button', { name: 'Toggle filter panel' }).parentElement!.parentElement as HTMLElement;
+  await screen.findByRole('tab', { name: 'Visualization' });
+
+  fireEvent.click(screen.getByRole('tab', { name: 'Visualization' }));
+  const vizHeader = headerOf();
+  expect(vizHeader).toHaveTextContent('Visualization');
+  expect(vizHeader).not.toHaveTextContent('Plotting');
+  expect(vizHeader).not.toHaveTextContent('Select group addresses');
+  expect(vizHeader.querySelector('button[title="Close Visualization"]')).toBeNull();
+  expect(vizHeader).toContainElement(screen.getByRole('tab', { name: 'Telegram List' }));
+  expect(vizHeader).not.toHaveTextContent('Telegram List');
+  expect(screen.getByRole('tab', { name: 'Visualization' })).toHaveAttribute('aria-selected', 'true');
+
+  fireEvent.click(screen.getByRole('tab', { name: 'Last Seen Values' }));
+  expect(screen.getByRole('button', { name: 'Targets' })).toBeInTheDocument();
+  const header = headerOf();
+  expect(header).toContainElement(screen.getByRole('tab', { name: 'Last Seen Values' }));
+  expect(header).toContainElement(screen.getByText('Last Seen Values'));
+  expect(header).toContainElement(screen.getByRole('button', { name: 'Live' }));
+  expect(header.querySelector('button[title="Close"]')).toBeNull();
+  expect(screen.queryByText('Visualization')).not.toBeInTheDocument();
 });
 
 test('play/pause and the filter toggle live with the Telegram List (#374)', async () => {

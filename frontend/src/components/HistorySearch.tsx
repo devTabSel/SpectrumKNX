@@ -2,8 +2,9 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { TelegramTable, type SortConfig, type SortKey } from './TelegramTable';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from '../utils/sortConfig';
 import { expandWithDeltaContext } from '../utils/deltaContextExpansion';
-import { activeQuickFilter, type QuickPatterns } from '../utils/quickFilter';
+import { activeQuickFilter, DEFAULT_QUICK_FILTER_COLUMN_ENABLED, type QuickFilterColumnEnabled, type QuickPatterns } from '../utils/quickFilter';
 import { anchorKey } from '../utils/anchorKey';
+import { applyToggle, PLAIN_TOGGLE, toggleTurnOn, type ToggleGesture } from '../utils/toggleClick';
 import type { Telegram } from '../hooks/useWebSocket';
 import { History, Download, AlertTriangle, Trash2, SlidersHorizontal, LineChart, RefreshCw } from 'lucide-react';
 import { HistoryLoader } from './HistoryLoader';
@@ -11,8 +12,10 @@ import { Visualizer } from './Visualizer';
 import { FilterPanel } from './FilterPanel';
 import { ResizablePane } from './ResizablePane';
 import { loadHistoryTelegrams, type LoadedRange } from '../utils/historyLoad';
+import type { DbTelegramCounts } from '../hooks/useDbTelegramCounts';
 import { buildViewUrl, type VizViewState } from '../utils/viewUrl';
 import {
+  countAppliedFilterOptions,
   countFilterOptions,
   countSelections,
   enabledFilters,
@@ -20,6 +23,8 @@ import {
   withoutSelections,
   hasActiveFilters,
   matchesTelegram,
+  focusAddressesForList,
+  passesFocusAddressFilter,
   type ActiveFilters,
   type FilterOptions,
 } from '../types/filters';
@@ -49,12 +54,73 @@ interface HistorySearchProps {
   /** Master filter switch, shared with the Group Monitor (#370, #436). */
   filtersEnabled?: boolean;
   onFiltersEnabledChange?: (enabled: boolean) => void;
+  /** Shared option search and compact toggle, persisted with the UI session. */
+  filterSearch?: string;
+  onFilterSearchChange?: (search: string) => void;
+  filterCompact?: boolean;
+  onFilterCompactChange?: (compact: boolean) => void;
+  filterCheckedOnly?: boolean;
+  onFilterCheckedOnlyChange?: (checkedOnly: boolean) => void;
+  /** Shared Filter/Focus header, persisted with the UI session. */
+  panelView?: 'filter' | 'focus';
+  onPanelViewChange?: (view: 'filter' | 'focus') => void;
+  focusTab?: 'ga' | 'pa';
+  onFocusTabChange?: (tab: 'ga' | 'pa') => void;
+  focusGas?: string[];
+  onFocusGasChange?: (addresses: string[]) => void;
+  focusDevices?: string[];
+  onFocusDevicesChange?: (addresses: string[]) => void;
+  focusGaSearch?: string;
+  onFocusGaSearchChange?: (search: string) => void;
+  focusDeviceSearch?: string;
+  onFocusDeviceSearchChange?: (search: string) => void;
+  focusGaCompact?: boolean;
+  onFocusGaCompactChange?: (compact: boolean) => void;
+  focusDeviceCompact?: boolean;
+  onFocusDeviceCompactChange?: (compact: boolean) => void;
+  focusGaVerdichten?: boolean;
+  onFocusGaVerdichtenChange?: (compact: boolean) => void;
+  focusDeviceVerdichten?: boolean;
+  onFocusDeviceVerdichtenChange?: (compact: boolean) => void;
+  lastSeenGas?: string[];
+  onLastSeenGasChange?: (addresses: string[]) => void;
+  lastSeenDevices?: string[];
+  onLastSeenDevicesChange?: (addresses: string[]) => void;
+  /** Visualization toggles. These do not change the focus checkboxes. */
+  visualizedGas?: string[];
+  onVisualizedGasChange?: (addresses: string[]) => void;
+  visualizedDevices?: string[];
+  onVisualizedDevicesChange?: (addresses: string[]) => void;
+  focusFilterGas?: string[];
+  onFocusFilterGasChange?: (addresses: string[]) => void;
+  focusFilterDevices?: string[];
+  onFocusFilterDevicesChange?: (addresses: string[]) => void;
+  filterFocusedSources?: boolean;
+  onFilterFocusedSourcesChange?: (on: boolean) => void;
+  filterFocusedTargets?: boolean;
+  onFilterFocusedTargetsChange?: (on: boolean) => void;
+  /** Database totals for the gray filter badge. */
+  dbCounts?: DbTelegramCounts;
+  /** Shift or alt on a last-seen toggle leaves History for the Last Seen panel. */
+  onOpenLastSeen?: () => void;
+  writeEnabled?: boolean;
 }
 
 export const HistorySearch: React.FC<HistorySearchProps> = ({
   visibleColumns, loadLimit, filterOptions, activeFilters, onFiltersChange, onOpenSettings,
   projectLoaded, selectedVisualizationTargets, onVisualizationTargetsChange, initialView,
   filtersEnabled = true, onFiltersEnabledChange,
+  filterSearch, onFilterSearchChange, filterCompact, onFilterCompactChange, filterCheckedOnly, onFilterCheckedOnlyChange,
+  panelView, onPanelViewChange,
+  focusTab, onFocusTabChange, focusGas, onFocusGasChange, focusDevices, onFocusDevicesChange,
+  focusGaSearch, onFocusGaSearchChange, focusDeviceSearch, onFocusDeviceSearchChange,
+  focusGaCompact, onFocusGaCompactChange, focusDeviceCompact, onFocusDeviceCompactChange,
+  focusGaVerdichten, onFocusGaVerdichtenChange, focusDeviceVerdichten, onFocusDeviceVerdichtenChange,
+  lastSeenGas, onLastSeenGasChange, lastSeenDevices, onLastSeenDevicesChange,
+  visualizedGas, onVisualizedGasChange, visualizedDevices, onVisualizedDevicesChange,
+  focusFilterGas, onFocusFilterGasChange, focusFilterDevices, onFocusFilterDevicesChange,
+  filterFocusedSources = false, onFilterFocusedSourcesChange, filterFocusedTargets = false, onFilterFocusedTargetsChange,
+  dbCounts, onOpenLastSeen, writeEnabled = false,
 }) => {
   const [telegrams, setTelegrams] = useState<Telegram[]>([]);
   const [isLoaderOpen, setIsLoaderOpen] = useState(false);
@@ -67,6 +133,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   const [quickFilterOpen, setQuickFilterOpen] = useState(false);
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(false);
   const [quickPatterns, setQuickPatterns] = useState<QuickPatterns>({});
+  const [quickFilterColumns, setQuickFilterColumns] = useState<QuickFilterColumnEnabled>(DEFAULT_QUICK_FILTER_COLUMN_ENABLED);
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [isVisualizerOpen, setIsVisualizerOpen] = useState(false);
 
@@ -106,6 +173,80 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     });
   };
 
+  const toggleFocusMembership = (
+    address: string | string[],
+    mode: 'ga' | 'pa',
+    gesture: ToggleGesture = PLAIN_TOGGLE,
+    clicked?: string,
+  ) => {
+    if (gesture.kind === 'none') return;
+    const addresses = typeof address === 'string' ? [address] : address;
+    if (gesture.kind === 'toggle') {
+      const current = mode === 'ga' ? (focusGas ?? []) : (focusDevices ?? []);
+      const next = applyToggle(
+        current,
+        addresses,
+        toggleTurnOn(current, addresses, clicked ?? (addresses.length === 1 ? addresses[0] : undefined)),
+        gesture.exclusive,
+      );
+      if (mode === 'ga') onFocusGasChange?.(next);
+      else onFocusDevicesChange?.(next);
+      if (!gesture.navigate) return;
+    }
+    onFocusTabChange?.(mode);
+    onPanelViewChange?.('focus');
+    setIsFilterOpen(true);
+  };
+
+  const toggleFocusFilter = (
+    address: string | string[],
+    mode: 'ga' | 'pa',
+    gesture: ToggleGesture = PLAIN_TOGGLE,
+    clicked?: string,
+  ) => {
+    if (gesture.kind === 'none') return;
+    const addresses = typeof address === 'string' ? [address] : address;
+    if (gesture.kind === 'toggle') {
+      const current = mode === 'ga' ? (focusFilterGas ?? []) : (focusFilterDevices ?? []);
+      const next = applyToggle(
+        current,
+        addresses,
+        toggleTurnOn(current, addresses, clicked ?? (addresses.length === 1 ? addresses[0] : undefined)),
+        gesture.exclusive,
+      );
+      if (mode === 'ga') onFocusFilterGasChange?.(next);
+      else onFocusFilterDevicesChange?.(next);
+      if (!gesture.navigate) return;
+    }
+    onFocusTabChange?.(mode);
+    onPanelViewChange?.('focus');
+    setIsFilterOpen(true);
+    setIsVisualizerOpen(false);
+  };
+
+  const handleQuickLastSeen = (
+    address: string | string[],
+    mode: 'ga' | 'pa',
+    gesture: ToggleGesture = PLAIN_TOGGLE,
+    clicked?: string,
+  ) => {
+    if (gesture.kind === 'none') return;
+    const addresses = typeof address === 'string' ? [address] : address;
+    if (gesture.kind === 'toggle') {
+      const current = mode === 'ga' ? (lastSeenGas ?? []) : (lastSeenDevices ?? []);
+      const next = applyToggle(
+        current,
+        addresses,
+        toggleTurnOn(current, addresses, clicked ?? (addresses.length === 1 ? addresses[0] : undefined)),
+        gesture.exclusive,
+      );
+      if (mode === 'ga') onLastSeenGasChange?.(next);
+      else onLastSeenDevicesChange?.(next);
+      if (!gesture.navigate) return;
+    }
+    onOpenLastSeen?.();
+  };
+
   const handleQuickFilter = (key: 'sources' | 'targets' | 'types' | 'dpts', value: string | number) => {
     const current = activeFilters[key] as (string | number)[];
     const isPresent = current.includes(value as never);
@@ -116,12 +257,46 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     setIsFilterOpen(true);
   };
 
-  const handleQuickVisualize = (targetAddress: string) => {
-    onVisualizationTargetsChange(prev =>
-      prev.includes(targetAddress) ? prev : [...prev, targetAddress]
-    );
+  const handleQuickVisualize = (
+    targetAddress: string | string[],
+    _mode: 'ga' | 'pa' = 'ga',
+    gesture: ToggleGesture = PLAIN_TOGGLE,
+    clicked?: string,
+  ) => {
+    if (gesture.kind === 'none') return;
+    const addresses = typeof targetAddress === 'string' ? [targetAddress] : targetAddress;
+    if (gesture.kind === 'toggle') {
+      const next = applyToggle(
+        selectedVisualizationTargets,
+        addresses,
+        toggleTurnOn(selectedVisualizationTargets, addresses, clicked ?? (addresses.length === 1 ? addresses[0] : undefined)),
+        gesture.exclusive,
+      );
+      onVisualizationTargetsChange(next);
+      if (!gesture.navigate) return;
+    }
     setIsVisualizerOpen(true);
-    setIsFilterOpen(false);
+  };
+
+  const handleVisualizeDevice = (
+    sourceAddress: string | string[],
+    _mode: 'ga' | 'pa' = 'pa',
+    gesture: ToggleGesture = PLAIN_TOGGLE,
+    clicked?: string,
+  ) => {
+    if (gesture.kind === 'none') return;
+    const addresses = typeof sourceAddress === 'string' ? [sourceAddress] : sourceAddress;
+    if (gesture.kind === 'toggle') {
+      const current = visualizedDevices ?? [];
+      onVisualizedDevicesChange?.(applyToggle(
+        current,
+        addresses,
+        toggleTurnOn(current, addresses, clicked ?? (addresses.length === 1 ? addresses[0] : undefined)),
+        gesture.exclusive,
+      ));
+      if (!gesture.navigate) return;
+    }
+    setIsVisualizerOpen(true);
   };
 
   // Time-Delta-Context window, edited from the telegram list's DELTA TIME
@@ -174,14 +349,22 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   // per-message flags are set after the historical load already happened.
   const deltaExpandedHistory = useMemo(() => {
     const noFilter = !filtering;
-    const quick = activeQuickFilter(quickFilterOpen, quickFilterEnabled, quickPatterns);
+    const quick = activeQuickFilter(quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumns);
+    const appliedFocus = focusAddressesForList(focusFilterGas ?? [], focusFilterDevices ?? [], filterFocusedSources, filterFocusedTargets);
     const matches = sortedTelegrams.map(t =>
-      (noFilter || matchesTelegram(t, effectiveFilters)) && (!quick || quick(t))
+      (noFilter || matchesTelegram(t, effectiveFilters))
+      && passesFocusAddressFilter(t, appliedFocus.gas, appliedFocus.devices)
+      && (!quick || quick(t))
     );
-    const { before, after } = effectiveDeltaContext(activeFilters);
-    const flags = activeFilters.deltaContextEnabled ? new Set(flaggedKeys) : EMPTY_FLAG_SET;
+    const { before, after } = effectiveDeltaContext(activeFilters, quickFilterColumns.delta !== false);
+    // Same rule as the live list: a context-button flag does not keep a
+    // non-match unless a window is set and a focus or quick filter narrows the list.
+    const focusOrQuick = appliedFocus.gas.length > 0 || appliedFocus.devices.length > 0 || quick != null;
+    const flags = activeFilters.deltaContextEnabled && (before > 0 || after > 0) && focusOrQuick
+      ? new Set(flaggedKeys)
+      : EMPTY_FLAG_SET;
     return expandWithDeltaContext(sortedTelegrams, matches, anchorKey, flags, before, after, contextForAllMatches);
-  }, [sortedTelegrams, activeFilters, effectiveFilters, filtering, flaggedKeys, contextForAllMatches, quickFilterOpen, quickFilterEnabled, quickPatterns]);
+  }, [sortedTelegrams, activeFilters, effectiveFilters, filtering, flaggedKeys, contextForAllMatches, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumns, focusFilterGas, focusFilterDevices, filterFocusedSources, filterFocusedTargets]);
   const filteredSortedTelegrams = deltaExpandedHistory.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = deltaExpandedHistory.contextKeys;
@@ -200,13 +383,18 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
       (wasFiltered(atLoad.sources) && nowHasFewer(effectiveFilters.sources, atLoad.sources)) ||
       (wasFiltered(atLoad.targets) && nowHasFewer(effectiveFilters.targets, atLoad.targets)) ||
       (wasFiltered(atLoad.types)   && nowHasFewer(effectiveFilters.types,   atLoad.types))   ||
-      (wasFiltered(atLoad.dpts)    && nowHasFewer(effectiveFilters.dpts,    atLoad.dpts))
+      (wasFiltered(atLoad.dpts)    && nowHasFewer(effectiveFilters.dpts,    atLoad.dpts)) ||
+      (wasFiltered(atLoad.directions) && nowHasFewer(effectiveFilters.directions, atLoad.directions))
     );
   }, [effectiveFilters, filtersAtLoad, telegrams.length]);
 
-  // Count bubbles for the filter pane (#446), over everything loaded — not just
-  // the rows passing the current filters — so they match the Group Monitor's.
+  // Same rule as the Group Monitor: selections count even while the master
+  // switch is off, so the pane does not follow that switch.
   const filterCounts = useMemo(
+    () => (telegrams.length > 0 ? countAppliedFilterOptions(telegrams, activeFilters) : undefined),
+    [telegrams, activeFilters]
+  );
+  const bufferCounts = useMemo(
     () => (telegrams.length > 0 ? countFilterOptions(telegrams) : undefined),
     [telegrams]
   );
@@ -256,7 +444,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
           {/* Filter toggle */}
           <button
             className="icon-button"
-            onClick={() => setIsFilterOpen(o => { const next = !o; if (next) setIsVisualizerOpen(false); return next; })}
+            onClick={() => setIsFilterOpen(o => !o)}
             title="Toggle filter panel"
             style={{
               position: 'relative',
@@ -278,7 +466,14 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
           {telegrams.length > 0 && (
             <button
               className="icon-button"
-              onClick={() => setIsVisualizerOpen(v => { const next = !v; if (next) setIsFilterOpen(false); return next; })}
+              onClick={() => {
+                if (!isVisualizerOpen) {
+                  setIsFilterOpen(true);
+                  onPanelViewChange?.('focus');
+                  onFocusTabChange?.('ga');
+                }
+                setIsVisualizerOpen(v => !v);
+              }}
               title="Visualize data"
               style={{
                 display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0.85rem',
@@ -321,10 +516,55 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               activeFilters={activeFilters}
               onFiltersChange={onFiltersChange}
               counts={filterCounts}
+              bufferCounts={bufferCounts}
+              dbCounts={dbCounts}
               filtersEnabled={filtersEnabled}
               onFiltersEnabledChange={onFiltersEnabledChange}
+              search={filterSearch}
+              onSearchChange={onFilterSearchChange}
+              compact={filterCompact}
+              onCompactChange={onFilterCompactChange}
+              checkedOnly={filterCheckedOnly}
+              onCheckedOnlyChange={onFilterCheckedOnlyChange}
+              panelView={panelView}
+              onPanelViewChange={onPanelViewChange}
+              focusTab={focusTab}
+              onFocusTabChange={onFocusTabChange}
+              focusGas={focusGas}
+              onFocusGasChange={onFocusGasChange}
+              focusDevices={focusDevices}
+              onFocusDevicesChange={onFocusDevicesChange}
+              focusGaSearch={focusGaSearch}
+              onFocusGaSearchChange={onFocusGaSearchChange}
+              focusDeviceSearch={focusDeviceSearch}
+              onFocusDeviceSearchChange={onFocusDeviceSearchChange}
+              focusGaCompact={focusGaCompact}
+              onFocusGaCompactChange={onFocusGaCompactChange}
+              focusDeviceCompact={focusDeviceCompact}
+              onFocusDeviceCompactChange={onFocusDeviceCompactChange}
+              focusGaVerdichten={focusGaVerdichten}
+              onFocusGaVerdichtenChange={onFocusGaVerdichtenChange}
+              focusDeviceVerdichten={focusDeviceVerdichten}
+              onFocusDeviceVerdichtenChange={onFocusDeviceVerdichtenChange}
+              lastSeenGas={lastSeenGas}
+              onLastSeenGasChange={onLastSeenGasChange}
+              lastSeenDevices={lastSeenDevices}
+              onLastSeenDevicesChange={onLastSeenDevicesChange}
+              visualizedGas={visualizedGas ?? selectedVisualizationTargets}
+              onVisualizedGasChange={onVisualizedGasChange ?? onVisualizationTargetsChange}
+              visualizedDevices={visualizedDevices}
+              onVisualizedDevicesChange={onVisualizedDevicesChange}
+              focusFilterGas={focusFilterGas}
+              onFocusFilterGasChange={onFocusFilterGasChange}
+              focusFilterDevices={focusFilterDevices}
+              onFocusFilterDevicesChange={onFocusFilterDevicesChange}
               projectLoaded={projectLoaded}
               onUploadProject={onOpenSettings}
+              onOpenPanel={panel => {
+                if (panel === 'visualizer') { setIsVisualizerOpen(true); return; }
+                if (panel === 'list') { setIsVisualizerOpen(false); return; }
+                onOpenLastSeen?.();
+              }}
             />
         </ResizablePane>
 
@@ -375,14 +615,34 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               sortConfig={sortConfig}
               onSort={handleSort}
               activeFilters={activeFilters}
+              filtersEnabled={filtersEnabled}
               onQuickFilter={handleQuickFilter}
+              onFocusFilter={toggleFocusMembership}
+              focusGas={focusGas}
+              focusDevices={focusDevices}
+              focusFilterGas={focusFilterGas}
+              focusFilterDevices={focusFilterDevices}
+              filterFocusedSources={filterFocusedSources}
+              onFilterFocusedSourcesChange={onFilterFocusedSourcesChange}
+              filterFocusedTargets={filterFocusedTargets}
+              onFilterFocusedTargetsChange={onFilterFocusedTargetsChange}
               onQuickVisualize={handleQuickVisualize}
+              onQuickVisualizeSource={handleVisualizeDevice}
+              onQuickLastSeen={handleQuickLastSeen}
+              onFocusAddressFilter={toggleFocusFilter}
+              lastSeenGas={lastSeenGas}
+              lastSeenDevices={lastSeenDevices}
+              visualizedGas={visualizedGas ?? selectedVisualizationTargets}
+              visualizedDevices={visualizedDevices}
+              canSend={writeEnabled}
               quickFilterOpen={quickFilterOpen}
               onQuickFilterOpenChange={setQuickFilterOpen}
               quickFilterEnabled={quickFilterEnabled}
               onQuickFilterEnabledChange={setQuickFilterEnabled}
               quickPatterns={quickPatterns}
               onQuickPatternsChange={setQuickPatterns}
+              quickFilterColumnEnabled={quickFilterColumns}
+              onQuickFilterColumnEnabledChange={setQuickFilterColumns}
               onDeltaContextChange={handleDeltaContextChange}
               onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
               flaggedKeys={flaggedKeys}

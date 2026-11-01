@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useContext } from 'react';
 import { format } from 'date-fns';
 import {
-  X, RefreshCw, Building2, ChevronDown, ChevronRight, Cpu, Layers, Filter, ListFilter, Clock, Activity, Sparkles,
+  X, RefreshCw, Building2, ChevronDown, ChevronRight, Cpu, Layers, ListFilter, Clock, Activity, Sparkles, Search,
   LineChart,
   ListChecks, ListX,
 } from 'lucide-react';
@@ -9,9 +9,13 @@ import { apiUrl } from '../utils/basePath';
 import { useExpanded } from '../utils/buildingExpansion';
 import { clearDeviceSelection, setOnlySelected, useBuildingSelection, useDeviceSelected } from '../utils/buildingSelection';
 import { GaNameWidthContext } from '../utils/gaNameWidth';
+import { matchesAnyText } from '../utils/quickFilter';
+import { focusLoupeTitle } from '../utils/focusClick';
+import { invokeToggle, type ToggleGesture } from '../utils/toggleClick';
 import { useLastSeenValues } from '../hooks/useLastSeenValues';
-import { SendToGaPopover } from './SendToGaPopover';
-import { GaValuesTable } from './GaValuesTable';
+import { AddressActions } from './telegramCell';
+import { GaValuesTable, gaAlignColumns } from './GaValuesTable';
+import { CheckMark } from './filterControls';
 import type { Telegram } from '../hooks/useWebSocket';
 
 // GA name column width is clamped to keep a single very long name from blowing
@@ -88,14 +92,20 @@ interface BuildingData {
 
 interface BuildingOverlayProps {
   onClose: () => void;
-  /** Add a device's individual address to the source filter. */
-  onFilterDevice: (pa: string) => void;
-  /** Add a set of connected group addresses to the target filter. */
-  onFilterGAs: (addresses: string[]) => void;
+  /** Add a device to the Focus list. Does not change the filter. */
+  onFilterDevice: (pa: string, reveal?: ToggleGesture) => void;
+  /** Add group addresses to the Focus list. Does not change the filter. */
+  onFilterGAs: (addresses: string[], reveal?: ToggleGesture) => void;
   /** Open the last-seen overlay for one or more addresses. */
-  onLastSeen: (address: string | string[], mode: 'ga' | 'pa') => void;
+  onLastSeen: (address: string | string[], mode: 'ga' | 'pa', gesture: ToggleGesture) => void;
   /** Open the visualization panel plotting one or more group addresses (#307). */
-  onVisualizeGAs: (addresses: string[]) => void;
+  onVisualizeGAs: (addresses: string[], gesture: ToggleGesture) => void;
+  /** Toggle a group address in the Focus list. Does not change the filter. */
+  onFocusFilter?: (address: string, mode: 'ga' | 'pa', reveal?: ToggleGesture) => void;
+  /** Group addresses checked in the Focus list. */
+  focusFilterGas?: readonly string[];
+  /** Devices checked in the Focus list. */
+  focusDevices?: readonly string[];
   /** Open the live KO status view for a device (#153). */
   onDeviceStatus: (device: DeviceNode) => void;
   writeEnabled?: boolean;
@@ -131,29 +141,20 @@ const sortSpaces = (spaces: SpaceNode[]): SpaceNode[] =>
 
 // ── Search matching helpers ─────────────────────────────────────────────────────
 
-const gaMatches = (ga: GaRef, q: string) =>
-  ga.address.toLowerCase().includes(q) || ga.name.toLowerCase().includes(q);
+const gaMatches = (ga: GaRef, q: string) => matchesAnyText(q, ga.address, ga.name);
 
 const koMatches = (ko: Ko, q: string) =>
-  (ko.name ?? '').toLowerCase().includes(q) ||
-  (ko.text ?? '').toLowerCase().includes(q) ||
-  (ko.function_text ?? '').toLowerCase().includes(q) ||
-  (ko.number != null && String(ko.number).includes(q)) ||
+  matchesAnyText(q, ko.name, ko.text, ko.function_text, ko.number) ||
   ko.group_addresses.some(g => gaMatches(g, q));
 
 const deviceMatches = (d: DeviceNode, q: string): boolean =>
-  d.address.toLowerCase().includes(q) ||
-  d.name.toLowerCase().includes(q) ||
-  d.manufacturer.toLowerCase().includes(q) ||
-  d.channels.some(c => c.name.toLowerCase().includes(q) || c.kos.some(k => koMatches(k, q))) ||
+  matchesAnyText(q, d.address, d.name, d.manufacturer) ||
+  d.channels.some(c => matchesAnyText(q, c.name) || c.kos.some(k => koMatches(k, q))) ||
   d.kos.some(k => koMatches(k, q));
 
 const functionMatches = (func: FunctionNode, q: string): boolean =>
-  (func.name ?? '').toLowerCase().includes(q) ||
-  (func.type ?? '').toLowerCase().includes(q) ||
-  func.group_addresses.some(g =>
-    g.address.toLowerCase().includes(q) || (g.name ?? '').toLowerCase().includes(q)
-  );
+  matchesAnyText(q, func.name, func.type) ||
+  func.group_addresses.some(g => matchesAnyText(q, g.address, g.name));
 
 // Widest GA name across the whole project, so every GaValuesTable instance in
 // the tree (comm objects and functions alike) aligns its DPT/TIME/VALUE
@@ -184,8 +185,7 @@ const spaceHasSelected = (s: SpaceNode, selected: ReadonlySet<string>): boolean 
   s.devices.some(d => selected.has(d.address)) || s.spaces.some(sub => spaceHasSelected(sub, selected));
 
 const spaceMatches = (s: SpaceNode, q: string): boolean =>
-  s.name.toLowerCase().includes(q) ||
-  s.type.toLowerCase().includes(q) ||
+  matchesAnyText(q, s.name, s.type) ||
   s.spaces.some(sub => spaceMatches(sub, q)) ||
   s.devices.some(d => deviceMatches(d, q)) ||
   (s.functions ? s.functions.some(f => functionMatches(f, q)) : false);
@@ -226,18 +226,26 @@ const Caret: React.FC<{ open: boolean; hasChildren: boolean }> = ({ open, hasChi
   </span>
 );
 
+/** Fixed so the group-address list lines up under the communication-object name. */
+const KO_NUMBER_WIDTH = '2.15rem';
+
+const koNameInset = (depth: number, hasNumber: boolean) =>
+  `calc(${0.75 + depth * 1.1}rem${hasNumber ? ` + ${KO_NUMBER_WIDTH} + 0.4rem` : ''} + 12px + 0.4rem)`;
+
 // ── KO row ──────────────────────────────────────────────────────────────────────
 
 const KoRow: React.FC<{
   ko: Ko;
   koKey: string;
   depth: number;
-  onFilterGAs: (addresses: string[]) => void;
-  onLastSeen: (address: string | string[], mode: 'ga' | 'pa') => void;
-  onVisualizeGAs: (addresses: string[]) => void;
+  onFilterGAs: (addresses: string[], reveal?: ToggleGesture) => void;
+  onLastSeen: (address: string | string[], mode: 'ga' | 'pa', gesture: ToggleGesture) => void;
+  onVisualizeGAs: (addresses: string[], gesture: ToggleGesture) => void;
+  onFocusFilter?: (address: string, mode: 'ga' | 'pa', reveal?: ToggleGesture) => void;
+  focusFilterGas?: readonly string[];
   writeEnabled?: boolean;
   latestTelegram?: Telegram | null;
-}> = ({ ko, koKey, depth, onFilterGAs, onLastSeen, onVisualizeGAs, writeEnabled, latestTelegram }) => {
+}> = ({ ko, koKey, depth, onFilterGAs, onLastSeen, onVisualizeGAs, onFocusFilter, focusFilterGas, writeEnabled, latestTelegram }) => {
   const [open, toggle] = useExpanded(`ko:${koKey}`, false);
   const dpt = formatDpt(ko.dpts);
   const gaAddresses = useMemo(() => ko.group_addresses.map(g => g.address), [ko.group_addresses]);
@@ -267,7 +275,27 @@ const KoRow: React.FC<{
     const other = ko.group_addresses.find(ga => ga.dpt?.main != null && ga.dpt.main !== ownMain);
     return other?.dpt?.main ?? null;
   }, [ko.dpts, ko.group_addresses]);
-  const framed = !!newest && newest.target_address === sendingGA;
+  const nameCh = useContext(GaNameWidthContext);
+  const koDptText = dpt
+    ? `${dpt.label}${dpt.name ? ` ${dpt.name}` : ''}${mismatchMain != null ? ` ${mismatchMain}.*` : ''}`
+    : '';
+  const alignColumns = useMemo(() => (
+    hasGAs
+      ? gaAlignColumns(
+          gaAddresses,
+          [koDptText, ...ko.group_addresses.map(ga => {
+            const spec = ga.dpt ?? ko.dpts?.[0];
+            if (!spec || spec.main == null) return '';
+            const num = spec.sub != null ? `${spec.main}.${String(spec.sub).padStart(3, '0')}` : String(spec.main);
+            const raw = spec.name ?? '';
+            const sep = raw.indexOf(' - ');
+            const desc = sep >= 0 ? raw.slice(sep + 3) : '';
+            return desc ? `${num} ${desc}` : num;
+          })],
+          nameCh,
+        )
+      : null
+  ), [hasGAs, gaAddresses, koDptText, ko.group_addresses, ko.dpts, nameCh]);
 
   return (
     <div>
@@ -277,28 +305,114 @@ const KoRow: React.FC<{
       onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
       onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
     >
-      <Caret open={open} hasChildren={hasGAs} />
-      {ko.number != null && (
-        <span style={{
-          fontFamily: "'JetBrains Mono', monospace", fontSize: '0.65rem', fontWeight: 600,
-          minWidth: '1.6rem', textAlign: 'center', padding: '0.1rem 0.35rem', borderRadius: '4px',
-          background: 'var(--bg-tag)', color: 'var(--text-dim)', border: '1px solid var(--border-subtle)',
-          flexShrink: 0,
-        }}>{ko.number}</span>
-      )}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div title={label} style={{
-          fontSize: '0.8rem', color: 'var(--text-main)',
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>{label}</div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem', marginTop: '0.15rem' }}>
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+        {ko.number != null && (
+          <span style={{
+            fontFamily: "'JetBrains Mono', monospace", fontSize: '0.65rem', fontWeight: 600,
+            boxSizing: 'border-box', width: KO_NUMBER_WIDTH, height: '1rem', lineHeight: '1rem',
+            textAlign: 'center', padding: '0 0.2rem', borderRadius: '4px',
+            background: 'var(--bg-tag)', color: 'var(--text-dim)', border: '1px solid var(--border-subtle)',
+            flexShrink: 0,
+          }}>{ko.number}</span>
+        )}
+        <Caret open={open} hasChildren={hasGAs} />
+        {alignColumns ? (
+          <div style={{
+            flex: 1, minWidth: 0, display: 'grid', alignItems: 'center',
+            gridTemplateColumns: alignColumns.grid,
+          }}>
+            <div title={label} style={{
+              gridColumn: '1 / 3', minWidth: 0,
+              fontSize: '0.8rem', color: 'var(--text-main)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>{label}</div>
+            <span
+              title={dpt ? (dpt.name ? `${dpt.label} – ${dpt.name}` : dpt.label) : undefined}
+              style={{ paddingLeft: '0.5rem', fontSize: '0.65rem', color: 'var(--text-dim)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+            >
+              {dpt && dpt.label}
+              {dpt?.name && <span style={{ opacity: 0.75 }}> {dpt.name}</span>}
+              {mismatchMain != null && (
+                <span
+                  title={`A connected group address has a different DPT main category (${mismatchMain}.*) than this communication object's own DPT`}
+                  style={{ color: 'var(--warning-text)' }}
+                >
+                  {' '}{mismatchMain}.*
+                </span>
+              )}
+            </span>
+            <span
+              style={{ paddingLeft: '0.5rem', fontSize: '0.65rem', color: 'var(--text-dim)', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', overflow: 'hidden', textOverflow: 'ellipsis' }}
+              title={newest ? `by ${newest.source_address}${newest.source_name ? ` (${newest.source_name})` : ''}` : undefined}
+            >
+              {newest && format(new Date(newest.timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
+            </span>
+            <span
+              style={{
+                paddingLeft: '0.5rem', fontSize: '0.65rem', fontWeight: 600, color: 'var(--text-main)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}
+            >
+              {newest && (newest.value_formatted ?? newest.value_numeric ?? '—')}
+              {newest?.unit && <span style={{ fontWeight: 400, color: 'var(--text-dim)' }}> {newest.unit}</span>}
+            </span>
+            <span style={{ paddingLeft: '0.5rem', display: 'inline-flex', alignItems: 'center' }}>
+              <button
+                style={iconBtnStyle}
+                title={focusLoupeTitle(`Toggle focus for the connected group address${gaAddresses.length > 1 ? 'es' : ''}`)}
+                onClick={e => { e.stopPropagation(); invokeToggle(e, onFilterGAs, gaAddresses); }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+              >
+                <Search size={12} />
+              </button>
+              <button
+                style={iconBtnStyle}
+                title={`Visualize connected group address${gaAddresses.length > 1 ? 'es' : ''}`}
+                onClick={e => { e.stopPropagation(); invokeToggle(e, onVisualizeGAs, gaAddresses); }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+              >
+                <LineChart size={12} />
+              </button>
+              <button
+                style={iconBtnStyle}
+                title={`Show last seen values${gaAddresses.length > 1 ? ` (${gaAddresses.length} GAs)` : ''}`}
+                onClick={e => { e.stopPropagation(); invokeToggle(e, onLastSeen, gaAddresses, 'ga'); }}
+                onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
+                onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+              >
+                <Clock size={12} />
+              </button>
+            </span>
+          </div>
+        ) : (
+          <div title={label} style={{
+            flex: 1, minWidth: 0,
+            fontSize: '0.8rem', color: 'var(--text-main)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{label}</div>
+        )}
+      </div>
+    </div>
+      {hasGAs && !open && (
+        <div
+          onClick={toggle}
+          style={{
+            display: 'flex', flexWrap: 'wrap', gap: '0.25rem',
+            marginTop: '0.15rem', cursor: 'pointer',
+            paddingLeft: koNameInset(depth, ko.number != null),
+            paddingRight: '0.75rem',
+          }}
+        >
           {ko.group_addresses.map(ga => {
             const sending = ga.address === sendingGA;
+            const focused = !!focusFilterGas?.includes(ga.address);
             return (
               <span
                 key={ga.address}
                 title={`${ga.name || ga.address}${sending ? ' — sending group address' : ''}`}
                 style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '0.15rem',
                   fontFamily: "'JetBrains Mono', monospace", fontSize: '0.65rem',
                   padding: '0.05rem 0.3rem', borderRadius: '3px',
                   background: sending ? 'rgba(99,102,241,0.22)' : 'rgba(99,102,241,0.1)',
@@ -306,107 +420,26 @@ const KoRow: React.FC<{
                   border: sending ? '1px solid rgba(99,102,241,0.6)' : '1px solid rgba(99,102,241,0.25)',
                   fontWeight: sending ? 700 : 400,
                 }}
-              >{ga.address}</span>
+              >
+                {ga.address}
+                <AddressActions
+                  inline
+                  mode="ga"
+                  address={ga.address}
+                  name={ga.name}
+                  dptMain={ga.dpt?.main}
+                  dptSub={ga.dpt?.sub}
+                  focusOn={focused}
+                  onFocus={onFocusFilter}
+                  onVisualize={(_address, _mode, gesture) => onVisualizeGAs([ga.address], gesture)}
+                  onLastSeen={onLastSeen}
+                  canSend={writeEnabled}
+                />
+              </span>
             );
           })}
         </div>
-      </div>
-      {dpt && (
-        <div
-          title={dpt.name ? `${dpt.label} – ${dpt.name}` : dpt.label}
-          style={{
-            display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
-            flexShrink: 0, minWidth: 0, maxWidth: '35%',
-          }}
-        >
-          <span style={{ fontSize: '0.65rem', color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
-            {dpt.label}
-          </span>
-          {dpt.name && (
-            <span style={{
-              fontSize: '0.65rem', color: 'var(--text-dim)', opacity: 0.75,
-              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%',
-            }}>
-              {dpt.name}
-            </span>
-          )}
-          {mismatchMain != null && (
-            <span
-              title={`A connected group address has a different DPT main category (${mismatchMain}.*) than this communication object's own DPT`}
-              style={{ fontSize: '0.65rem', color: 'var(--warning-text)', whiteSpace: 'nowrap' }}
-            >
-              {mismatchMain}.*
-            </span>
-          )}
-        </div>
       )}
-      {newest && (
-        <div style={{
-          display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
-          flexShrink: 0, minWidth: 0, maxWidth: '25%',
-        }}>
-          <span
-            style={{ fontSize: '0.65rem', color: 'var(--text-dim)', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}
-            title={`by ${newest.source_address}${newest.source_name ? ` (${newest.source_name})` : ''}`}
-          >
-            {format(new Date(newest.timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
-          </span>
-          <span
-            style={{
-              fontSize: '0.65rem', fontWeight: 600, color: 'var(--text-main)', whiteSpace: 'nowrap',
-              ...(framed
-                ? { border: '1px solid var(--accent-primary)', borderRadius: '4px', padding: '0.02rem 0.3rem' }
-                : {}),
-            }}
-          >
-            {newest.value_formatted ?? newest.value_numeric ?? '—'}
-            {newest.unit && <span style={{ fontWeight: 400, color: 'var(--text-dim)' }}> {newest.unit}</span>}
-          </span>
-        </div>
-      )}
-      {gaAddresses.length > 0 && (
-        <>
-          {writeEnabled && gaAddresses.length === 1 && (
-            <div style={{ display: 'flex', alignItems: 'center' }}>
-              <SendToGaPopover
-                address={gaAddresses[0]}
-                name={ko.group_addresses[0].name}
-                dptMain={ko.dpts[0]?.main}
-                dptSub={ko.dpts[0]?.sub}
-                buttonStyle={iconBtnStyle}
-              />
-            </div>
-          )}
-          <button
-            style={iconBtnStyle}
-            title={`Visualize connected group address${gaAddresses.length > 1 ? 'es' : ''}`}
-            onClick={e => { e.stopPropagation(); onVisualizeGAs(gaAddresses); }}
-            onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-            onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-          >
-            <LineChart size={12} />
-          </button>
-          <button
-            style={iconBtnStyle}
-            title={`Filter by connected group address${gaAddresses.length > 1 ? 'es' : ''}`}
-            onClick={e => { e.stopPropagation(); onFilterGAs(gaAddresses); }}
-            onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-            onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-          >
-            <ListFilter size={12} />
-          </button>
-          <button
-            style={iconBtnStyle}
-            title={`Show last seen values${gaAddresses.length > 1 ? ` (${gaAddresses.length} GAs)` : ''}`}
-            onClick={e => { e.stopPropagation(); onLastSeen(gaAddresses, 'ga'); }}
-            onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-            onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-          >
-            <Clock size={12} />
-          </button>
-        </>
-      )}
-    </div>
       {open && hasGAs && (
         <GaValuesTable
           entries={ko.group_addresses.map(ga => ({
@@ -415,12 +448,17 @@ const KoRow: React.FC<{
             dpt: ga.dpt ?? ko.dpts?.[0],
             sending: ga.address === sendingGA,
           }))}
-          depth={depth + 1}
+          depth={depth}
           latestTelegram={latestTelegram}
           writeEnabled={writeEnabled}
           onFilterGAs={onFilterGAs}
           onLastSeen={onLastSeen}
           onVisualizeGAs={onVisualizeGAs}
+          onFocusFilter={onFocusFilter}
+          focusFilterGas={focusFilterGas}
+          alignToKo
+          insetLeft={koNameInset(depth, ko.number != null)}
+          alignColumns={alignColumns ?? undefined}
         />
       )}
     </div>
@@ -433,20 +471,24 @@ const DeviceRow: React.FC<{
   device: DeviceNode;
   depth: number;
   query: string;
-  onFilterDevice: (pa: string) => void;
-  onFilterGAs: (addresses: string[]) => void;
-  onLastSeen: (address: string | string[], mode: 'ga' | 'pa') => void;
-  onVisualizeGAs: (addresses: string[]) => void;
+  onFilterDevice: (pa: string, reveal?: ToggleGesture) => void;
+  onFilterGAs: (addresses: string[], reveal?: ToggleGesture) => void;
+  onLastSeen: (address: string | string[], mode: 'ga' | 'pa', gesture: ToggleGesture) => void;
+  onVisualizeGAs: (addresses: string[], gesture: ToggleGesture) => void;
+  onFocusFilter?: (address: string, mode: 'ga' | 'pa', reveal?: ToggleGesture) => void;
+  focusFilterGas?: readonly string[];
+  focusDevices?: readonly string[];
   onDeviceStatus: (device: DeviceNode) => void;
   writeEnabled?: boolean;
   latestTelegram?: Telegram | null;
-}> = ({ device, depth, query, onFilterDevice, onFilterGAs, onLastSeen, onVisualizeGAs, onDeviceStatus, writeEnabled, latestTelegram }) => {
+}> = ({ device, depth, query, onFilterDevice, onFilterGAs, onLastSeen, onVisualizeGAs, onFocusFilter, focusFilterGas, focusDevices, onDeviceStatus, writeEnabled, latestTelegram }) => {
   const [open, toggle] = useExpanded(`dev:${device.address}`, false);
   const koCount = device.channels.reduce((s, c) => s + c.kos.length, 0) + device.kos.length;
   const hasChildren = koCount > 0;
   const effectiveOpen = open || !!query;
   const allGAs = useMemo(() => deviceGAs(device), [device]);
   const [ticked, toggleTicked] = useDeviceSelected(device.address);
+  const deviceFocused = !!focusDevices?.includes(device.address);
 
   return (
     <div>
@@ -458,15 +500,16 @@ const DeviceRow: React.FC<{
       >
         <Caret open={effectiveOpen} hasChildren={hasChildren} />
         {/* Tick devices to look at them together; the header can then hide the rest (#505). */}
-        <input
-          type="checkbox"
-          checked={ticked}
-          onChange={toggleTicked}
-          onClick={e => e.stopPropagation()}
+        <div
+          role="checkbox"
+          aria-checked={ticked}
           aria-label={`Select device ${device.address}`}
           title="Tick to keep this device when hiding the others"
-          style={{ margin: 0, flexShrink: 0, cursor: 'pointer', accentColor: 'var(--accent-primary)' }}
-        />
+          onClick={e => { e.stopPropagation(); toggleTicked(); }}
+          style={{ display: 'flex', flexShrink: 0, cursor: 'pointer' }}
+        >
+          <CheckMark state={ticked ? 'checked' : 'unchecked'} />
+        </div>
         <Cpu size={13} style={{ color: 'var(--text-dim)', flexShrink: 0 }} />
         <span style={{
           fontFamily: "'JetBrains Mono', monospace", fontSize: '0.78rem', fontWeight: 600,
@@ -481,46 +524,37 @@ const DeviceRow: React.FC<{
             {koCount} KO{koCount !== 1 ? 's' : ''}
           </span>
         )}
-        <button
-          style={iconBtnStyle}
-          title="Filter by this device (source)"
-          onClick={e => { e.stopPropagation(); onFilterDevice(device.address); }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-        >
-          <Filter size={12} />
-        </button>
-        {allGAs.length > 0 && (
-          <button
-            style={iconBtnStyle}
-            title={`Filter all ${allGAs.length} group address${allGAs.length > 1 ? 'es' : ''} of this device (targets)`}
-            onClick={e => { e.stopPropagation(); onFilterGAs(allGAs); }}
-            onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-            onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-          >
-            <ListFilter size={12} />
-          </button>
-        )}
+        <AddressActions
+          inline
+          mode="pa"
+          address={device.address}
+          name={device.name}
+          focusOn={deviceFocused}
+          onFocus={(_address, _mode, gesture) => onFilterDevice(device.address, gesture)}
+          onLastSeen={onLastSeen}
+        />
         {allGAs.length > 0 && (
           <button
             style={iconBtnStyle}
             title={`Visualize all ${allGAs.length} group address${allGAs.length > 1 ? 'es' : ''} of this device`}
-            onClick={e => { e.stopPropagation(); onVisualizeGAs(allGAs); }}
+            onClick={e => { e.stopPropagation(); invokeToggle(e, onVisualizeGAs, allGAs); }}
             onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
             onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
           >
             <LineChart size={12} />
           </button>
         )}
-        <button
-          style={iconBtnStyle}
-          title="Show last seen values"
-          onClick={e => { e.stopPropagation(); onLastSeen(device.address, 'pa'); }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-        >
-          <Clock size={12} />
-        </button>
+        {allGAs.length > 0 && (
+          <button
+            style={iconBtnStyle}
+            title={focusLoupeTitle(`Toggle focus for all ${allGAs.length} group address${allGAs.length > 1 ? 'es' : ''} of this device`)}
+            onClick={e => { e.stopPropagation(); invokeToggle(e, onFilterGAs, allGAs); }}
+            onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
+            onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+          >
+            <ListFilter size={12} />
+          </button>
+        )}
         {hasChildren && (
           <button
             style={iconBtnStyle}
@@ -542,6 +576,7 @@ const DeviceRow: React.FC<{
               <ChannelRow
                 key={ch.id} channel={ch} deviceAddress={device.address} visibleKos={visibleKos} depth={depth + 1}
                 query={query} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
+                onFocusFilter={onFocusFilter} focusFilterGas={focusFilterGas}
                 writeEnabled={writeEnabled} latestTelegram={latestTelegram}
               />
             );
@@ -550,6 +585,7 @@ const DeviceRow: React.FC<{
             <KoRow
               key={`${ko.number}-${i}`} ko={ko} koKey={`${device.address}:${ko.number}-${i}`}
               depth={depth + 1} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
+              onFocusFilter={onFocusFilter} focusFilterGas={focusFilterGas}
               writeEnabled={writeEnabled} latestTelegram={latestTelegram}
             />
           ))}
@@ -565,12 +601,14 @@ const ChannelRow: React.FC<{
   visibleKos: Ko[];
   depth: number;
   query: string;
-  onFilterGAs: (addresses: string[]) => void;
-  onLastSeen: (address: string | string[], mode: 'ga' | 'pa') => void;
-  onVisualizeGAs: (addresses: string[]) => void;
+  onFilterGAs: (addresses: string[], reveal?: ToggleGesture) => void;
+  onLastSeen: (address: string | string[], mode: 'ga' | 'pa', gesture: ToggleGesture) => void;
+  onVisualizeGAs: (addresses: string[], gesture: ToggleGesture) => void;
+  onFocusFilter?: (address: string, mode: 'ga' | 'pa', reveal?: ToggleGesture) => void;
+  focusFilterGas?: readonly string[];
   writeEnabled?: boolean;
   latestTelegram?: Telegram | null;
-}> = ({ channel, deviceAddress, visibleKos, depth, query, onFilterGAs, onLastSeen, onVisualizeGAs, writeEnabled, latestTelegram }) => {
+}> = ({ channel, deviceAddress, visibleKos, depth, query, onFilterGAs, onLastSeen, onVisualizeGAs, onFocusFilter, focusFilterGas, writeEnabled, latestTelegram }) => {
   const [open, toggle] = useExpanded(`ch:${deviceAddress}:${channel.id}`, false);
   const effectiveOpen = open || !!query;
   const allGAs = useMemo(() => channelGAs(channel), [channel]);
@@ -593,12 +631,12 @@ const ChannelRow: React.FC<{
         {allGAs.length > 0 && (
           <button
             style={iconBtnStyle}
-            title={`Filter all ${allGAs.length} group address${allGAs.length > 1 ? 'es' : ''} in this channel (targets)`}
-            onClick={e => { e.stopPropagation(); onFilterGAs(allGAs); }}
+            title={focusLoupeTitle(`Toggle focus for all ${allGAs.length} group address${allGAs.length > 1 ? 'es' : ''} in this channel`)}
+            onClick={e => { e.stopPropagation(); invokeToggle(e, onFilterGAs, allGAs); }}
             onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
             onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
           >
-            <ListFilter size={12} />
+            <Search size={12} />
           </button>
         )}
       </div>
@@ -606,6 +644,7 @@ const ChannelRow: React.FC<{
         <KoRow
           key={`${ko.number}-${i}`} ko={ko} koKey={`${deviceAddress}:${channel.id}:${ko.number}-${i}`}
           depth={depth + 1} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
+          onFocusFilter={onFocusFilter} focusFilterGas={focusFilterGas}
           writeEnabled={writeEnabled} latestTelegram={latestTelegram}
         />
       ))}
@@ -619,12 +658,14 @@ const FunctionRow: React.FC<{
   func: FunctionNode;
   depth: number;
   query: string;
-  onFilterGAs: (addresses: string[]) => void;
-  onLastSeen: (address: string | string[], mode: 'ga' | 'pa') => void;
-  onVisualizeGAs: (addresses: string[]) => void;
+  onFilterGAs: (addresses: string[], reveal?: ToggleGesture) => void;
+  onLastSeen: (address: string | string[], mode: 'ga' | 'pa', gesture: ToggleGesture) => void;
+  onVisualizeGAs: (addresses: string[], gesture: ToggleGesture) => void;
+  onFocusFilter?: (address: string, mode: 'ga' | 'pa', reveal?: ToggleGesture) => void;
+  focusFilterGas?: readonly string[];
   writeEnabled?: boolean;
   latestTelegram?: Telegram | null;
-}> = ({ func, depth, query, onFilterGAs, onLastSeen, onVisualizeGAs, writeEnabled, latestTelegram }) => {
+}> = ({ func, depth, query, onFilterGAs, onLastSeen, onVisualizeGAs, onFocusFilter, focusFilterGas, writeEnabled, latestTelegram }) => {
   const [open, toggle] = useExpanded(`func:${func.id}`, false);
   const effectiveOpen = open || !!query;
   const allGAs = useMemo(() => func.group_addresses.map(g => g.address), [func]);
@@ -669,8 +710,17 @@ const FunctionRow: React.FC<{
           <>
             <button
               style={iconBtnStyle}
+              title={focusLoupeTitle(`Toggle focus for all ${allGAs.length} group address${allGAs.length > 1 ? 'es' : ''} of this function`)}
+              onClick={e => { e.stopPropagation(); invokeToggle(e, onFilterGAs, allGAs); }}
+              onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
+              onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
+            >
+              <Search size={12} />
+            </button>
+            <button
+              style={iconBtnStyle}
               title={`Visualize all ${allGAs.length} group address${allGAs.length > 1 ? 'es' : ''} of this function`}
-              onClick={e => { e.stopPropagation(); onVisualizeGAs(allGAs); }}
+              onClick={e => { e.stopPropagation(); invokeToggle(e, onVisualizeGAs, allGAs); }}
               onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
               onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
             >
@@ -678,17 +728,8 @@ const FunctionRow: React.FC<{
             </button>
             <button
               style={iconBtnStyle}
-              title={`Filter all ${allGAs.length} group address${allGAs.length > 1 ? 'es' : ''} of this function`}
-              onClick={e => { e.stopPropagation(); onFilterGAs(allGAs); }}
-              onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-              onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-            >
-              <ListFilter size={12} />
-            </button>
-            <button
-              style={iconBtnStyle}
               title={`Show last seen values of all ${allGAs.length} group address${allGAs.length > 1 ? 'es' : ''} of this function`}
-              onClick={e => { e.stopPropagation(); onLastSeen(allGAs, 'ga'); }}
+              onClick={e => { e.stopPropagation(); invokeToggle(e, onLastSeen, allGAs, 'ga'); }}
               onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
               onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
             >
@@ -710,6 +751,8 @@ const FunctionRow: React.FC<{
           onFilterGAs={onFilterGAs}
           onLastSeen={onLastSeen}
           onVisualizeGAs={onVisualizeGAs}
+          onFocusFilter={onFocusFilter}
+          focusFilterGas={focusFilterGas}
         />
       )}
     </div>
@@ -723,14 +766,17 @@ const SpaceRow: React.FC<{
   path: string;
   depth: number;
   query: string;
-  onFilterDevice: (pa: string) => void;
-  onFilterGAs: (addresses: string[]) => void;
-  onLastSeen: (address: string | string[], mode: 'ga' | 'pa') => void;
-  onVisualizeGAs: (addresses: string[]) => void;
+  onFilterDevice: (pa: string, reveal?: ToggleGesture) => void;
+  onFilterGAs: (addresses: string[], reveal?: ToggleGesture) => void;
+  onLastSeen: (address: string | string[], mode: 'ga' | 'pa', gesture: ToggleGesture) => void;
+  onVisualizeGAs: (addresses: string[], gesture: ToggleGesture) => void;
+  onFocusFilter?: (address: string, mode: 'ga' | 'pa', reveal?: ToggleGesture) => void;
+  focusFilterGas?: readonly string[];
+  focusDevices?: readonly string[];
   onDeviceStatus: (device: DeviceNode) => void;
   writeEnabled?: boolean;
   latestTelegram?: Telegram | null;
-}> = ({ space, path, depth, query, onFilterDevice, onFilterGAs, onLastSeen, onVisualizeGAs, onDeviceStatus, writeEnabled, latestTelegram }) => {
+}> = ({ space, path, depth, query, onFilterDevice, onFilterGAs, onLastSeen, onVisualizeGAs, onFocusFilter, focusFilterGas, focusDevices, onDeviceStatus, writeEnabled, latestTelegram }) => {
   const [open, toggle] = useExpanded(`space:${path}`, depth < 2);
   const { selected, hideOthers } = useBuildingSelection();
   if (query && !spaceMatches(space, query)) return null;
@@ -771,6 +817,7 @@ const SpaceRow: React.FC<{
             <SpaceRow
               key={`${sub.name}-${i}`} space={sub} path={`${path}/${sub.type}:${sub.name}#${i}`} depth={depth + 1} query={query}
               onFilterDevice={onFilterDevice} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
+              onFocusFilter={onFocusFilter} focusFilterGas={focusFilterGas} focusDevices={focusDevices}
               onDeviceStatus={onDeviceStatus} writeEnabled={writeEnabled} latestTelegram={latestTelegram}
             />
           ))}
@@ -778,6 +825,7 @@ const SpaceRow: React.FC<{
             <FunctionRow
               key={`${func.id}-${i}`} func={func} depth={depth + 1} query={query}
               onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
+              onFocusFilter={onFocusFilter} focusFilterGas={focusFilterGas}
               writeEnabled={writeEnabled} latestTelegram={latestTelegram}
             />
           ))}
@@ -785,6 +833,7 @@ const SpaceRow: React.FC<{
             <DeviceRow
               key={device.address} device={device} depth={depth + 1} query={query}
               onFilterDevice={onFilterDevice} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
+              onFocusFilter={onFocusFilter} focusFilterGas={focusFilterGas} focusDevices={focusDevices}
               onDeviceStatus={onDeviceStatus} writeEnabled={writeEnabled} latestTelegram={latestTelegram}
             />
           ))}
@@ -797,7 +846,7 @@ const SpaceRow: React.FC<{
 // ── Main overlay ────────────────────────────────────────────────────────────────
 
 export const BuildingOverlay: React.FC<BuildingOverlayProps> = ({
-  onClose, onFilterDevice, onFilterGAs, onLastSeen, onVisualizeGAs, onDeviceStatus, writeEnabled, latestTelegram,
+  onClose, onFilterDevice, onFilterGAs, onLastSeen, onVisualizeGAs, onFocusFilter, focusFilterGas, focusDevices, onDeviceStatus, writeEnabled, latestTelegram,
   searchQuery: searchQueryProp, onSearchQueryChange,
 }) => {
   const [data, setData] = useState<BuildingData | null>(null);
@@ -824,7 +873,7 @@ export const BuildingOverlay: React.FC<BuildingOverlayProps> = ({
     fetchBuilding();
   }, [fetchBuilding]);
 
-  const query = searchQuery.trim().toLowerCase();
+  const query = searchQuery.trim();
 
   const { selected, hideOthers, onlySelected } = useBuildingSelection();
   const visibleUnassigned = useMemo(() => {
@@ -852,7 +901,36 @@ export const BuildingOverlay: React.FC<BuildingOverlayProps> = ({
         flexShrink: 0, background: 'var(--bg-subtle)',
       }}>
         <Building2 size={16} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} />
-        <span style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--text-main)' }}>Building Structure</span>
+        <span style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--text-main)', flexShrink: 0 }}>Building Structure</span>
+        <div style={{
+          width: 220, flexShrink: 0, display: 'flex', alignItems: 'center', gap: '0.5rem',
+          background: 'var(--bg-tag)', border: '1px solid var(--border-color)',
+          borderRadius: '7px', padding: '0.45rem 0.65rem', transition: 'border-color 0.2s',
+        }}>
+          <Search size={13} style={{ color: 'var(--text-dim)', flexShrink: 0 }} />
+          <input
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="filter..."
+            aria-label="Filter building"
+            style={{
+              background: 'transparent', border: 'none', outline: 'none',
+              color: 'var(--text-main)', fontSize: '0.8125rem', flex: 1, minWidth: 0,
+              fontFamily: 'inherit',
+            }}
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              aria-label="Clear filter"
+              title="Clear filter"
+              onClick={() => setSearchQuery('')}
+              style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, color: 'var(--text-dim)', display: 'flex' }}
+            >
+              <X size={11} />
+            </button>
+          )}
+        </div>
         <div style={{ flex: 1 }} />
         {/* Ticked devices (#505): hide everything else, or untick them all. */}
         {selected.size > 0 && (
@@ -881,13 +959,6 @@ export const BuildingOverlay: React.FC<BuildingOverlayProps> = ({
             </button>
           </div>
         )}
-        <input
-          value={searchQuery}
-          onChange={e => setSearchQuery(e.target.value)}
-          placeholder="Filter…"
-          className="glass-input"
-          style={{ padding: '0.3rem 0.6rem', fontSize: '0.78rem', borderRadius: 6, width: 180 }}
-        />
         <button
           onClick={fetchBuilding}
           disabled={isLoading}
@@ -896,8 +967,16 @@ export const BuildingOverlay: React.FC<BuildingOverlayProps> = ({
         >
           <RefreshCw size={14} style={isLoading ? { animation: 'spin 1s linear infinite' } : undefined} />
         </button>
-        <button onClick={onClose} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', padding: '0.2rem', display: 'flex' }}>
-          <X size={16} />
+        <button
+          onClick={onClose}
+          title="Close"
+          aria-label="Close"
+          style={{
+            background: 'var(--bg-tag)', border: '1px solid var(--border-color)', borderRadius: 7,
+            cursor: 'pointer', color: 'var(--text-main)', padding: '0.3rem', display: 'flex', flexShrink: 0,
+          }}
+        >
+          <X size={16} strokeWidth={2.25} />
         </button>
       </div>
 
@@ -917,6 +996,7 @@ export const BuildingOverlay: React.FC<BuildingOverlayProps> = ({
             <SpaceRow
               key={`${space.name}-${i}`} space={space} path={`${space.type}:${space.name}#${i}`} depth={0} query={query}
               onFilterDevice={onFilterDevice} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
+              onFocusFilter={onFocusFilter} focusFilterGas={focusFilterGas} focusDevices={focusDevices}
               onDeviceStatus={onDeviceStatus} writeEnabled={writeEnabled} latestTelegram={latestTelegram}
             />
           ))}
@@ -930,6 +1010,7 @@ export const BuildingOverlay: React.FC<BuildingOverlayProps> = ({
                 <DeviceRow
                   key={device.address} device={device} depth={1} query={query}
                   onFilterDevice={onFilterDevice} onFilterGAs={onFilterGAs} onLastSeen={onLastSeen} onVisualizeGAs={onVisualizeGAs}
+                  onFocusFilter={onFocusFilter} focusFilterGas={focusFilterGas} focusDevices={focusDevices}
                   onDeviceStatus={onDeviceStatus} writeEnabled={writeEnabled} latestTelegram={latestTelegram}
                 />
               ))}

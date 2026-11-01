@@ -25,7 +25,7 @@ interface TimelineChartProps {
    * start at the same column. Defaults to this chart's own label gutter. */
   leftGutter?: number;
   /** Click on a GA name in the legend: show that GA's telegrams in the list (#521). */
-  onGaClick?: (address: string) => void;
+  onGaClick?: (address: string, event: React.MouseEvent) => void;
 }
 
 const syncCursor = uPlot.sync('knx-time-axis');
@@ -304,7 +304,7 @@ export const TimelineChart: React.FC<TimelineChartProps> = ({ bucket, minTime, m
                     cursor: onGaClick ? 'pointer' : undefined,
                   }}
                   title={onGaClick ? `${s.name} (${s.address}) – show telegrams` : `${s.name} (${s.address})`}
-                  onClick={onGaClick ? () => onGaClick(s.address) : undefined}
+                  onClick={onGaClick ? e => { e.stopPropagation(); onGaClick(s.address, e); } : undefined}
                 >
                   {s.name}
                 </div>

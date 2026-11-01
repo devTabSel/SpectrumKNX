@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Clock } from 'lucide-react';
 
 import type { FilterOption } from '../types/filters';
+import { isPlainTextSearch, matchesAnyText } from '../utils/quickFilter';
 
 interface Props {
   value: string;
@@ -29,6 +30,8 @@ export function GaCombobox({ value, onChange, options, recentAddresses, placehol
     if (q !== '') {
       // Rank so the exact match is on top and preselected, ahead of prefix and
       // infix matches — typing "2/4/1" must not leave "12/4/1" as the top hit (#217).
+      // Quoted wildcards and regex: have no prefix, so they stay in list order.
+      const plain = isPlainTextSearch(value);
       const rank = (o: FilterOption) => {
         const addr = (o.address ?? '').toLowerCase();
         const name = (o.name ?? '').toLowerCase();
@@ -37,8 +40,8 @@ export function GaCombobox({ value, onChange, options, recentAddresses, placehol
         return 2;
       };
       const list = options
-        .filter(o => (o.address ?? '').toLowerCase().includes(q) || (o.name ?? '').toLowerCase().includes(q))
-        .sort((a, b) => rank(a) - rank(b));
+        .filter(o => matchesAnyText(value, o.address, o.name));
+      if (plain) list.sort((a, b) => rank(a) - rank(b));
       return { matches: list.slice(0, 100), recentCount: 0 };
     }
     // Empty input: only the recently used addresses, newest first (#190) —

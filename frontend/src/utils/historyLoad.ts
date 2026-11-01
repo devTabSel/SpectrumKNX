@@ -1,5 +1,5 @@
 import type { Telegram } from '../hooks/useWebSocket';
-import { effectiveDeltaContext, type ActiveFilters } from '../types/filters';
+import type { ActiveFilters } from '../types/filters';
 import { apiUrl } from './basePath';
 
 export interface HistoryMetadata {
@@ -12,17 +12,19 @@ export type LoadedRange =
   | { kind: 'relative'; seconds: number }
   | { kind: 'absolute'; startTime: string; endTime: string };
 
-/** Appends active filter state as query params to a base URL string. */
+/**
+ * Appends the filter panel as query params. The time-delta window is not
+ * included: it would pull telegrams that fail the panel, and context stays
+ * inside the already filtered buffer.
+ */
 export function applyFilterParams(url: string, filters?: ActiveFilters): string {
   if (!filters) return url;
   const params: string[] = [];
   if (filters.sources.length > 0) params.push(`source_address=${encodeURIComponent(filters.sources.join(','))}`);
   if (filters.targets.length > 0) params.push(`target_address=${encodeURIComponent(filters.targets.join(','))}`);
   if (filters.types.length > 0) params.push(`telegram_type=${encodeURIComponent(filters.types.join(','))}`);
+  if (filters.directions.length > 0) params.push(`direction=${encodeURIComponent(filters.directions.join(','))}`);
   if (filters.dpts.length > 0) params.push(`dpt_main=${encodeURIComponent(filters.dpts.join(','))}`);
-  const { before, after } = effectiveDeltaContext(filters);
-  if (before > 0) params.push(`delta_before_ms=${before}`);
-  if (after > 0) params.push(`delta_after_ms=${after}`);
   if (params.length === 0) return url;
   return url + (url.includes('?') ? '&' : '?') + params.join('&');
 }

@@ -96,9 +96,9 @@ test('ticked devices in collapsed rooms are brought into view', async () => {
 test('ticking a device does not expand or collapse it', async () => {
   await renderOverlay();
   fireEvent.click(screen.getByText('Kitchen'));
-  const box = screen.getByLabelText('Select device 1.1.1') as HTMLInputElement;
+  const box = screen.getByLabelText('Select device 1.1.1');
   fireEvent.click(box);
-  expect(box.checked).toBe(true);
+  expect(box).toHaveAttribute('aria-checked', 'true');
   expect(screen.getByText('Push Button')).toBeInTheDocument();
 });
 
@@ -122,7 +122,7 @@ test('"untick all" clears the selection and the hiding', async () => {
   fireEvent.click(screen.getByTitle('Untick all devices'));
 
   expect(screen.getByText('Dimmer')).toBeInTheDocument();
-  expect((screen.getByLabelText('Select device 1.1.1') as HTMLInputElement).checked).toBe(false);
+  expect(screen.getByLabelText('Select device 1.1.1')).toHaveAttribute('aria-checked', 'false');
 });
 
 test('the selection survives leaving and reopening the panel', async () => {
@@ -145,7 +145,7 @@ test('the search still applies within the ticked devices', async () => {
   fireEvent.click(screen.getByLabelText('Select device 1.2.1'));
   fireEvent.click(screen.getByText('Only ticked (2)'));
 
-  fireEvent.change(screen.getByPlaceholderText('Filter…'), { target: { value: 'actuator' } });
+  fireEvent.change(screen.getByPlaceholderText('filter...'), { target: { value: 'actuator' } });
   expect(screen.getByText('Switch Actuator')).toBeInTheDocument();
   expect(screen.queryByText('Push Button')).not.toBeInTheDocument();
   expect(screen.queryByText('Heating Actuator')).not.toBeInTheDocument();

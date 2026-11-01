@@ -11,9 +11,9 @@ interface Timestamped {
 export interface DeltaExpansionResult<T> {
   /** The full visible set: filter matches, flagged anchors, and pulled-in context rows. */
   items: T[];
-  /** Identity keys (via `anchorKeyOf`) of items present only because they fell
-   * within a window — i.e. they neither matched the filter nor were flagged.
-   * Used to visually mark context-only rows (#343). */
+  /** Identity keys (via `anchorKeyOf`) of rows that did not match the filter:
+   * neighbours pulled into a window, and flagged non-matches. A flag anchors a
+   * window around that row without promoting it out of the context colour (#343). */
   contextKeys: Set<string>;
 }
 
@@ -21,8 +21,9 @@ export interface DeltaExpansionResult<T> {
  * @param items The full (already sorted) buffer.
  * @param matches Per-item result of the primary filter match, same order as `items`.
  * @param anchorKeyOf Stable per-item identity, for testing `flaggedKeys` membership.
- * @param flaggedKeys Keys of telegrams individually flagged to always anchor a
- *   context window around themselves (#319), regardless of the primary filter.
+ * @param flaggedKeys Keys of telegrams individually flagged to anchor a context
+ *   window around themselves (#319), regardless of the primary filter. A flag
+ *   keeps a non-match only while `beforeMs` or `afterMs` is positive.
  * @param beforeMs / @param afterMs The effective (already #318-gated) window.
  * @param anchorMatches Whether every filter match anchors a window (the global
  *   "all" state). When false only the flagged telegrams do, so the context can
@@ -37,9 +38,11 @@ export function expandWithDeltaContext<T extends Timestamped>(
   afterMs: number,
   anchorMatches = true,
 ): DeltaExpansionResult<T> {
-  // A flagged telegram is always shown and always anchors its own window,
-  // independent of whether it passes the primary filter.
-  const flagged = items.map(t => flaggedKeys.has(anchorKeyOf(t)));
+  // A flag anchors a window and keeps a non-match only while a window is open.
+  // With no window there is no context to add, so the flag does not keep the
+  // row the way a mark would. A flagged non-match stays a context row.
+  const windowOpen = beforeMs > 0 || afterMs > 0;
+  const flagged = items.map(t => windowOpen && flaggedKeys.has(anchorKeyOf(t)));
   const effectiveMatch = items.map((_, i) => matches[i] || flagged[i]);
 
   if (beforeMs <= 0 && afterMs <= 0) {
@@ -56,11 +59,43 @@ export function expandWithDeltaContext<T extends Timestamped>(
 
   const contextKeys = new Set<string>();
   const kept = items.filter((t, i) => {
-    if (effectiveMatch[i]) return true;
+    if (matches[i]) return true;
     const ts = new Date(t.timestamp).getTime();
     const within = anchorTimestamps.some(mts => ts >= mts - beforeMs && ts <= mts + afterMs);
-    if (within) contextKeys.add(anchorKeyOf(t));
-    return within;
+    // A flagged non-match is inside its own window, so it stays a context row
+    // while the same window reaches neighbours the original anchor did not.
+    if (within || flagged[i]) contextKeys.add(anchorKeyOf(t));
+    return within || flagged[i];
   });
   return { items: kept, contextKeys };
+}
+
+/**
+ * Stripe marks stay in the list when the focus or quick filter would hide them,
+ * but that keep is not a filter match. Folding it into the match flags would
+ * drop a context-only telegram out of `contextKeys` and make it anchor a window
+ * of its own. A mouse selection is not a mark and is never kept this way.
+ * The panel filter still applies: a kept row the panel rejects stays out.
+ */
+export function retainKeptRows<T>(
+  items: T[],
+  expanded: DeltaExpansionResult<T>,
+  anchorKeyOf: (t: T) => string,
+  kept: ReadonlySet<string>,
+  panelPass: (t: T) => boolean,
+): DeltaExpansionResult<T> {
+  if (kept.size === 0) return expanded;
+  const visible = new Set(expanded.items.map(anchorKeyOf));
+  let added = false;
+  for (const t of items) {
+    const key = anchorKeyOf(t);
+    if (visible.has(key) || !kept.has(key) || !panelPass(t)) continue;
+    visible.add(key);
+    added = true;
+  }
+  if (!added) return expanded;
+  return {
+    items: items.filter(t => visible.has(anchorKeyOf(t))),
+    contextKeys: expanded.contextKeys,
+  };
 }

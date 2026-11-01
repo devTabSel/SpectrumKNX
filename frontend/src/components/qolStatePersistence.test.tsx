@@ -207,13 +207,13 @@ test('Statistics and Building search queries survive remount', () => {
 
   // Locate the input for stats using the header title
   const statsTitle = screen.getByText('Traffic Statistics');
-  const statsInput = statsTitle.closest('div')?.parentElement?.querySelector('input[placeholder="Filter…"]');
+  const statsInput = statsTitle.closest('div')?.parentElement?.querySelector('input[placeholder="filter..."]');
   expect(statsInput).toBeTruthy();
   fireEvent.change(statsInput!, { target: { value: 'stats-query' } });
 
   // Locate the input for building using its header title
   const buildingTitle = screen.getByText('Building Structure');
-  const buildingInput = buildingTitle.closest('div')?.querySelector('input[placeholder="Filter…"]');
+  const buildingInput = buildingTitle.closest('div')?.querySelector('input[placeholder="filter..."]');
   expect(buildingInput).toBeTruthy();
   fireEvent.change(buildingInput!, { target: { value: 'building-query' } });
 
@@ -224,7 +224,7 @@ test('Statistics and Building search queries survive remount', () => {
   // Remount Stats
   fireEvent.click(screen.getByText('Toggle Stats'));
   const remountedStatsTitle = screen.getByText('Traffic Statistics');
-  const remountedStatsInput = remountedStatsTitle.closest('div')?.parentElement?.querySelector('input[placeholder="Filter…"]');
+  const remountedStatsInput = remountedStatsTitle.closest('div')?.parentElement?.querySelector('input[placeholder="filter..."]');
   expect(remountedStatsInput).toHaveValue('stats-query');
 
   // Unmount Building
@@ -234,7 +234,7 @@ test('Statistics and Building search queries survive remount', () => {
   // Remount Building
   fireEvent.click(screen.getByText('Toggle Building'));
   const remountedBuildingTitle = screen.getByText('Building Structure');
-  const remountedBuildingInput = remountedBuildingTitle.closest('div')?.querySelector('input[placeholder="Filter…"]');
+  const remountedBuildingInput = remountedBuildingTitle.closest('div')?.querySelector('input[placeholder="filter..."]');
   expect(remountedBuildingInput).toHaveValue('building-query');
 });
 
@@ -252,8 +252,7 @@ test('LastSeenOverlay selectors and selection survive remount', () => {
     const [limit, setLimit] = useState(20);
     const [live, setLive] = useState(false);
     const [search, setSearch] = useState('');
-    const [addresses, setAddresses] = useState<string[]>(['1/1/1']);
-    const [mode, setMode] = useState<'ga' | 'pa'>('ga');
+    const [addresses] = useState<string[]>(['1/1/1']);
 
     return (
       <div>
@@ -261,8 +260,7 @@ test('LastSeenOverlay selectors and selection survive remount', () => {
         {show && (
           <LastSeenOverlay
             filterOptions={filterOptions}
-            initialAddresses={addresses}
-            initialMode={mode}
+            gaAddresses={addresses}
             onClose={vi.fn()}
             limit={limit}
             onLimitChange={setLimit}
@@ -270,10 +268,6 @@ test('LastSeenOverlay selectors and selection survive remount', () => {
             onAutoRefreshChange={setLive}
             search={search}
             onSearchChange={setSearch}
-            onSelectionChange={(m, a) => {
-              setMode(m);
-              setAddresses(a);
-            }}
           />
         )}
       </div>
@@ -282,13 +276,6 @@ test('LastSeenOverlay selectors and selection survive remount', () => {
 
   render(<TestWrapper />);
 
-  // Locate the input for lastseen using the sidebar
-  const sidebar = screen.getByText('Group Addresses').closest('div')?.parentElement;
-  const searchInput = sidebar?.querySelector('input[placeholder="Filter…"]');
-  expect(searchInput).toBeTruthy();
-  fireEvent.change(searchInput!, { target: { value: 'search-term' } });
-
-  // Toggle autoRefresh
   const liveButton = screen.getByTitle('Frozen — click to go live');
   fireEvent.click(liveButton);
 
@@ -298,8 +285,5 @@ test('LastSeenOverlay selectors and selection survive remount', () => {
 
   // Remount
   fireEvent.click(screen.getByText('Toggle LastSeen'));
-  const remountedSidebar = screen.getByText('Group Addresses').closest('div')?.parentElement;
-  const remountedSearchInput = remountedSidebar?.querySelector('input[placeholder="Filter…"]');
-  expect(remountedSearchInput).toHaveValue('search-term');
   expect(screen.getByTitle(/^Live: telegrams appear as they arrive/)).toBeInTheDocument();
 });

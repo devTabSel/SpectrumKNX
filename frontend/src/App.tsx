@@ -21,9 +21,12 @@ import {
 } from './utils/uiState';
 import { DeviceStatusOverlay } from './components/DeviceStatusOverlay';
 import { TelegramTable, type SortConfig, type SortKey } from './components/TelegramTable';
-import { expandWithDeltaContext } from './utils/deltaContextExpansion';
+import { AddressActionProvider } from './components/telegramCell';
+import { expandWithDeltaContext, retainKeptRows } from './utils/deltaContextExpansion';
 import { activeQuickFilter } from './utils/quickFilter';
 import { anchorKey } from './utils/anchorKey';
+import { applyToggle, PLAIN_TOGGLE, toggleGesture, toggleTurnOn, type ToggleGesture } from './utils/toggleClick';
+import { setSendPanelOpen, toggleSendPanel, useSendPanelOpen } from './utils/sendPanel';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
 import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
@@ -32,6 +35,7 @@ import { useTheme } from './hooks/useTheme';
 import { apiUrl, wsUrl } from './utils/basePath';
 import { HistoryLoader } from './components/HistoryLoader';
 import { useTelegramCache } from './hooks/useTelegramCache';
+import { useDbTelegramCounts } from './hooks/useDbTelegramCounts';
 import { rangeToMs } from './utils/historyLoad';
 import { HistorySearch } from './components/HistorySearch';
 import { ImportExportView } from './components/ImportExportView';
@@ -53,6 +57,7 @@ import { useAuthStatus, loginRequired } from './hooks/useAuthStatus';
 import { useUpdateCheck } from './hooks/useUpdateCheck';
 import {
   DEFAULT_FILTERS,
+  countAppliedFilterOptions,
   countFilterOptions,
   effectiveDeltaContext,
   hasActiveFilters,
@@ -60,6 +65,8 @@ import {
   pruneDisabled,
   countSelections,
   matchesTelegram,
+  focusAddressesForList,
+  passesFocusAddressFilter,
   type ActiveFilters,
   type FilterOptions,
 } from './types/filters';
@@ -170,23 +177,34 @@ type MainPanel = 'list' | 'visualizer' | 'statistics' | 'building' | 'lastseen';
 const MAIN_PANELS: { id: MainPanel; label: string; icon: typeof List }[] = [
   { id: 'list', label: 'Telegram List', icon: List },
   { id: 'visualizer', label: 'Visualization', icon: LineChart },
+  { id: 'lastseen', label: 'Last Seen Values', icon: Clock },
   { id: 'statistics', label: 'Statistics', icon: BarChart2 },
   { id: 'building', label: 'Building Structure', icon: Building2 },
-  { id: 'lastseen', label: 'Last Seen Values', icon: Clock },
 ];
 
-// Segmented switch across the five main panels, marking the active one (#374).
-const PanelSwitch = ({ active, onChange }: { active: MainPanel; onChange: (p: MainPanel) => void }) => (
+/** Views that share the telegram-list header. */
+const VIEW_PANELS: readonly MainPanel[] = ['list', 'visualizer', 'lastseen'];
+/** The panels that stay in the global header. */
+const OTHER_PANELS: readonly MainPanel[] = ['statistics', 'building'];
+
+// Segmented switch across a subset of the main panels, marking the active one (#374).
+const PanelSwitch = ({ active, onChange, panels, compact = false }: {
+  active: MainPanel;
+  onChange: (p: MainPanel) => void;
+  panels: readonly MainPanel[];
+  /** Fits the 40px list header. */
+  compact?: boolean;
+}) => (
   <div
     role="tablist"
-    aria-label="Main panel"
+    aria-label={compact ? 'List views' : 'Main panel'}
     style={{
       display: 'flex', alignItems: 'center', gap: '0.15rem',
-      padding: '0.2rem', borderRadius: '8px',
+      padding: compact ? '0.1rem' : '0.2rem', borderRadius: '8px',
       background: 'var(--bg-subtle)', border: '1px solid var(--border-color)',
     }}
   >
-    {MAIN_PANELS.map(({ id, label, icon: Icon }) => {
+    {MAIN_PANELS.filter(panel => panels.includes(panel.id)).map(({ id, label, icon: Icon }) => {
       const isActive = id === active;
       return (
         <button
@@ -198,7 +216,7 @@ const PanelSwitch = ({ active, onChange }: { active: MainPanel; onChange: (p: Ma
           className="icon-button"
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            padding: '0.4rem', borderRadius: '6px',
+            padding: compact ? '0.28rem' : '0.4rem', borderRadius: '6px',
             background: isActive ? 'rgba(99,102,241,0.15)' : 'transparent',
             color: isActive ? 'var(--accent-primary)' : 'var(--text-dim)',
           }}
@@ -238,18 +256,56 @@ function App() {
   const [quickFilterOpen, setQuickFilterOpen] = useState(initialUiState.quickFilter.open);
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(initialUiState.quickFilter.enabled);
   const [quickPatterns, setQuickPatterns] = useState(initialUiState.quickFilter.patterns);
+  const [quickFilterColumns, setQuickFilterColumns] = useState(initialUiState.quickFilter.columns);
   const [listFollow, setListFollow] = useState(initialUiState.listFollow);
   const [listAnchorKey, setListAnchorKey] = useState<string | null>(initialUiState.listAnchorKey);
+  // One-shot placement for a jump from Last Seen. A later scroll goes back to pinning the top.
+  const [listAnchorAlign, setListAnchorAlign] = useState<'start' | 'center'>('start');
+  const listAnchorKeyRef = useRef(listAnchorKey);
+  listAnchorKeyRef.current = listAnchorKey;
   const [infoBarOpen, setInfoBarOpen] = useState(initialUiState.infoBarOpen);
   const [zoomRange, setZoomRange] = useState<[number, number] | null>(initialUiState.zoomRange);
   const [statsSearch, setStatsSearch] = useState(initialUiState.statsSearch);
   const [buildingSearch, setBuildingSearch] = useState(initialUiState.buildingSearch);
   const [lastSeenLimit, setLastSeenLimit] = useState(initialUiState.lastSeenLimit);
   const [lastSeenLive, setLastSeenLive] = useState(initialUiState.lastSeenLive);
-  const [lastSeenSearch, setLastSeenSearch] = useState(initialUiState.lastSeenSearch);
+  const [lastSeenSearch] = useState(initialUiState.lastSeenSearch);
+  const [lastSeenGas, setLastSeenGas] = useState(initialUiState.lastSeenGas);
+  const [lastSeenDevices, setLastSeenDevices] = useState(initialUiState.lastSeenDevices);
+  const [focusFilterGas, setFocusFilterGas] = useState<string[]>([]);
+  const [focusFilterDevices, setFocusFilterDevices] = useState<string[]>([]);
+  const [filterFocusedSources, setFilterFocusedSources] = useState(false);
+  const [filterFocusedTargets, setFilterFocusedTargets] = useState(false);
+  const [lastSeenGroup, setLastSeenGroup] = useState(initialUiState.lastSeenGroup);
+  const [lastSeenExpanded, setLastSeenExpanded] = useState(initialUiState.lastSeenExpanded);
+  // Last Seen renders its title and settings into the shared view header.
+  // A callback ref, so the portal follows this node when the header is recreated.
+  const [viewHeaderSlot, setViewHeaderSlot] = useState<HTMLDivElement | null>(null);
+  const assignViewHeaderSlot = useCallback((node: HTMLDivElement | null) => {
+    setViewHeaderSlot(prev => (prev === node ? prev : node));
+  }, []);
   // Master enable/disable of the filter set (#370): when off the list shows all
   // telegrams while activeFilters is preserved.
   const [filtersEnabled, setFiltersEnabled] = useState(initialUiState.filtersEnabled);
+  const [filterSearch, setFilterSearch] = useState(initialUiState.filterSearch);
+  const [filterCompact, setFilterCompact] = useState(initialUiState.filterCompact);
+  const [filterCheckedOnly, setFilterCheckedOnly] = useState(initialUiState.filterCheckedOnly);
+  const [panelView, setPanelView] = useState(initialUiState.panelView);
+  const [focusTab, setFocusTab] = useState(initialUiState.focusTab);
+  const [focusGas, setFocusGas] = useState(() => {
+    const seen = (initialWorkspace?.lastSeenMode ?? 'ga') !== 'pa' ? (initialWorkspace?.lastSeenAddresses ?? []) : [];
+    return [...new Set([...initialUiState.focusGas, ...seen])];
+  });
+  const [focusDevices, setFocusDevices] = useState(() => {
+    const seen = initialWorkspace?.lastSeenMode === 'pa' ? initialWorkspace.lastSeenAddresses : [];
+    return [...new Set([...initialUiState.focusDevices, ...seen])];
+  });
+  const [focusGaSearch, setFocusGaSearch] = useState(initialUiState.focusGaSearch);
+  const [focusDeviceSearch, setFocusDeviceSearch] = useState(initialUiState.focusDeviceSearch);
+  const [focusGaCompact, setFocusGaCompact] = useState(initialUiState.focusGaCompact);
+  const [focusDeviceCompact, setFocusDeviceCompact] = useState(initialUiState.focusDeviceCompact);
+  const [focusGaVerdichten, setFocusGaVerdichten] = useState(initialUiState.focusGaVerdichten);
+  const [focusDeviceVerdichten, setFocusDeviceVerdichten] = useState(initialUiState.focusDeviceVerdichten);
   const [activeTab, setActiveTab] = useState<'live' | 'history' | 'import'>(
     initialView ? 'history' : initialWorkspace?.tab ?? 'live',
   );
@@ -272,7 +328,7 @@ function App() {
   const [statusDevice, setStatusDevice] = useState<DeviceNode | null>(null);
   const [latestTelegram, setLatestTelegram] = useState<Telegram | null>(null);
   const [isDatabaseOpen, setIsDatabaseOpen] = useState(initialWorkspace?.view === 'database');
-  const [isSendOpen, setIsSendOpen] = useState(false);
+  const isSendOpen = useSendPanelOpen();
   const [backendVersion, setBackendVersion] = useState<string>('loading...');
   const [projectStatus, setProjectStatus] = useState<{
     upload_feature_active: boolean;
@@ -317,21 +373,8 @@ function App() {
   const [selectedVisualizationTargets, setSelectedVisualizationTargets] = useState<string[]>(
     initialView?.plot ?? initialWorkspace?.plot ?? [],
   );
+  const [visualizedDevices, setVisualizedDevices] = useState<string[]>([]);
 
-  // ── Live State ──────────────────────────────────────────────────────────────
-  // Buffer + IndexedDB cache + coverage bookkeeping (#246): cached telegrams
-  // reappear instantly after a reload and only the gaps are fetched (#211).
-  const {
-    telegrams: liveTelegrams,
-    addLive,
-    setConnected: setCacheConnected,
-    setPaused: setCachePaused,
-    pausedCount,
-    loadRange,
-    isLoading: isHistoryLoading,
-    loadError: historyLoadError,
-    clear: clearTelegrams,
-  } = useTelegramCache(loadLimit, restoreOnStartup);
   const [isPaused, setIsPaused] = useState(false);
 
   // ── Rate Estimation ─────────────────────────────────────────────────────────
@@ -353,6 +396,32 @@ function App() {
   }, []);
   // The filters in effect: selections minus the ones switched off (#437).
   const appliedFilters = useMemo(() => enabledFilters(activeFilters), [activeFilters]);
+  // Null while the master switch is off or nothing is selected: the buffer stays unfiltered.
+  const cacheFilter = filtersEnabled && hasActiveFilters(appliedFilters) ? appliedFilters : null;
+  const [visibleSpan, setVisibleSpan] = useState<{ startMs: number; endMs: number } | null>(null);
+  const onVisibleSpanChange = useCallback((span: { startMs: number; endMs: number } | null) => {
+    setVisibleSpan(prev => {
+      if (prev === span) return prev;
+      if (prev && span && prev.startMs === span.startMs && prev.endMs === span.endMs) return prev;
+      return span;
+    });
+  }, []);
+
+  // ── Live State ──────────────────────────────────────────────────────────────
+  // Buffer + IndexedDB cache + coverage bookkeeping (#246): cached telegrams
+  // reappear instantly after a reload and only the gaps are fetched (#211).
+  // The buffer holds only telegrams that pass the filter panel.
+  const {
+    telegrams: liveTelegrams,
+    addLive,
+    setConnected: setCacheConnected,
+    setPaused: setCachePaused,
+    pausedCount,
+    loadRange,
+    isLoading: isHistoryLoading,
+    loadError: historyLoadError,
+    clear: clearTelegrams,
+  } = useTelegramCache(loadLimit, restoreOnStartup, cacheFilter, visibleSpan);
 
   const refreshServerConfig = useCallback(() => {
     fetch(apiUrl('/api/server/config'))
@@ -500,8 +569,8 @@ function App() {
       filterOpen: isFilterOpen,
       filters: activeFilters,
       plot: selectedVisualizationTargets,
-      lastSeenAddresses,
-      lastSeenMode,
+      lastSeenAddresses: focusTab === 'pa' ? focusDevices : focusGas,
+      lastSeenMode: focusTab === 'pa' ? 'pa' : 'ga',
     };
     const handle = setTimeout(() => {
       if (isEmbedded()) {
@@ -522,7 +591,7 @@ function App() {
       applyWorkspaceUrl(workspace, first || layoutOnly ? 'replace' : 'push');
     }, 500);
     return () => clearTimeout(handle);
-  }, [initialView, activeTab, workspaceView, isFilterOpen, activeFilters, selectedVisualizationTargets, lastSeenAddresses, lastSeenMode]);
+  }, [initialView, activeTab, workspaceView, isFilterOpen, activeFilters, selectedVisualizationTargets, focusGas, focusDevices, focusTab]);
 
   // ── Browser Back / Forward ───────────────────────────────────────────
   // The address bar is the source of truth for the entry navigated to: parse
@@ -543,6 +612,9 @@ function App() {
       setSelectedVisualizationTargets(ws.plot);
       setLastSeenAddresses(ws.lastSeenAddresses);
       setLastSeenMode(ws.lastSeenMode);
+      if (ws.lastSeenMode === 'ga') setFocusGas([...ws.lastSeenAddresses]);
+      else setFocusDevices(ws.lastSeenAddresses);
+      setFocusTab(ws.lastSeenMode === 'pa' ? 'pa' : 'ga');
       // An overlay left open would hide the workspace just navigated to.
       setIsSettingsOpen(false);
     };
@@ -558,6 +630,7 @@ function App() {
           open: quickFilterOpen,
           enabled: quickFilterEnabled,
           patterns: quickPatterns,
+          columns: quickFilterColumns,
         },
         listFollow,
         listAnchorKey,
@@ -568,7 +641,24 @@ function App() {
         lastSeenLimit,
         lastSeenLive,
         lastSeenSearch,
+        lastSeenGas,
+        lastSeenDevices,
+        lastSeenGroup,
+        lastSeenExpanded,
         filtersEnabled,
+        filterSearch,
+        filterCompact,
+        filterCheckedOnly,
+        panelView,
+        focusTab,
+        focusGas,
+        focusDevices,
+        focusGaSearch,
+        focusDeviceSearch,
+        focusGaCompact,
+        focusDeviceCompact,
+        focusGaVerdichten,
+        focusDeviceVerdichten,
       });
     }, 500);
     return () => clearTimeout(handle);
@@ -576,6 +666,7 @@ function App() {
     quickFilterOpen,
     quickFilterEnabled,
     quickPatterns,
+    quickFilterColumns,
     listFollow,
     listAnchorKey,
     infoBarOpen,
@@ -585,7 +676,24 @@ function App() {
     lastSeenLimit,
     lastSeenLive,
     lastSeenSearch,
+    lastSeenGas,
+    lastSeenDevices,
+    lastSeenGroup,
+    lastSeenExpanded,
     filtersEnabled,
+    filterSearch,
+    filterCompact,
+    filterCheckedOnly,
+    panelView,
+    focusTab,
+    focusGas,
+    focusDevices,
+    focusGaSearch,
+    focusDeviceSearch,
+    focusGaCompact,
+    focusDeviceCompact,
+    focusGaVerdichten,
+    focusDeviceVerdichten,
   ]);
 
   // ── Rate Calculation Loop ───────────────────────────────────────────────────
@@ -618,6 +726,8 @@ function App() {
   // main-panel navigation. Keyed by the table's anchorKey identity.
   const [markedTelegramKeys, setMarkedTelegramKeys] = useState<string[]>([]);
   const [lastMarkedTelegramKey, setLastMarkedTelegramKey] = useState<string | null>(null);
+  // Stripe highlights, separate from the mouse selection. Shared with Last Seen.
+  const [highlightedTelegramKeys, setHighlightedTelegramKeys] = useState<string[]>([]);
 
   // ── Per-message Time-Delta-Context flags (#319) ─────────────────────────────
   // Same lifting rationale as marks; each flagged telegram always anchors a
@@ -637,6 +747,91 @@ function App() {
     });
   };
 
+  const revealFocusList = (mode: 'ga' | 'pa') => {
+    setFocusTab(mode);
+    setPanelView('focus');
+    setIsFilterOpen(true);
+  };
+
+  const openPanel = (panel: 'list' | 'visualizer' | 'lastseen') => {
+    setActivePanel(panel);
+    setIsDatabaseOpen(false);
+  };
+
+  const toggleFocusMembership = (
+    address: string | string[],
+    mode: 'ga' | 'pa',
+    gesture: ToggleGesture = PLAIN_TOGGLE,
+    clicked?: string,
+  ) => {
+    if (gesture.kind === 'none') return;
+    const addresses = typeof address === 'string' ? [address] : address;
+    if (gesture.kind === 'toggle') {
+      const update = (prev: string[]) => applyToggle(
+        prev,
+        addresses,
+        toggleTurnOn(prev, addresses, clicked ?? (addresses.length === 1 ? addresses[0] : undefined)),
+        gesture.exclusive,
+      );
+      if (mode === 'ga') setFocusGas(update);
+      else setFocusDevices(update);
+      if (!gesture.navigate) return;
+    }
+    revealFocusList(mode);
+  };
+
+  const toggleFocusGroup = (addresses: string[], gesture: ToggleGesture = PLAIN_TOGGLE) => {
+    toggleFocusMembership(addresses, 'ga', gesture);
+  };
+
+  const toggleFocusFilter = (
+    address: string | string[],
+    mode: 'ga' | 'pa',
+    gesture: ToggleGesture = PLAIN_TOGGLE,
+    clicked?: string,
+  ) => {
+    if (gesture.kind === 'none') return;
+    const addresses = typeof address === 'string' ? [address] : address;
+    if (gesture.kind === 'toggle') {
+      const update = (prev: string[]) => applyToggle(
+        prev,
+        addresses,
+        toggleTurnOn(prev, addresses, clicked ?? (addresses.length === 1 ? addresses[0] : undefined)),
+        gesture.exclusive,
+      );
+      if (mode === 'ga') setFocusFilterGas(update);
+      else setFocusFilterDevices(update);
+      if (!gesture.navigate) return;
+    }
+    setFocusTab(mode);
+    setPanelView('focus');
+    setIsFilterOpen(true);
+    openPanel('list');
+  };
+
+  const runVisualize = (
+    address: string | string[],
+    mode: 'ga' | 'pa',
+    gesture: ToggleGesture = PLAIN_TOGGLE,
+    clicked?: string,
+  ) => {
+    if (gesture.kind === 'none') return;
+    const addresses = typeof address === 'string' ? [address] : address;
+    if (gesture.kind === 'toggle') {
+      const update = (prev: string[]) => applyToggle(
+        prev,
+        addresses,
+        toggleTurnOn(prev, addresses, clicked ?? (addresses.length === 1 ? addresses[0] : undefined)),
+        gesture.exclusive,
+      );
+      if (mode === 'ga') setSelectedVisualizationTargets(update);
+      else setVisualizedDevices(update);
+      if (!gesture.navigate) return;
+    }
+    setFocusTab(mode);
+    openPanel('visualizer');
+  };
+
   const handleQuickFilter = (key: 'sources' | 'targets' | 'types' | 'dpts', value: string | number) => {
     handleFiltersChange(prev => {
       const current = prev[key] as (string | number)[];
@@ -649,21 +844,40 @@ function App() {
     setIsFilterOpen(true);
   };
 
-  const handleQuickVisualize = (targetAddress: string) => {
-    setSelectedVisualizationTargets(prev =>
-      prev.includes(targetAddress) ? prev : [...prev, targetAddress]
-    );
-    setActivePanel('visualizer');
-    setIsDatabaseOpen(false);
+  const handleQuickVisualize = (targetAddress: string | string[], _mode: 'ga' | 'pa' = 'ga', gesture: ToggleGesture = PLAIN_TOGGLE, clicked?: string) => {
+    runVisualize(targetAddress, 'ga', gesture, clicked);
   };
 
-  // Add a function's/device's/comm-object's group addresses to the visualization
-  // selection (union, like handleFilterGAs) and open the visualizer (#307).
-  const handleVisualizeGAs = useCallback((addresses: string[]) => {
-    setSelectedVisualizationTargets(prev => [...new Set([...prev, ...addresses])]);
-    setActivePanel('visualizer');
-    setIsDatabaseOpen(false);
+  const handleVisualizeDevice = (sourceAddress: string | string[], _mode: 'ga' | 'pa' = 'pa', gesture: ToggleGesture = PLAIN_TOGGLE, clicked?: string) => {
+    runVisualize(sourceAddress, 'pa', gesture, clicked);
+  };
+
+  // A function's, device's or comm-object's group addresses share one visualize toggle (#307).
+  const handleVisualizeGAs = useCallback((addresses: string[], gesture: ToggleGesture = PLAIN_TOGGLE) => {
+    runVisualize(addresses, 'ga', gesture);
   }, []);
+
+  // Jump from outside the list (Last Seen, a chart): center that telegram and
+  // frame it. A focus or quick filter that would hide it also selects it, so
+  // the filter keep-rule leaves the row on screen.
+  const openListAtTelegram = useCallback((telegram: Telegram) => {
+    const key = anchorKey(telegram);
+    const quick = activeQuickFilter(quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumns);
+    const applied = focusAddressesForList(focusFilterGas, focusFilterDevices, filterFocusedSources, filterFocusedTargets);
+    const hiddenByFocus = !passesFocusAddressFilter(telegram, applied.gas, applied.devices);
+    const hiddenByQuick = quick != null && !quick(telegram);
+    if (hiddenByFocus || hiddenByQuick) {
+      setMarkedTelegramKeys(prev => (prev.includes(key) ? prev : [...prev, key]));
+      setLastMarkedTelegramKey(key);
+    }
+    setListFollow(false);
+    setListAnchorKey(key);
+    setListAnchorAlign('center');
+    setActivePanel('list');
+    setIsDatabaseOpen(false);
+  }, [quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumns, focusFilterGas, focusFilterDevices, filterFocusedSources, filterFocusedTargets]);
+
+  const handleGotoTelegram = openListAtTelegram;
 
   // Click a time/dot on a visualization chart: close the panel, land on the
   // telegram nearest that timestamp with live-follow paused, and auto-flag it
@@ -676,18 +890,36 @@ function App() {
       const diff = Math.abs(new Date(t.timestamp).getTime() - ms);
       if (diff < bestDiff) { bestDiff = diff; nearest = t; }
     }
-    const key = anchorKey(nearest);
-    setFlaggedTelegramKeys(prev => prev.includes(key) ? prev : [...prev, key]);
-    setListFollow(false);
-    setListAnchorKey(key);
-    setActivePanel('list');
-  }, [liveTelegrams]);
+    setFlaggedTelegramKeys(prev => prev.includes(anchorKey(nearest)) ? prev : [...prev, anchorKey(nearest)]);
+    openListAtTelegram(nearest);
+  }, [liveTelegrams, openListAtTelegram]);
 
-  const handleQuickLastSeen = useCallback((address: string | string[], mode: 'ga' | 'pa') => {
-    setLastSeenAddresses(Array.isArray(address) ? address : [address]);
+  const handleListAnchorKeyChange = useCallback((key: string | null) => {
+    if (key !== listAnchorKeyRef.current) setListAnchorAlign('start');
+    setListAnchorKey(key);
+  }, []);
+
+  const handleQuickLastSeen = useCallback((
+    address: string | string[],
+    mode: 'ga' | 'pa',
+    gesture: ToggleGesture = PLAIN_TOGGLE,
+    clicked?: string,
+  ) => {
+    if (gesture.kind === 'none') return;
+    const addresses = Array.isArray(address) ? address : [address];
+    if (gesture.kind === 'toggle') {
+      const update = (prev: string[]) => applyToggle(
+        prev,
+        addresses,
+        toggleTurnOn(prev, addresses, clicked ?? (addresses.length === 1 ? addresses[0] : undefined)),
+        gesture.exclusive,
+      );
+      if (mode === 'pa') setLastSeenDevices(update);
+      else setLastSeenGas(update);
+      if (!gesture.navigate) return;
+    }
     setLastSeenMode(mode);
-    setActivePanel('lastseen');
-    setIsDatabaseOpen(false);
+    openPanel('lastseen');
   }, []);
 
   // Add all of a KO's connected group addresses to the target filter (union).
@@ -701,12 +933,20 @@ function App() {
 
   // Click a GA name in a chart legend: add it to the target filter, make sure
   // filtering is on and show the newest telegrams in the list (#521).
-  const handleShowGaTelegrams = useCallback((address: string) => {
-    handleFilterGAs([address]);
+  const handleShowGaTelegrams = useCallback((address: string, event?: { altKey: boolean; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean }) => {
+    const gesture = event ? toggleGesture(event) : PLAIN_TOGGLE;
+    if (gesture.kind === 'none') return;
+    if (gesture.kind === 'toggle') {
+      handleFiltersChange(prev => ({
+        ...prev,
+        targets: applyToggle(prev.targets, [address], toggleTurnOn(prev.targets, [address], address), gesture.exclusive),
+      }));
+      if (!gesture.navigate) return;
+    }
     setFiltersEnabled(true);
     setListFollow(true);
-    setActivePanel('list');
-  }, [handleFilterGAs]);
+    openPanel('list');
+  }, [handleFiltersChange]);
 
   // Time-Delta-Context window, now edited from the telegram list's DELTA TIME
   // quick-filter cell rather than the filter pane (#309, #371).
@@ -737,30 +977,73 @@ function App() {
       f.dpts.length === 0);
 
     // Quick-filter matches anchor the context like main-filter matches (#520).
-    const quick = activeQuickFilter(quickFilterOpen, quickFilterEnabled, quickPatterns);
-    const matches = sortedLiveTelegrams.map(t =>
-      (noFilter || matchesTelegram(t, f)) && (!quick || quick(t))
+    const quick = activeQuickFilter(quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumns);
+    const appliedFocus = focusAddressesForList(focusFilterGas, focusFilterDevices, filterFocusedSources, filterFocusedTargets);
+    // Stripe marks stay visible, but they are not filter matches: a context row
+    // that is highlighted keeps its context identity. A mouse selection never does.
+    const kept = new Set(highlightedTelegramKeys);
+    const matches = sortedLiveTelegrams.map(t => {
+      const panelPass = noFilter || matchesTelegram(t, f);
+      const focusPass = passesFocusAddressFilter(t, appliedFocus.gas, appliedFocus.devices);
+      const quickPass = !quick || quick(t);
+      return panelPass && focusPass && quickPass;
+    });
+
+    // The Δt column filter closes the window the same way the master toggle does.
+    const { before: deltaBeforeMs, after: deltaAfterMs } = effectiveDeltaContext(f, quickFilterColumns.delta !== false);
+    // A per-message flag keeps a non-match and anchors a window only when that
+    // window exists and a focus or quick filter is narrowing the list. Otherwise
+    // the flag is stored but does not hold the row the way a mark does. The
+    // global "all" state still anchors filter matches. The master toggle off
+    // (#318) leaves the flags stored and inert.
+    const focusOrQuick = appliedFocus.gas.length > 0 || appliedFocus.devices.length > 0 || quick != null;
+    const flags = f.deltaContextEnabled && (deltaBeforeMs > 0 || deltaAfterMs > 0) && focusOrQuick
+      ? new Set(flaggedTelegramKeys)
+      : EMPTY_KEY_SET;
+
+    const expanded = expandWithDeltaContext(sortedLiveTelegrams, matches, anchorKey, flags, deltaBeforeMs, deltaAfterMs, contextForAllMatches);
+    return retainKeptRows(
+      sortedLiveTelegrams,
+      expanded,
+      anchorKey,
+      kept,
+      t => noFilter || matchesTelegram(t, f),
     );
-
-    const { before: deltaBeforeMs, after: deltaAfterMs } = effectiveDeltaContext(f);
-    // The global toggle off (#318) suppresses per-message flags too, per its
-    // "preserving all per-message flags" — inert, not cleared, while off.
-    const flags = f.deltaContextEnabled ? new Set(flaggedTelegramKeys) : EMPTY_KEY_SET;
-
-    return expandWithDeltaContext(sortedLiveTelegrams, matches, anchorKey, flags, deltaBeforeMs, deltaAfterMs, contextForAllMatches);
-  }, [sortedLiveTelegrams, appliedFilters, filtersEnabled, flaggedTelegramKeys, contextForAllMatches, quickFilterOpen, quickFilterEnabled, quickPatterns]);
+  }, [sortedLiveTelegrams, appliedFilters, filtersEnabled, flaggedTelegramKeys, contextForAllMatches, quickFilterOpen, quickFilterEnabled, quickPatterns, quickFilterColumns, focusFilterGas, focusFilterDevices, filterFocusedSources, filterFocusedTargets, highlightedTelegramKeys]);
   const filteredLiveTelegrams = deltaExpandedLive.items;
+
+  // A mouse selection is never held. A row that leaves the list leaves the
+  // selection. A stripe mark stays visible, so a selection on it stays.
+  useEffect(() => {
+    const visible = new Set(filteredLiveTelegrams.map(anchorKey));
+    const next = markedTelegramKeys.filter(key => visible.has(key));
+    if (next.length === markedTelegramKeys.length && next.every((key, i) => key === markedTelegramKeys[i])) return;
+    setMarkedTelegramKeys(next);
+  }, [filteredLiveTelegrams, markedTelegramKeys]);
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = deltaExpandedLive.contextKeys;
 
   // ── Count bubbles ───────────────────────────────────────────────
-  const filterCounts = useMemo(() => countFilterOptions(sortedLiveTelegrams), [sortedLiveTelegrams]);
+  // The master switch changes which telegrams the list shows. The pane keeps
+  // counting as if the filter were on, so its badges do not follow that switch.
+  const filterCounts = useMemo(
+    () => countAppliedFilterOptions(sortedLiveTelegrams, activeFilters),
+    [sortedLiveTelegrams, activeFilters],
+  );
+  // Entry labels are highlighted from the unfiltered buffer. A gray badge counts
+  // the entry in the database only when the live filter leaves it out of the buffer.
+  const bufferCounts = useMemo(
+    () => countFilterOptions(sortedLiveTelegrams),
+    [sortedLiveTelegrams],
+  );
+  const dbCounts = useDbTelegramCounts();
 
   const activeFilterCount = countSelections(appliedFilters);
 
-  // The filter pane and its toggle are tied to the Telegram List (#374): only
-  // that panel consumes the main filter, so the pane shows only when it is active.
-  const showFilterPane = activePanel === 'list' && isFilterOpen;
+  // One header for the telegram list, the visualization and last seen (#374).
+  const showViewHeader = !isDatabaseOpen && VIEW_PANELS.includes(activePanel);
+  // The filter/focus pane is the address picker for the list, the chart and last seen.
+  const showFilterPane = showViewHeader && isFilterOpen;
 
   // The buffer holds at most `loadLimit` (newest) telegrams; once it is at
   // capacity there is no room to load older history (#313).
@@ -785,6 +1068,16 @@ function App() {
   }
 
   return (
+    <AddressActionProvider value={{
+      focusGas, focusDevices, focusFilterGas, focusFilterDevices,
+      lastSeenGas, lastSeenDevices,
+      visualizedGas: selectedVisualizationTargets, visualizedDevices,
+      onFocus: toggleFocusMembership,
+      onFilter: toggleFocusFilter,
+      onVisualize: runVisualize,
+      onLastSeen: handleQuickLastSeen,
+      canSend: !!serverConfig?.status?.write_enabled,
+    }}>
     <div className="container dashboard-grid" style={{ padding: '1.5rem', gap: '1.5rem' }}>
 
       {/* ── Main area (Full Width) ─── */}
@@ -909,6 +1202,7 @@ function App() {
                 {/* Main-panel switch (#374): the five panels close back to the
                     list; the Building opener also clears any drilled-in device. */}
                 <PanelSwitch
+                  panels={OTHER_PANELS}
                   active={activePanel}
                   onChange={(p) => { if (p !== 'building') setStatusDevice(null); setActivePanel(p); setIsDatabaseOpen(false); }}
                 />
@@ -916,7 +1210,7 @@ function App() {
                 {serverConfig?.status?.write_enabled && (
                   <button
                     className="icon-button"
-                    onClick={() => setIsSendOpen(o => !o)}
+                    onClick={() => toggleSendPanel()}
                     title="Send / read telegrams"
                     style={{ color: isSendOpen ? 'var(--accent-primary)' : 'var(--text-dim)' }}
                   >
@@ -1202,12 +1496,53 @@ function App() {
                     activeFilters={activeFilters}
                     onFiltersChange={handleFiltersChange}
                     counts={filterCounts}
+                    bufferCounts={bufferCounts}
+                    dbCounts={dbCounts}
                     onQuickLastSeen={handleQuickLastSeen}
+                    onOpenPanel={openPanel}
                     projectLoaded={projectStatus?.project_loaded}
                     onUploadProject={() => setIsSettingsOpen(true)}
                     writeEnabled={serverConfig?.status?.write_enabled}
                     filtersEnabled={filtersEnabled}
                     onFiltersEnabledChange={setFiltersEnabled}
+                    search={filterSearch}
+                    onSearchChange={setFilterSearch}
+                    compact={filterCompact}
+                    onCompactChange={setFilterCompact}
+                    checkedOnly={filterCheckedOnly}
+                    onCheckedOnlyChange={setFilterCheckedOnly}
+                    panelView={panelView}
+                    onPanelViewChange={setPanelView}
+                    focusTab={focusTab}
+                    onFocusTabChange={setFocusTab}
+                    focusGas={focusGas}
+                    onFocusGasChange={setFocusGas}
+                    focusDevices={focusDevices}
+                    onFocusDevicesChange={setFocusDevices}
+                    focusGaSearch={focusGaSearch}
+                    onFocusGaSearchChange={setFocusGaSearch}
+                    focusDeviceSearch={focusDeviceSearch}
+                    onFocusDeviceSearchChange={setFocusDeviceSearch}
+                    focusGaCompact={focusGaCompact}
+                    onFocusGaCompactChange={setFocusGaCompact}
+                    focusDeviceCompact={focusDeviceCompact}
+                    onFocusDeviceCompactChange={setFocusDeviceCompact}
+                    focusGaVerdichten={focusGaVerdichten}
+                    onFocusGaVerdichtenChange={setFocusGaVerdichten}
+                    focusDeviceVerdichten={focusDeviceVerdichten}
+                    onFocusDeviceVerdichtenChange={setFocusDeviceVerdichten}
+                    lastSeenGas={lastSeenGas}
+                    onLastSeenGasChange={setLastSeenGas}
+                    visualizedGas={selectedVisualizationTargets}
+                    onVisualizedGasChange={setSelectedVisualizationTargets}
+                    visualizedDevices={visualizedDevices}
+                    onVisualizedDevicesChange={setVisualizedDevices}
+                    lastSeenDevices={lastSeenDevices}
+                    onLastSeenDevicesChange={setLastSeenDevices}
+                    focusFilterGas={focusFilterGas}
+                    onFocusFilterGasChange={setFocusFilterGas}
+                    focusFilterDevices={focusFilterDevices}
+                    onFocusFilterDevicesChange={setFocusFilterDevices}
                   />
               </ResizablePane>
 
@@ -1216,85 +1551,21 @@ function App() {
                 {isSendOpen && serverConfig?.status?.write_enabled && (
                   <WriteToBusPanel
                     targets={filterOptions.targets}
-                    onClose={() => setIsSendOpen(false)}
+                    onClose={() => setSendPanelOpen(false)}
                     latestTelegram={latestTelegram}
                   />
                 )}
-                {isVisualizerOpen ? (
-                  <Visualizer
-                    // The main filter applies to the telegram list only; the
-                    // Visualization Targets list every GA in the buffer (#361).
-                    telegrams={liveTelegrams}
-                    selectedTargets={selectedVisualizationTargets}
-                    onTargetsChange={setSelectedVisualizationTargets}
-                    onClose={() => setActivePanel('list')}
-                    zoomRange={zoomRange}
-                    onZoomRangeChange={setZoomRange}
-                    onTimeClick={handleChartTimeClick}
-                    writeEnabled={serverConfig?.status?.write_enabled}
-                    onFilterGAs={handleFilterGAs}
-                    onShowGaTelegrams={handleShowGaTelegrams}
-                    onLastSeen={handleQuickLastSeen}
-                  />
-                ) : isLastSeenOpen ? (
-                  <LastSeenOverlay
-                    filterOptions={filterOptions}
-                    initialAddresses={lastSeenAddresses}
-                    initialMode={lastSeenMode}
-                    writeEnabled={serverConfig?.status?.write_enabled}
-                    latestTelegram={latestTelegram}
-                    onClose={() => setActivePanel('list')}
-                    limit={lastSeenLimit}
-                    onLimitChange={setLastSeenLimit}
-                    autoRefresh={lastSeenLive}
-                    onAutoRefreshChange={setLastSeenLive}
-                    search={lastSeenSearch}
-                    onSearchChange={setLastSeenSearch}
-                    onSelectionChange={(mode, addresses) => {
-                      setLastSeenMode(mode);
-                      setLastSeenAddresses(addresses);
-                    }}
-                    onFilterDevice={(pa) => handleQuickFilter('sources', pa)}
-                    onFilterGAs={handleFilterGAs}
-                    onVisualizeGAs={handleVisualizeGAs}
-                  />
-                ) : isStatisticsOpen ? (
-                  <StatisticsOverlay
-                    filterOptions={filterOptions}
-                    onClose={() => setActivePanel('list')}
-                    searchQuery={statsSearch}
-                    onSearchQueryChange={setStatsSearch}
-                  />
-                ) : isBuildingOpen && statusDevice ? (
-                  <DeviceStatusOverlay
-                    device={statusDevice}
-                    latestTelegram={latestTelegram}
-                    onClose={() => setStatusDevice(null)}
-                    onLastSeen={handleQuickLastSeen}
-                  />
-                ) : isBuildingOpen ? (
-                  <BuildingOverlay
-                    onClose={() => setActivePanel('list')}
-                    onFilterDevice={(pa) => handleQuickFilter('sources', pa)}
-                    onFilterGAs={handleFilterGAs}
-                    onLastSeen={handleQuickLastSeen}
-                    onVisualizeGAs={handleVisualizeGAs}
-                    onDeviceStatus={setStatusDevice}
-                    writeEnabled={serverConfig?.status?.write_enabled}
-                    latestTelegram={latestTelegram}
-                    searchQuery={buildingSearch}
-                    onSearchQueryChange={setBuildingSearch}
-                  />
-                ) : isDatabaseOpen ? (
-                  <DatabaseOverlay onClose={() => setIsDatabaseOpen(false)} />
-                ) : (
-                  <>
-                    {/* Telegram List panel header (#374): its own filter toggle
-                        (top-left) and the live play/pause it governs. */}
+                {showViewHeader && (
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: '0.5rem',
+                    height: 40, boxSizing: 'border-box', padding: '0 0.75rem 0 0', flexShrink: 0,
+                    borderBottom: '1px solid var(--border-color)',
+                  }}>
                     <div style={{
-                      display: 'flex', alignItems: 'center', gap: '0.5rem',
-                      padding: '0.4rem 0.75rem', flexShrink: 0,
-                      borderBottom: '1px solid var(--border-color)',
+                      display: 'flex', alignItems: 'center',
+                      padding: '0.1rem', borderRadius: '0 8px 8px 0',
+                      background: 'var(--bg-subtle)',
+                      border: '1px solid var(--border-color)', borderLeft: 'none',
                     }}>
                       <button
                         className="icon-button"
@@ -1302,6 +1573,8 @@ function App() {
                         title="Toggle filter panel"
                         style={{
                           position: 'relative',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          padding: '0.28rem', borderRadius: '6px',
                           color: isFilterOpen || (hasActiveFilters(appliedFilters) && filtersEnabled) ? 'var(--accent-primary)' : 'var(--text-dim)',
                         }}
                       >
@@ -1317,15 +1590,143 @@ function App() {
                         )}
                       </button>
                     </div>
+                    <span
+                      aria-hidden
+                      style={{ width: '1px', height: '1.1rem', flexShrink: 0, background: 'var(--border-color)' }}
+                    />
+                    <PanelSwitch
+                        panels={VIEW_PANELS}
+                        compact
+                        active={activePanel}
+                        onChange={(p) => {
+                          setStatusDevice(null);
+                          setActivePanel(p);
+                          setIsDatabaseOpen(false);
+                          if (p === 'visualizer' || p === 'lastseen') {
+                            setPanelView('focus');
+                            setIsFilterOpen(true);
+                            if (p === 'visualizer') setFocusTab('ga');
+                          }
+                        }}
+                      />
+                    <span
+                      aria-hidden
+                      style={{ width: '1px', height: '1.1rem', flexShrink: 0, background: 'var(--border-color)' }}
+                    />
+                    {activePanel === 'list' && (
+                      <div style={{ fontWeight: 600, fontSize: '0.875rem', flexShrink: 0 }}>Telegram List</div>
+                    )}
+                    <div
+                      ref={assignViewHeaderSlot}
+                      style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '0.65rem', minWidth: 0, overflow: 'hidden' }}
+                    />
+                  </div>
+                )}
+                {isVisualizerOpen ? (
+                  <Visualizer
+                    // The main filter applies to the telegram list only; the
+                    // Visualization Targets list every GA in the buffer (#361).
+                    telegrams={liveTelegrams}
+                    selectedTargets={selectedVisualizationTargets}
+                    onTargetsChange={setSelectedVisualizationTargets}
+                    onClose={() => setActivePanel('list')}
+                    zoomRange={zoomRange}
+                    onZoomRangeChange={setZoomRange}
+                    onTimeClick={handleChartTimeClick}
+                    writeEnabled={serverConfig?.status?.write_enabled}
+                    onShowGaTelegrams={handleShowGaTelegrams}
+                    onLastSeen={handleQuickLastSeen}
+                    headerSlot={viewHeaderSlot}
+                  />
+                ) : isLastSeenOpen ? (
+                  <LastSeenOverlay
+                    filterOptions={filterOptions}
+                    visibleColumns={visibleColumns}
+                    gaAddresses={lastSeenGas}
+                    deviceAddresses={lastSeenDevices}
+                    group={lastSeenGroup}
+                    onGroupChange={setLastSeenGroup}
+                    expanded={lastSeenExpanded}
+                    onExpandedChange={setLastSeenExpanded}
+                    onFocusFilter={toggleFocusMembership}
+                    focusGas={focusGas}
+                    focusDevices={focusDevices}
+                    onQuickVisualize={handleQuickVisualize}
+                    onQuickVisualizeSource={handleVisualizeDevice}
+                    onQuickLastSeen={handleQuickLastSeen}
+                    canSend={serverConfig?.status?.write_enabled}
+                    telegrams={liveTelegrams}
+                    highlightedKeys={highlightedTelegramKeys}
+                    onHighlightedKeysChange={setHighlightedTelegramKeys}
+                    onGotoTelegram={handleGotoTelegram}
+                    onClose={() => setActivePanel('list')}
+                    headerSlot={viewHeaderSlot}
+                    limit={lastSeenLimit}
+                    onLimitChange={setLastSeenLimit}
+                    autoRefresh={lastSeenLive}
+                    onAutoRefreshChange={setLastSeenLive}
+                  />
+                ) : isStatisticsOpen ? (
+                  <StatisticsOverlay
+                    filterOptions={filterOptions}
+                    onClose={() => setActivePanel('list')}
+                    searchQuery={statsSearch}
+                    onSearchQueryChange={setStatsSearch}
+                  />
+                ) : isBuildingOpen && statusDevice ? (
+                  <DeviceStatusOverlay
+                    device={statusDevice}
+                    latestTelegram={latestTelegram}
+                    onClose={() => setStatusDevice(null)}
+                    onLastSeen={handleQuickLastSeen}
+                    onFocusFilter={toggleFocusMembership}
+                    focusGas={focusGas}
+                    focusDevices={focusDevices}
+                  />
+                ) : isBuildingOpen ? (
+                  <BuildingOverlay
+                    onClose={() => setActivePanel('list')}
+                    onFilterDevice={(pa, gesture = PLAIN_TOGGLE) => toggleFocusMembership(pa, 'pa', gesture)}
+                    onFilterGAs={toggleFocusGroup}
+                    onLastSeen={handleQuickLastSeen}
+                    onVisualizeGAs={handleVisualizeGAs}
+                    onFocusFilter={toggleFocusMembership}
+                    focusFilterGas={focusGas}
+                    focusDevices={focusDevices}
+                    onDeviceStatus={setStatusDevice}
+                    writeEnabled={serverConfig?.status?.write_enabled}
+                    latestTelegram={latestTelegram}
+                    searchQuery={buildingSearch}
+                    onSearchQueryChange={setBuildingSearch}
+                  />
+                ) : isDatabaseOpen ? (
+                  <DatabaseOverlay onClose={() => setIsDatabaseOpen(false)} />
+                ) : (
                     <TelegramTable
                     telegrams={filteredLiveTelegrams}
                     visibleColumns={visibleColumns}
                     sortConfig={sortConfig}
                     onSort={handleSort}
                     activeFilters={activeFilters}
+                    filtersEnabled={filtersEnabled}
                     onQuickFilter={handleQuickFilter}
+                    onFocusFilter={toggleFocusMembership}
+                    focusGas={focusGas}
+                    focusDevices={focusDevices}
+                    focusFilterGas={focusFilterGas}
+                    focusFilterDevices={focusFilterDevices}
+                    filterFocusedSources={filterFocusedSources}
+                    onFilterFocusedSourcesChange={setFilterFocusedSources}
+                    filterFocusedTargets={filterFocusedTargets}
+                    onFilterFocusedTargetsChange={setFilterFocusedTargets}
                     onQuickVisualize={handleQuickVisualize}
+                    onQuickVisualizeSource={handleVisualizeDevice}
                     onQuickLastSeen={handleQuickLastSeen}
+                    onFocusAddressFilter={toggleFocusFilter}
+                    lastSeenGas={lastSeenGas}
+                    lastSeenDevices={lastSeenDevices}
+                    visualizedGas={selectedVisualizationTargets}
+                    visualizedDevices={visualizedDevices}
                     canSend={serverConfig?.status?.write_enabled}
                     quickFilterOpen={quickFilterOpen}
                     onQuickFilterOpenChange={setQuickFilterOpen}
@@ -1333,16 +1734,22 @@ function App() {
                     onQuickFilterEnabledChange={setQuickFilterEnabled}
                     quickPatterns={quickPatterns}
                     onQuickPatternsChange={setQuickPatterns}
+                    quickFilterColumnEnabled={quickFilterColumns}
+                    onQuickFilterColumnEnabledChange={setQuickFilterColumns}
                     onDeltaContextChange={handleDeltaContextChange}
                     onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
                     listFollow={listFollow}
                     onListFollowChange={setListFollow}
+                    onVisibleSpanChange={onVisibleSpanChange}
                     listAnchorKey={listAnchorKey}
-                    onListAnchorKeyChange={setListAnchorKey}
+                    onListAnchorKeyChange={handleListAnchorKeyChange}
+                    listAnchorAlign={listAnchorAlign}
                     markedKeys={markedTelegramKeys}
                     onMarkedKeysChange={setMarkedTelegramKeys}
                     lastMarkedKey={lastMarkedTelegramKey}
                     onLastMarkedKeyChange={setLastMarkedTelegramKey}
+                    highlightedKeys={highlightedTelegramKeys}
+                    onHighlightedKeysChange={setHighlightedTelegramKeys}
                     flaggedKeys={flaggedTelegramKeys}
                     onFlaggedKeysChange={setFlaggedTelegramKeys}
                     contextForAllMatches={contextForAllMatches}
@@ -1351,7 +1758,6 @@ function App() {
                     infoBarOpen={infoBarOpen}
                     onInfoBarOpenChange={setInfoBarOpen}
                   />
-                  </>
                 )}
               </div>
             </div>
@@ -1372,6 +1778,51 @@ function App() {
             initialView={initialView}
             filtersEnabled={filtersEnabled}
             onFiltersEnabledChange={setFiltersEnabled}
+            filterSearch={filterSearch}
+            onFilterSearchChange={setFilterSearch}
+            filterCompact={filterCompact}
+            onFilterCompactChange={setFilterCompact}
+            filterCheckedOnly={filterCheckedOnly}
+            onFilterCheckedOnlyChange={setFilterCheckedOnly}
+            panelView={panelView}
+            onPanelViewChange={setPanelView}
+            focusTab={focusTab}
+            onFocusTabChange={setFocusTab}
+            focusGas={focusGas}
+            onFocusGasChange={setFocusGas}
+            focusDevices={focusDevices}
+            onFocusDevicesChange={setFocusDevices}
+            focusGaSearch={focusGaSearch}
+            onFocusGaSearchChange={setFocusGaSearch}
+            focusDeviceSearch={focusDeviceSearch}
+            onFocusDeviceSearchChange={setFocusDeviceSearch}
+            focusGaCompact={focusGaCompact}
+            onFocusGaCompactChange={setFocusGaCompact}
+            focusDeviceCompact={focusDeviceCompact}
+            onFocusDeviceCompactChange={setFocusDeviceCompact}
+            focusGaVerdichten={focusGaVerdichten}
+            onFocusGaVerdichtenChange={setFocusGaVerdichten}
+            focusDeviceVerdichten={focusDeviceVerdichten}
+            onFocusDeviceVerdichtenChange={setFocusDeviceVerdichten}
+            lastSeenGas={lastSeenGas}
+            onLastSeenGasChange={setLastSeenGas}
+            lastSeenDevices={lastSeenDevices}
+            onLastSeenDevicesChange={setLastSeenDevices}
+            visualizedGas={selectedVisualizationTargets}
+            onVisualizedGasChange={setSelectedVisualizationTargets}
+            visualizedDevices={visualizedDevices}
+            onVisualizedDevicesChange={setVisualizedDevices}
+            focusFilterGas={focusFilterGas}
+            onFocusFilterGasChange={setFocusFilterGas}
+            focusFilterDevices={focusFilterDevices}
+            onFocusFilterDevicesChange={setFocusFilterDevices}
+            filterFocusedSources={filterFocusedSources}
+            onFilterFocusedSourcesChange={setFilterFocusedSources}
+            filterFocusedTargets={filterFocusedTargets}
+            onFilterFocusedTargetsChange={setFilterFocusedTargets}
+            dbCounts={dbCounts}
+            onOpenLastSeen={() => openPanel('lastseen')}
+            writeEnabled={serverConfig?.status?.write_enabled}
           />
         )}
       </main>
@@ -1448,6 +1899,7 @@ function App() {
         .raw-badge { background: var(--bg-tag); padding: 0.15rem 0.4rem; border-radius: 3px; font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: var(--text-dim); display: inline-block; border: 1px solid var(--border-subtle); }
       `}</style>
     </div>
+    </AddressActionProvider>
   );
 }
 

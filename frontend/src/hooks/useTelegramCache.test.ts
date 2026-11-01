@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useTelegramCache } from './useTelegramCache';
 import { makeTelegram } from '../test/telegramFactory';
+import { DEFAULT_FILTERS } from '../types/filters';
 import { toEntry } from '../utils/telegramId';
 import { COVERAGE_STORAGE_KEY } from '../services/telegram-coverage-service';
 import type { Telegram } from './useWebSocket';
@@ -500,5 +501,42 @@ describe('useTelegramCache', () => {
 
     rerender({ limit: 2 });
     expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.c', '1.2.b']);
+  });
+
+  it('drops live telegrams that miss the panel filter and refills matches from the database', async () => {
+    const { result, rerender } = renderHook(
+      ({ filter }: { filter: typeof DEFAULT_FILTERS | null }) => useTelegramCache(10, false, filter),
+      { initialProps: { filter: null } },
+    );
+    await settle(result);
+
+    act(() => {
+      result.current.addLive(tg(1000, 'keep'));
+      result.current.addLive(tg(2000, 'drop'));
+    });
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.drop', '1.2.keep']);
+
+    telegramResponses.push({ telegrams: [tg(3000, 'fromdb')] });
+    rerender({ filter: { ...DEFAULT_FILTERS, sources: ['1.2.keep', '1.2.fromdb'] } });
+    await settle(result);
+
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.fromdb', '1.2.keep']);
+    const filteredCall = fetchCalls.find(u => u.includes('source_address='));
+    expect(filteredCall).toBeDefined();
+    expect(filteredCall).not.toContain('delta_before_ms');
+  });
+
+  it('does not evict the visible span to admit a newer live telegram', async () => {
+    const filter = { ...DEFAULT_FILTERS, sources: ['1.2.v1', '1.2.v2', '1.2.new'] };
+    const { result } = renderHook(() => useTelegramCache(2, false, filter, { startMs: 2000, endMs: 3000 }));
+    await settle(result);
+
+    act(() => {
+      result.current.addLive(tg(2000, 'v1'));
+      result.current.addLive(tg(3000, 'v2'));
+      result.current.addLive(tg(9000, 'new'));
+    });
+
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.v2', '1.2.v1']);
   });
 });

@@ -139,8 +139,8 @@ test('visualizes a single GA row (#307)', async () => {
   await waitFor(() => expect(screen.getByText('1/2/3')).toBeInTheDocument());
 
   const row = screen.getByText('Kitchen Status').closest('tr')!;
-  fireEvent.click(within(row).getByTitle('Visualize this group address'));
-  expect(onVisualizeGAs).toHaveBeenCalledWith(['1/2/10']);
+  fireEvent.click(within(row).getByRole('button', { name: 'Visualize this GA' }));
+  expect(onVisualizeGAs).toHaveBeenCalledWith(['1/2/10'], { kind: 'toggle', exclusive: true, navigate: false });
 });
 
 test('sizes the NAME column from GaNameWidthContext when provided', async () => {

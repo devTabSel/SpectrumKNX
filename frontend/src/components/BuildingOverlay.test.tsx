@@ -107,7 +107,7 @@ test('visualizing a function adds all its group addresses and opens the visualiz
 
   await waitFor(() => expect(screen.getByText('Kitchen Light')).toBeInTheDocument());
   fireEvent.click(screen.getByTitle('Visualize all 1 group address of this function'));
-  expect(onVisualizeGAs).toHaveBeenCalledWith(['1/1/1']);
+  expect(onVisualizeGAs).toHaveBeenCalledWith(['1/1/1'], { kind: 'toggle', exclusive: true, navigate: false });
 });
 
 test('visualizing a device adds all its group addresses (#307)', async () => {
@@ -124,7 +124,7 @@ test('visualizing a device adds all its group addresses (#307)', async () => {
   await waitFor(() => expect(screen.getByText('Push Button')).toBeInTheDocument());
   fireEvent.click(screen.getByText('Push Button')); // expand the device
   fireEvent.click(screen.getByTitle('Visualize all 2 group addresses of this device'));
-  expect(onVisualizeGAs).toHaveBeenCalledWith(['1/1/1', '1/1/2']);
+  expect(onVisualizeGAs).toHaveBeenCalledWith(['1/1/1', '1/1/2'], { kind: 'toggle', exclusive: true, navigate: false });
 });
 
 test('comm object filter action uses the multi-GA icon, not the single-GA one (#307)', async () => {
@@ -139,10 +139,10 @@ test('comm object filter action uses the multi-GA icon, not the single-GA one (#
 
   await waitFor(() => expect(screen.getByText('Push Button')).toBeInTheDocument());
   fireEvent.click(screen.getByText('Push Button'));
-  expect(screen.getByTitle('Filter by connected group addresses')).toBeInTheDocument();
+  expect(screen.getByTitle(/^Toggle focus for the connected group addresses/)).toBeInTheDocument();
 });
 
-test('comm object header shows the DPT-family mismatch and the newest value, framed when sent from the sending GA (#307)', async () => {
+test('comm object header shows the DPT-family mismatch and the newest value (#307)', async () => {
   vi.stubGlobal('fetch', mockFetch({
     '/api/building': BUILDING_DATA,
     '/api/telegrams/last': {
@@ -172,7 +172,7 @@ test('comm object header shows the DPT-family mismatch and the newest value, fra
   await waitFor(() => expect(screen.getByText('5.*')).toBeInTheDocument());
 
   const valueEl = await screen.findByText('On');
-  expect(valueEl.style.border).toContain('var(--accent-primary)'); // framed: newest telegram targets the sending GA
+  expect(valueEl.style.boxShadow).toBe('');
 });
 
 test('visualizing a single GA row inside the expanded comm-object table propagates through (#307)', async () => {
@@ -191,6 +191,6 @@ test('visualizing a single GA row inside the expanded comm-object table propagat
   fireEvent.click(screen.getByText('Switching')); // expand the KO's GA table
 
   const row = (await screen.findByText('Status GA')).closest('tr')!;
-  fireEvent.click(within(row).getByTitle('Visualize this group address'));
-  expect(onVisualizeGAs).toHaveBeenCalledWith(['1/1/2']);
+  fireEvent.click(within(row).getByRole('button', { name: 'Visualize this GA' }));
+  expect(onVisualizeGAs).toHaveBeenCalledWith(['1/1/2'], { kind: 'toggle', exclusive: true, navigate: false });
 });

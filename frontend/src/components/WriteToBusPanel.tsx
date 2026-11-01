@@ -18,6 +18,7 @@ import { GaCombobox } from './GaCombobox';
 import { WriteControls } from './WriteControls';
 import { secondaryBtn } from '../utils/buttonStyles';
 import { loadRecentGas, pushRecentGa } from '../utils/recentGas';
+import { newWritePanelRow, setWritePanelRows, useWritePanelRows, type WritePanelRow } from '../utils/writePanelRows';
 
 interface Props {
   /** Group addresses from the loaded project (with optional DPT main/sub). */
@@ -27,23 +28,7 @@ interface Props {
   latestTelegram?: Telegram | null;
 }
 
-interface Row {
-  id: string;
-  address: string;
-  dpt: string;
-  value: string;
-  delay: string;
-  every: string;
-  busy: boolean;
-  feedback: { ok: boolean; msg: string } | null;
-  /**
-   * Set by Read: the timestamp of the value shown when the request went out
-   * ('' when there was none). The row is "waiting for a response" for as long
-   * as the shown value is still that one. Compared by identity, not by clock,
-   * so browser/server time differences cannot matter.
-   */
-  readBaseline: string | null;
-}
+type Row = WritePanelRow;
 
 const GA_RE = /^\d{1,2}\/\d{1,2}\/\d{1,3}$|^\d{1,2}\/\d{1,4}$|^\d{1,5}$/;
 const POLL_INTERVAL_MS = 1000;
@@ -56,55 +41,7 @@ const COMMON_DPTS = [
   '13.001', '14.056', '16.000', '17.001', '18.001', '19.001', '20.102', '232.600',
 ];
 
-let rowSeq = 0;
-const newRow = (): Row => ({
-  id: `row-${rowSeq++}`, address: '', dpt: '', value: '', delay: '', every: '', busy: false, feedback: null,
-  readBaseline: null,
-});
-
-// ── Row persistence (#254) ───────────────────────────────────────────────────
-// The panel unmounts when toggled off; without this every configured row would
-// be lost. Only the durable inputs are stored — busy/feedback are transient,
-// and scheduled jobs live server-side (re-attached via the status poll).
-
-const ROWS_STORAGE_KEY = 'spectrumknx-write-panel-rows';
-const MAX_STORED_ROWS = 20;
-
-type StoredRow = Pick<Row, 'address' | 'dpt' | 'value' | 'delay' | 'every'>;
-
-function loadStoredRows(): Row[] | null {
-  try {
-    const raw = localStorage.getItem(ROWS_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return null;
-    const str = (v: unknown) => (typeof v === 'string' ? v : '');
-    return parsed.slice(0, MAX_STORED_ROWS).map(p => {
-      const s = p as Partial<StoredRow> | null;
-      return {
-        ...newRow(),
-        address: str(s?.address),
-        dpt: str(s?.dpt),
-        value: str(s?.value),
-        delay: str(s?.delay),
-        every: str(s?.every),
-      };
-    });
-  } catch {
-    return null;
-  }
-}
-
-function saveRows(rows: Row[]): void {
-  try {
-    const stored: StoredRow[] = rows.map(({ address, dpt, value, delay, every }) => ({
-      address, dpt, value, delay, every,
-    }));
-    localStorage.setItem(ROWS_STORAGE_KEY, JSON.stringify(stored));
-  } catch {
-    // Storage unavailable — the rows just won't survive the next toggle.
-  }
-}
+const newRow = newWritePanelRow;
 
 /**
  * "Write to bus" panel: send to several group addresses from stacked rows,
@@ -118,7 +55,8 @@ function saveRows(rows: Row[]): void {
  * Rows persist to localStorage so toggling the panel keeps its state (#254).
  */
 export function WriteToBusPanel({ targets, onClose, latestTelegram }: Props) {
-  const [rows, setRows] = useState<Row[]>(() => loadStoredRows() ?? [newRow()]);
+  const rows = useWritePanelRows(true);
+  const setRows = setWritePanelRows;
   const [recentGas, setRecentGas] = useState<string[]>(loadRecentGas);
   const [job, setJob] = useState<ScheduledSendStatus | null>(null);
   const pollRef = useRef<number | null>(null);
@@ -159,10 +97,6 @@ export function WriteToBusPanel({ targets, onClose, latestTelegram }: Props) {
     return stopPolling;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    saveRows(rows);
-  }, [rows]);
 
   const updateRow = (id: string, patch: Partial<Row>) =>
     setRows(rs => rs.map(r => (r.id === id ? { ...r, ...patch } : r)));

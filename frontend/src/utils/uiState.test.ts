@@ -6,6 +6,7 @@ import {
   UI_STORAGE_KEY,
   type UiSessionState,
 } from './uiState';
+import { DEFAULT_QUICK_FILTER_COLUMN_ENABLED } from './quickFilter';
 
 beforeEach(() => {
   localStorage.clear();
@@ -18,6 +19,7 @@ test('round-trip save/load works correctly', () => {
       open: true,
       enabled: true,
       patterns: { source: { top: '1.1.1', bottom: '' } },
+      columns: { ...DEFAULT_QUICK_FILTER_COLUMN_ENABLED, target: false },
     },
     listFollow: false,
     listAnchorKey: 'some-key',
@@ -29,6 +31,23 @@ test('round-trip save/load works correctly', () => {
     lastSeenLive: false,
     lastSeenSearch: 'lastseen',
     filtersEnabled: false,
+    filterSearch: 'licht',
+    filterCompact: true,
+    filterCheckedOnly: true,
+    panelView: 'focus',
+    focusTab: 'pa',
+    focusGas: ['1/2/3'],
+    focusDevices: ['1.1.1'],
+    focusGaSearch: 'licht',
+    focusDeviceSearch: 'taster',
+    focusGaCompact: true,
+    focusDeviceCompact: false,
+    focusGaVerdichten: true,
+    focusDeviceVerdichten: false,
+    lastSeenGas: ['1/2/3'],
+    lastSeenDevices: ['1.1.1'],
+    lastSeenGroup: 'ga',
+    lastSeenExpanded: ['ga:1/2/3'],
   };
 
   saveUiState(state);
@@ -79,6 +98,7 @@ test('sanitize drops invalid fields and fills defaults', () => {
       open: false,
       enabled: true,
       patterns: {},
+      columns: { ...DEFAULT_QUICK_FILTER_COLUMN_ENABLED },
     },
     listFollow: true,
     zoomRange: null,

@@ -61,7 +61,8 @@ test('the switch in the filter pane reports the change (#436)', async () => {
   renderSearch({ filtersEnabled: true, onFiltersEnabledChange });
   await waitFor(() => expect(screen.getByText(/telegrams$/)).toBeInTheDocument());
 
-  fireEvent.click(screen.getByTitle('Disable all filters (keeps them)'));
+  fireEvent.click(screen.getByTitle('Toggle filter panel'));
+  fireEvent.click(screen.getByTitle(/^Disable filters/));
   expect(onFiltersEnabledChange).toHaveBeenCalledWith(false);
 });
 

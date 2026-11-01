@@ -1,14 +1,14 @@
 import React, { useRef, useState, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import type { Telegram } from '../hooks/useWebSocket';
-import { VisualizerSidebar } from './VisualizerSidebar';
 import { useChartData } from '../hooks/useChartData';
+import { RAW_DPT_OPTIONS } from '../utils/rawDpt';
 import { MixedChart } from './MixedChart';
 import { TimelineChart } from './TimelineChart';
 import { EventDotsChart } from './EventDotsChart';
 import { TimeBrush } from './TimeBrush';
 import { Download, Link2, Check, X } from 'lucide-react';
 import { getPref, setPref } from '../utils/prefs';
-import { clearSeriesHidden } from '../utils/legendVisibility';
 import { expandDegenerateRange } from '../utils/timeRange';
 import { splitLockedBuckets } from '../utils/chartLock';
 import { sharedLeftGutter } from '../utils/chartGutter';
@@ -27,17 +27,19 @@ interface VisualizerProps {
   /** Click on a chart's time ruler or a telegram dot: navigate to the telegram
    * list around that timestamp (#308). */
   onTimeClick?: (ms: number) => void;
-  /** Per-target row actions in the sidebar (#341): write/filter/last-seen. */
+  /** Kept for callers that still offer a write action elsewhere. */
   writeEnabled?: boolean;
   onFilterGAs?: (addresses: string[]) => void;
   /** Show a GA's telegrams in the telegram list (legend click, #521). */
-  onShowGaTelegrams?: (address: string) => void;
+  onShowGaTelegrams?: (address: string, event?: React.MouseEvent) => void;
   onLastSeen?: (address: string | string[], mode: 'ga' | 'pa') => void;
+  /** Shared list header. Title and settings render there instead of a second bar. */
+  headerSlot?: HTMLElement | null;
 }
 
 export const Visualizer: React.FC<VisualizerProps> = ({
-  telegrams, selectedTargets, onTargetsChange, onClose, getShareLink, embed = false,
-  zoomRange, onZoomRangeChange, onTimeClick, writeEnabled, onFilterGAs, onShowGaTelegrams, onLastSeen,
+  telegrams, selectedTargets, onClose, getShareLink, embed = false,
+  zoomRange, onZoomRangeChange, onTimeClick, onShowGaTelegrams, headerSlot = null,
 }) => {
 
   const chartWrapperRef = useRef<HTMLDivElement>(null);
@@ -141,14 +143,6 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     return [left, right];
   }, [currentZoomRange, minTime, maxTime, defaultRange, edgePinned]);
 
-  // Deselecting a target clears any legend-hide on it, so reselecting the same
-  // target shows its series again instead of staying invisible (#205).
-  const handleTargetsChange = (next: string[]) => {
-    const removed = selectedTargets.filter(a => !next.includes(a));
-    if (removed.length > 0) clearSeriesHidden(removed);
-    onTargetsChange(next);
-  };
-
   const toggleStepped = () => {
     setStepped(s => {
       const next = !s;
@@ -235,98 +229,121 @@ export const Visualizer: React.FC<VisualizerProps> = ({
     );
   }
 
+  const untypedSelected = selectedTargets.filter(address => untypedTargets.has(address));
+  const inHeader = headerSlot != null;
+  const statusText = selectedTargets.length === 0
+    ? 'Select group addresses in Focus to plot them.'
+    : `Plotting ${selectedTargets.length} targets across ${buckets.length} metric group(s).`;
+  const actionStyle = (on: boolean): React.CSSProperties => ({
+    display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer', flexShrink: 0,
+    padding: inHeader ? '0.2rem 0.55rem' : '0.4rem 0.85rem',
+    border: '1px solid var(--border-color)',
+    borderRadius: inHeader ? '6px' : '7px',
+    fontSize: inHeader ? '0.75rem' : '0.8125rem',
+    background: on ? 'rgba(99,102,241,0.15)' : 'transparent',
+    color: on ? 'var(--accent-primary)' : 'var(--text-dim)',
+  });
+
+  const headerBar = (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.75rem', minWidth: 0,
+      ...(inHeader
+        ? { flex: 1, width: '100%' }
+        : { padding: '1rem 1.5rem', borderBottom: '1px solid var(--border-color)' }),
+    }}>
+      {inHeader ? (
+        <div style={{ fontWeight: 600, fontSize: '0.875rem', flexShrink: 0 }}>Visualization</div>
+      ) : (
+        <div>
+          <h3 style={{ fontSize: '1rem', margin: 0 }}>Visualization</h3>
+          <p style={{ color: 'var(--text-dim)', fontSize: '0.8125rem', margin: '0.2rem 0 0' }}>{statusText}</p>
+        </div>
+      )}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: inHeader ? '0.35rem' : '0.5rem', flexShrink: 0, marginLeft: inHeader ? 'auto' : undefined }}>
+        {buckets.length > 0 && (
+          <>
+          <button
+            onClick={toggleStepped}
+            title={stepped ? 'Switch to linear interpolation' : 'Switch to stepped (hold-last-value)'}
+            style={actionStyle(stepped)}
+          >
+            {stepped ? 'Stepped' : 'Linear'}
+          </button>
+          <button
+            onClick={toggleDots}
+            title={showDots ? 'Hide telegram dots' : 'Show a dot at each telegram (makes cyclic repeats visible)'}
+            style={actionStyle(showDots)}
+          >
+            Dots
+          </button>
+          {getShareLink && (
+            <button
+              className="icon-button"
+              onClick={() => void copyShareLink()}
+              title="Copy a shareable link to this visualization (filters, targets and time range)"
+              style={{ ...actionStyle(false), color: linkCopied ? 'var(--success)' : 'var(--text-dim)' }}
+            >
+              {linkCopied ? <><Check size={inHeader ? 14 : 16} /> Copied</> : <><Link2 size={inHeader ? 14 : 16} /> Copy link</>}
+            </button>
+          )}
+          <button
+            className="icon-button"
+            onClick={exportPng}
+            title="Print / PDF Export"
+            style={actionStyle(false)}
+          >
+            <Download size={inHeader ? 14 : 16} /> Export
+          </button>
+          </>
+        )}
+        {/* The shared list header switches panels, so it has no close button.
+            History Search keeps the X in its own bar (#347). */}
+        {!inHeader && (
+          <button
+            className="icon-button"
+            onClick={onClose}
+            title="Close Visualization"
+            style={{ padding: '0.4rem', display: 'flex', color: 'var(--text-dim)', flexShrink: 0 }}
+          >
+            <X size={18} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-
-        <VisualizerSidebar
-          telegrams={telegrams}
-          selectedTargets={selectedTargets}
-          onTargetsChange={handleTargetsChange}
-          untypedTargets={untypedTargets}
-          dptOverrides={dptOverrides}
-          onDptOverrideChange={setDptOverride}
-          writeEnabled={writeEnabled}
-          onFilterGAs={onFilterGAs}
-          onLastSeen={onLastSeen}
-        />
-
-        {/* Chart Area */}
+        {/* Chart Area. Addresses to plot are the focused group addresses. */}
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: 'var(--bg-subtle)' }}>
-          <div style={{ padding: '1rem 1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border-color)' }}>
-            <div>
-              <h3 style={{ fontSize: '1rem', margin: 0 }}>Visualization</h3>
-              {selectedTargets.length === 0 ? (
-                <p style={{ color: 'var(--text-dim)', fontSize: '0.8125rem', margin: '0.2rem 0 0' }}>Select targets from the sidebar to begin.</p>
-              ) : (
-                <p style={{ color: 'var(--text-dim)', fontSize: '0.8125rem', margin: '0.2rem 0 0' }}>Plotting {selectedTargets.length} targets across {buckets.length} metric group(s).</p>
-              )}
-            </div>
+          {headerSlot ? createPortal(headerBar, headerSlot) : headerBar}
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              {buckets.length > 0 && (
-                <>
-                <button
-                  onClick={toggleStepped}
-                  title={stepped ? 'Switch to linear interpolation' : 'Switch to stepped (hold-last-value)'}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: '0.5rem',
-                    padding: '0.4rem 0.85rem', border: '1px solid var(--border-color)',
-                    borderRadius: '7px', fontSize: '0.8125rem', cursor: 'pointer',
-                    background: stepped ? 'rgba(99,102,241,0.15)' : 'transparent',
-                    color: stepped ? 'var(--accent-primary)' : 'var(--text-dim)',
-                  }}
-                >
-                  {stepped ? 'Stepped' : 'Linear'}
-                </button>
-                <button
-                  onClick={toggleDots}
-                  title={showDots ? 'Hide telegram dots' : 'Show a dot at each telegram (makes cyclic repeats visible)'}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: '0.5rem',
-                    padding: '0.4rem 0.85rem', border: '1px solid var(--border-color)',
-                    borderRadius: '7px', fontSize: '0.8125rem', cursor: 'pointer',
-                    background: showDots ? 'rgba(99,102,241,0.15)' : 'transparent',
-                    color: showDots ? 'var(--accent-primary)' : 'var(--text-dim)',
-                  }}
-                >
-                  Dots
-                </button>
-                {getShareLink && (
-                  <button
-                    className="icon-button"
-                    onClick={() => void copyShareLink()}
-                    title="Copy a shareable link to this visualization (filters, targets and time range)"
+          {untypedSelected.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', padding: '0.55rem 1.5rem', borderBottom: '1px solid var(--border-color)' }}>
+              {untypedSelected.map(address => (
+                <label key={address} style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+                  <span style={{ fontFamily: "'JetBrains Mono', monospace", color: 'var(--text-main)' }}>{address}</span>
+                  <select
+                    value={dptOverrides[address] ?? ''}
+                    onChange={e => setDptOverride(address, e.target.value)}
+                    title="This group address has no datatype in the project. Pick one to decode and plot its raw payload."
                     style={{
-                      display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0.85rem',
-                      border: '1px solid var(--border-color)', borderRadius: '7px', fontSize: '0.8125rem',
-                      color: linkCopied ? 'var(--success)' : undefined,
+                      background: 'var(--bg-tag)', color: 'var(--text-main)',
+                      border: '1px solid var(--border-color)', borderRadius: '6px',
+                      padding: '0.25rem 0.4rem', fontSize: '0.75rem',
                     }}
                   >
-                    {linkCopied ? <><Check size={16} /> Copied</> : <><Link2 size={16} /> Copy link</>}
-                  </button>
-                )}
-                <button
-                  className="icon-button"
-                  onClick={exportPng}
-                  title="Print / PDF Export"
-                  style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0.85rem', border: '1px solid var(--border-color)', borderRadius: '7px', fontSize: '0.8125rem' }}
-                >
-                  <Download size={16} /> Export
-                </button>
-                </>
-              )}
-              {/* Close X in the panel header, like every other main panel (#347). */}
-              <button
-                className="icon-button"
-                onClick={onClose}
-                title="Close Visualization"
-                style={{ padding: '0.4rem', display: 'flex', color: 'var(--text-dim)' }}
-              >
-                <X size={18} />
-              </button>
+                    <option value="">No datatype — pick to plot…</option>
+                    {RAW_DPT_OPTIONS.map(o => (
+                      <option key={o.key} value={o.key}>{o.label}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
             </div>
-          </div>
+          )}
 
           {/* Pan & zoom timeline sits above the charts it controls (#308). */}
           {minTime !== null && maxTime !== null && minTime < maxTime && (

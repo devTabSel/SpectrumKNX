@@ -52,11 +52,19 @@ beforeAll(() => {
   } as unknown as typeof ResizeObserver;
   Element.prototype.getBoundingClientRect = () =>
     ({ width: 1000, height: 800, top: 0, bottom: 800, left: 0, right: 1000, x: 0, y: 0, toJSON: () => {} }) as DOMRect;
+  // @tanstack/virtual reads clientHeight, which jsdom leaves at 0.
+  Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+    configurable: true,
+    get() {
+      if (this.classList?.contains('log-row')) return 85;
+      return 800;
+    },
+  });
 });
 
 const renderPanel = () => {
   render(<FilterPanel options={OPTIONS} activeFilters={FILTERS} onFiltersChange={vi.fn()} projectLoaded />);
-  fireEvent.click(screen.getByRole('button', { name: 'Active filters' }));
+  fireEvent.click(screen.getByRole('button', { name: /^Focus/ }));
 };
 
 const renderTable = (filters = FILTERS) =>
@@ -81,7 +89,7 @@ test('each target filter has a colour swatch; clicks walk the palette', () => {
   renderPanel();
   const kitchen = screen.getByRole('button', { name: 'Colour of 1/2/3' });
   const hall = screen.getByRole('button', { name: 'Colour of 1/2/4' });
-  // Source filters have none.
+  // The device swatch lives on the Devices list, not among the group addresses.
   expect(screen.queryByRole('button', { name: 'Colour of 1.1.5' })).not.toBeInTheDocument();
   expect(kitchen).toHaveAttribute('title', 'Mark telegrams to this address with a colour');
 
@@ -98,36 +106,90 @@ test('each target filter has a colour swatch; clicks walk the palette', () => {
 test('a click on the swatch does not switch the filter off', () => {
   const onFiltersChange = vi.fn();
   render(<FilterPanel options={OPTIONS} activeFilters={FILTERS} onFiltersChange={onFiltersChange} projectLoaded />);
-  fireEvent.click(screen.getByRole('button', { name: 'Active filters' }));
+  fireEvent.click(screen.getByRole('button', { name: /^Focus/ }));
   fireEvent.click(screen.getByRole('button', { name: 'Colour of 1/2/3' }));
   expect(onFiltersChange).not.toHaveBeenCalled();
+});
+
+const stripeOf = (row: HTMLElement) => row.querySelector<HTMLElement>('.mark-stripe')!;
+
+// jsdom serializes a hex colour inside color-mix() as rgb().
+const asRgb = (hex: string) => {
+  const n = Number.parseInt(hex.slice(1), 16);
+  return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+};
+
+test('a device colour marks a telegram only when its group address has none', () => {
+  const telegrams = [
+    makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', source_address: '1.1.5', target_address: '1/2/3', raw_hex: '0x03' }),
+    makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', source_address: '1.1.5', target_address: '1/2/4', raw_hex: '0x02' }),
+  ];
+  setTargetColor('1.1.5', TARGET_COLORS[2]);
+  setTargetColor('1/2/3', TARGET_COLORS[0]);
+  const { container } = render(
+    <TelegramTable
+      telegrams={telegrams}
+      visibleColumns={COLUMNS}
+      sortConfig={SORT}
+      onSort={vi.fn()}
+      activeFilters={FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+  const gaTint = asRgb(TARGET_COLORS[0]);
+  const deviceTint = asRgb(TARGET_COLORS[2]);
+  expect(rowOf(container, '1/2/3').style.background).toContain(gaTint);
+  expect(rowOf(container, '1/2/3').style.background).not.toContain(deviceTint);
+  expect(rowOf(container, '1/2/4').style.background).toContain(deviceTint);
 });
 
 test('telegrams to a coloured target are marked in the list', () => {
   setTargetColor('1/2/3', TARGET_COLORS[3]);
   const { container } = renderTable();
 
-  expect(rowOf(container, '1/2/3').style.boxShadow).toContain('inset 4px 0 0 0');
-  expect(rowOf(container, '1/2/3').style.boxShadow).toContain(TARGET_COLORS[3]);
-  expect(rowOf(container, '1/2/4').style.boxShadow).toBe('');
-  expect(rowOf(container, '2/0/1').style.boxShadow).toBe('');
+  const coloured = rowOf(container, '1/2/3');
+  const tint = asRgb(TARGET_COLORS[3]);
+  expect(coloured.style.background).toContain(tint);
+  expect(coloured.style.boxShadow).toBe('');
+  expect(stripeOf(coloured).style.background).toBe(coloured.style.background);
+  expect(rowOf(container, '1/2/4').style.background).not.toContain(tint);
+  expect(rowOf(container, '2/0/1').style.background).not.toContain(tint);
 });
 
 test('the list follows a colour set while it is shown', () => {
   const { container } = renderTable();
-  expect(rowOf(container, '1/2/4').style.boxShadow).toBe('');
+  const tint = asRgb(TARGET_COLORS[0]);
+  expect(rowOf(container, '1/2/4').style.background).not.toContain(tint);
   act(() => setTargetColor('1/2/4', TARGET_COLORS[0]));
-  expect(rowOf(container, '1/2/4').style.boxShadow).toContain('inset 4px 0 0 0');
+  const row = rowOf(container, '1/2/4');
+  expect(row.style.background).toContain(tint);
+  expect(stripeOf(row).style.background).toBe(row.style.background);
 });
 
-test('a colour only marks rows while its address is in the target filter', () => {
+test('a colour marks rows even when the address is not in the target filter', () => {
   setTargetColor('1/2/3', TARGET_COLORS[0]);
   const { container } = renderTable({ ...DEFAULT_FILTERS, targets: ['1/2/4'] });
-  expect(rowOf(container, '1/2/3').style.boxShadow).toBe('');
+  const tint = asRgb(TARGET_COLORS[0]);
+  const row = rowOf(container, '1/2/3');
+  expect(row.style.background).toContain(tint);
+  expect(stripeOf(row).style.background).toBe(row.style.background);
 });
 
 test('a switched-off filter keeps marking its rows', () => {
   setTargetColor('1/2/3', TARGET_COLORS[0]);
   const { container } = renderTable({ ...FILTERS, disabled: ['targets:1/2/3'] });
-  expect(rowOf(container, '1/2/3').style.boxShadow).toContain('inset 4px 0 0 0');
+  const tint = asRgb(TARGET_COLORS[0]);
+  const row = rowOf(container, '1/2/3');
+  expect(row.style.background).toContain(tint);
+  expect(stripeOf(row).style.background).toBe(row.style.background);
+
+  const resting = row.style.background;
+  expect(stripeOf(row).style.background).toBe(resting);
+  fireEvent.click(stripeOf(row));
+  expect(row.classList.contains('marked')).toBe(false);
+  expect(row.style.background).toBe(resting);
+  expect(stripeOf(row).getAttribute('aria-pressed')).toBe('true');
+  expect(stripeOf(row).style.background).toBe(asRgb(TARGET_COLORS[0]));
+  expect(row.querySelector<HTMLElement>('.log-row-body')!.style.background).toBe('');
 });

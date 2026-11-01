@@ -1,14 +1,16 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { Telegram } from './useWebSocket';
 import { apiUrl } from '../utils/basePath';
+import { applyFilterParams } from '../utils/historyLoad';
 import { toEntry, type TelegramEntry } from '../utils/telegramId';
-import { TelegramBufferService } from '../services/telegram-buffer-service';
+import { TelegramBufferService, type ProtectedSpan } from '../services/telegram-buffer-service';
 import { TelegramCacheService, MAX_CACHE_SIZE } from '../services/telegram-cache-service';
 import {
   TelegramCoverageService,
   loadCoverageIntervals,
   saveCoverageIntervals,
 } from '../services/telegram-coverage-service';
+import { hasActiveFilters, matchesTelegram, type ActiveFilters } from '../types/filters';
 
 /** How often the pending live batch is flushed to IndexedDB. */
 const FLUSH_INTERVAL_MS = 2000;
@@ -57,14 +59,34 @@ interface FetchResult {
   limitReached: boolean;
 }
 
-/** Fetches a time range from the backend, newest first, unfiltered. */
-async function fetchRange(startMs: number, endMs: number, limit: number): Promise<FetchResult> {
+/** A panel filter with at least one selection, or null when the buffer is unfiltered. */
+function activePanelFilter(filter: ActiveFilters | null): ActiveFilters | null {
+  return filter && hasActiveFilters(filter) ? filter : null;
+}
+
+function filterSignature(filter: ActiveFilters | null): string {
+  const active = activePanelFilter(filter);
+  if (!active) return '';
+  return JSON.stringify([active.sources, active.targets, active.types, active.directions, active.dpts]);
+}
+
+function passesPanel(telegram: Telegram, filter: ActiveFilters | null): boolean {
+  return !filter || matchesTelegram(telegram, filter);
+}
+
+/** Fetches a time range from the backend, newest first. `filter` is sent when set. */
+async function fetchRange(
+  startMs: number,
+  endMs: number,
+  limit: number,
+  filter: ActiveFilters | null = null,
+): Promise<FetchResult> {
   const params = new URLSearchParams({
     limit: String(limit),
     start_time: new Date(startMs).toISOString(),
     end_time: new Date(endMs).toISOString(),
   });
-  const res = await fetch(apiUrl(`/api/telegrams?${params}`));
+  const res = await fetch(applyFilterParams(apiUrl(`/api/telegrams?${params}`), filter ?? undefined));
   if (!res.ok) throw new Error(`Server error: ${res.status}`);
   const data = await res.json();
   return {
@@ -91,7 +113,12 @@ async function fetchRange(startMs: number, endMs: number, limit: number): Promis
  * calls (the history loader) populate it. Live telegrams are still flushed to
  * the cache, so re-enabling the setting restores them on the next reload.
  */
-export function useTelegramCache(maxSize: number, restoreFromCache = true): TelegramCache {
+export function useTelegramCache(
+  maxSize: number,
+  restoreFromCache = true,
+  panelFilter: ActiveFilters | null = null,
+  visibleSpan: ProtectedSpan | null = null,
+): TelegramCache {
   const bufferRef = useRef<TelegramBufferService | null>(null);
   bufferRef.current ??= new TelegramBufferService(maxSize);
   const cacheRef = useRef<TelegramCacheService | null>(null);
@@ -105,8 +132,11 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
   const pendingRef = useRef<TelegramEntry[]>([]);
   const connectedRef = useRef(false);
   const pausedRef = useRef(false);
-  /** Bumped by clear() to invalidate any background load still in flight (#339). */
+  /** Bumped by clear() and by a filter change to invalidate any background load still in flight (#339). */
   const loadGenerationRef = useRef(0);
+  /** Panel filter in effect. Null keeps the buffer unfiltered. */
+  const filterRef = useRef<ActiveFilters | null>(activePanelFilter(panelFilter));
+  filterRef.current = activePanelFilter(panelFilter);
   /** Number of in-flight IDB store() calls — coverage saves are deferred while > 0 (#317). */
   const pendingStoreCountRef = useRef(0);
 
@@ -134,6 +164,41 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
       return added.length > 0 || removed.length > 0;
     },
     [trackRemoved],
+  );
+
+  /**
+   * Pages a filtered query newest-first. Matching rows are stored in IndexedDB
+   * but the span is not marked covered: a filtered response is not every
+   * telegram in that time.
+   */
+  const fetchFilteredWindow = useCallback(
+    async (gen: number, startMs: number, endMs: number, budget: number): Promise<void> => {
+      const filter = filterRef.current;
+      if (!filter || budget <= 0) return;
+      let cursor = endMs;
+      let fetched = 0;
+      while (cursor >= startMs && fetched < budget) {
+        const limit = Math.min(HISTORY_CHUNK_SIZE, budget - fetched);
+        const { entries, limitReached } = await fetchRange(startMs, cursor, limit, filter);
+        if (loadGenerationRef.current !== gen) return;
+        if (entries.length === 0) break;
+        const matches = entries.filter(entry => passesPanel(entry.telegram, filter));
+        const changed = matches.length > 0 && mergeIntoBuffer(matches);
+        if (changed) publish();
+        pendingStoreCountRef.current++;
+        await cacheRef.current!.store(entries).then(
+          () => { pendingStoreCountRef.current--; },
+          () => { pendingStoreCountRef.current--; },
+        );
+        fetched += entries.length;
+        const buf = bufferRef.current!;
+        if (buf.length >= maxSize && !changed) break;
+        if (!limitReached) break;
+        const oldestTs = entries[entries.length - 1].ts;
+        cursor = oldestTs < cursor ? oldestTs : cursor - 1;
+      }
+    },
+    [mergeIntoBuffer, publish, maxSize],
   );
 
   const saveCoverage = useCallback(() => {
@@ -256,6 +321,35 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     [],
   );
 
+  /**
+   * Drops whatever no longer matches, then refills up to the buffer limit:
+   * IndexedDB and the not-yet-flushed live batch first, then the database.
+   * A filtered database read does not mark coverage.
+   */
+  const refill = useCallback(
+    async (gen: number) => {
+      const filter = filterRef.current;
+      const cached = await cacheRef.current!.loadAll().catch(() => [] as TelegramEntry[]);
+      if (loadGenerationRef.current !== gen) return;
+      const pool = [...pendingRef.current, ...cached].filter(entry => passesPanel(entry.telegram, filter));
+      if (pool.length > 0 && mergeIntoBuffer(pool)) publish();
+      if (loadGenerationRef.current !== gen) return;
+      if (!filter) {
+        const coverage = coverageRef.current!;
+        const coveredStart = coverage.covered[0]?.[0];
+        const oldestCached = cached.length > 0 ? cached[cached.length - 1].ts : undefined;
+        const start = Math.min(coveredStart ?? Infinity, oldestCached ?? Infinity);
+        if (Number.isFinite(start)) await fillGapsBudgeted(start, Date.now(), maxSize);
+        return;
+      }
+      const span = bufferRef.current!.protectedRange;
+      if (span) await fetchFilteredWindow(gen, span.startMs, span.endMs, maxSize);
+      if (loadGenerationRef.current !== gen) return;
+      await fetchFilteredWindow(gen, 0, Date.now(), maxSize);
+    },
+    [mergeIntoBuffer, publish, fillGapsBudgeted, fetchFilteredWindow, maxSize],
+  );
+
   const loadRange = useCallback(
     (startMs: number, endMs: number) =>
       runLoad(async () => {
@@ -264,11 +358,18 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
         const cached = await cacheRef.current!.loadRange(startMs, endMs).catch(() => []);
         // A buffer clear during the cache read invalidates this load (#339).
         if (loadGenerationRef.current !== gen) return;
-        if (cached.length > 0 && mergeIntoBuffer(cached)) publish();
+        const filter = filterRef.current;
+        const rows = filter ? cached.filter(entry => passesPanel(entry.telegram, filter)) : cached;
+        if (rows.length > 0 && mergeIntoBuffer(rows)) publish();
+        if (filter) {
+          // Filtered pages are not a complete range, so they do not extend coverage.
+          await fetchFilteredWindow(gen, startMs, endMs, maxSize);
+          return;
+        }
         // User-initiated: bypass the full-buffer early break (#317).
         await fillGaps(startMs, endMs, /* skipBufferFullBreak */ true);
       }),
-    [runLoad, mergeIntoBuffer, publish, fillGaps],
+    [runLoad, mergeIntoBuffer, publish, fillGaps, fetchFilteredWindow, maxSize],
   );
 
   // ── Startup: restore cache + coverage, then fill gaps up to now ─────────────
@@ -302,8 +403,20 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
       // remainder stays in IDB and is pulled in on demand via the history
       // loader / lazy loads (#284). Never exceed the configured buffer size.
       const budget = Math.min(INITIAL_LOAD_LIMIT, maxSize);
-      const initialCached = cached.slice(0, budget);
+      const filter = filterRef.current;
+      const pool = filter ? cached.filter(entry => passesPanel(entry.telegram, filter)) : cached;
+      const initialCached = pool.slice(0, budget);
       if (initialCached.length > 0 && mergeIntoBuffer(initialCached)) publish();
+
+      if (filter) {
+        // The buffer holds matches only. Don't treat this read as full coverage.
+        const span = bufferRef.current!.protectedRange;
+        if (span) await fetchFilteredWindow(gen, span.startMs, span.endMs, budget);
+        if (!cancelled && loadGenerationRef.current === gen) {
+          await fetchFilteredWindow(gen, 0, Date.now(), budget);
+        }
+        return;
+      }
 
       // Fill the most recent gaps up to the budget (#211): the dashboard-switch
       // / closed-tab window arrives without user action, but older history is
@@ -321,6 +434,31 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     // Startup restore runs exactly once per mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The list reports the timestamps on screen. Null means the live edge, where
+  // the oldest entries are the ones to evict.
+  useEffect(() => {
+    bufferRef.current?.setProtectedRange(visibleSpan);
+  }, [visibleSpan]);
+
+  // A later filter change drops non-matches immediately and refills in the background.
+  // The first signature is owned by the startup effect above.
+  const signature = filterSignature(panelFilter);
+  const seenSignature = useRef<string | null>(null);
+  useEffect(() => {
+    if (seenSignature.current === null) {
+      seenSignature.current = signature;
+      return;
+    }
+    if (seenSignature.current === signature) return;
+    seenSignature.current = signature;
+    const gen = ++loadGenerationRef.current;
+    const filter = filterRef.current;
+    const removed = bufferRef.current!.retain(entry => passesPanel(entry.telegram, filter));
+    trackRemoved(removed);
+    publish();
+    void runLoad(() => refill(gen));
+  }, [signature, trackRemoved, publish, runLoad, refill]);
 
   // ── Periodic flush: IDB batch, coverage save, size eviction ─────────────────
   useEffect(() => {
@@ -378,8 +516,14 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
       const entry = toEntry(t);
       // A gap fetch racing the live stream may already have delivered this row.
       if (idsRef.current.has(entry.id)) return;
-      trackRemoved(bufferRef.current!.add(entry));
-      idsRef.current.add(entry.id);
+      // Non-matches stay out of the buffer. They are still persisted below so a
+      // later, wider filter can pull them back from IndexedDB.
+      if (passesPanel(t, filterRef.current)) {
+        trackRemoved(bufferRef.current!.add(entry));
+        idsRef.current.add(entry.id);
+        if (pausedRef.current) setPausedCount(c => c + 1);
+        else publish();
+      }
       coverageRef.current!.extendLive(entry.ts);
       pendingRef.current.push(entry);
       if (pendingRef.current.length >= FLUSH_BATCH_SIZE) {
@@ -391,8 +535,6 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
           () => { pendingStoreCountRef.current--; },
         );
       }
-      if (pausedRef.current) setPausedCount(c => c + 1);
-      else publish();
     },
     [trackRemoved, publish, saveCoverage],
   );

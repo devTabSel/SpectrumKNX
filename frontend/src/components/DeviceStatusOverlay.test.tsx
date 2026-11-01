@@ -150,8 +150,8 @@ test('calls onLastSeen when clock history button is clicked', async () => {
 
   const gaRow = screen.getByText('1/2/3').closest('div')?.parentElement;
   expect(gaRow).toBeTruthy();
-  const historyBtn = within(gaRow!).getByTitle('Show history log');
+  const historyBtn = within(gaRow!).getByRole('button', { name: 'Toggle last seen values' });
   fireEvent.click(historyBtn);
 
-  expect(onLastSeenMock).toHaveBeenCalledWith('1/2/3', 'ga');
+  expect(onLastSeenMock).toHaveBeenCalledWith('1/2/3', 'ga', { kind: 'toggle', exclusive: true, navigate: false });
 });

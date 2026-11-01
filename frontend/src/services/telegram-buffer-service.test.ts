@@ -185,6 +185,56 @@ describe('TelegramBufferService', () => {
     });
   });
 
+  describe('protected time span', () => {
+    beforeEach(() => {
+      service = new TelegramBufferService(3);
+    });
+
+    it('evicts the oldest entry outside the span before anything inside it', () => {
+      const view = [
+        makeEntry('2024-01-01T10:00:02.000Z', '2'),
+        makeEntry('2024-01-01T10:00:03.000Z', '3'),
+      ];
+      const older = makeEntry('2024-01-01T10:00:01.000Z', '1');
+      service.add([older, ...view]);
+      service.setProtectedRange({
+        startMs: new Date(view[0].telegram.timestamp).getTime(),
+        endMs: new Date(view[1].telegram.timestamp).getTime(),
+      });
+
+      const newer = makeEntry('2024-01-01T10:00:04.000Z', '4');
+      const removed = service.add(newer);
+
+      expect(removed).toEqual([older]);
+      expect(service.snapshot).toEqual([...view, newer]);
+    });
+
+    it('drops a new telegram that would only fit by evicting the span', () => {
+      const view = makeEntries(3);
+      service.add(view);
+      service.setProtectedRange({
+        startMs: new Date(view[0].telegram.timestamp).getTime(),
+        endMs: new Date(view[2].telegram.timestamp).getTime(),
+      });
+
+      const extra = makeEntry('2024-01-01T10:00:04.000Z', '4');
+      const removed = service.add(extra);
+
+      expect(removed).toEqual([extra]);
+      expect(service.snapshot).toEqual(view);
+    });
+
+    it('keeps evicting the oldest when no span is protected', () => {
+      const entries = makeEntries(3);
+      service.add(entries);
+      service.setProtectedRange(null);
+
+      const extra = makeEntry('2024-01-01T10:00:04.000Z', '4');
+      expect(service.add(extra)).toEqual([entries[0]]);
+      expect(service.snapshot).toEqual([entries[1], entries[2], extra]);
+    });
+  });
+
   describe('edge cases', () => {
     it('handles empty arrays', () => {
       expect(service.add([])).toEqual([]);

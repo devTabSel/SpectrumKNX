@@ -114,10 +114,11 @@ export const DEFAULT_FILTERS: ActiveFilters = {
   disabled: [],
 };
 
-/** The before/after window actually in effect — zeroed while the toggle is off,
- * even though the stored values are kept so re-enabling restores them (#318). */
-export function effectiveDeltaContext(f: ActiveFilters): { before: number; after: number } {
-  if (!f.deltaContextEnabled) return { before: 0, after: 0 };
+/** The before/after window actually in effect — zeroed while the toggle is off
+ * or the Δt column filter in the lower header is off, even though the stored
+ * values are kept so turning either back on restores them (#318). */
+export function effectiveDeltaContext(f: ActiveFilters, deltaColumnEnabled = true): { before: number; after: number } {
+  if (!f.deltaContextEnabled || !deltaColumnEnabled) return { before: 0, after: 0 };
   return { before: f.deltaBeforeMs, after: f.deltaAfterMs };
 }
 
@@ -165,6 +166,39 @@ export function matchesTelegram(t: FilterableTelegram, f: ActiveFilters): boolea
   return srcOk && tgtOk && typeOk && dirOk && dptOk;
 }
 
+/**
+ * Focus-list address filter. An empty side does not constrain that side.
+ * Selected devices and group addresses combine with AND. This never reads
+ * or writes the source/target filter.
+ */
+export function passesFocusAddressFilter(
+  telegram: { source_address: string; target_address: string },
+  gas: readonly string[],
+  devices: readonly string[],
+): boolean {
+  const srcOk = devices.length === 0 || devices.includes(telegram.source_address);
+  const tgtOk = gas.length === 0 || gas.includes(telegram.target_address);
+  return srcOk && tgtOk;
+}
+
+const NO_FOCUS_ADDRESSES: readonly string[] = [];
+
+/**
+ * Addresses that narrow the telegram list. A side applies only while its
+ * "filter focused" checkbox is on; the Focus-list toggles stay selected either way.
+ */
+export function focusAddressesForList(
+  gas: readonly string[],
+  devices: readonly string[],
+  filterFocusedSources: boolean,
+  filterFocusedTargets: boolean,
+): { gas: readonly string[]; devices: readonly string[] } {
+  return {
+    gas: filterFocusedTargets ? gas : NO_FOCUS_ADDRESSES,
+    devices: filterFocusedSources ? devices : NO_FOCUS_ADDRESSES,
+  };
+}
+
 export function hasActiveFilters(f: ActiveFilters): boolean {
   return (
     f.sources.length > 0 ||
@@ -186,6 +220,17 @@ export interface FilterCounts {
   types: Record<string, number>;
   directions: Record<string, number>;
   dpts: Record<string, number>;
+}
+
+/**
+ * Telegrams per filter option for the filter pane. Selections are applied even
+ * when the master switch is off, so the pane counts the same telegrams it would
+ * with the filter active. The list itself still shows the whole buffer.
+ */
+export function countAppliedFilterOptions(telegrams: FilterableTelegram[], filters: ActiveFilters): FilterCounts {
+  const applied = enabledFilters(filters);
+  const counted = hasActiveFilters(applied) ? telegrams.filter(t => matchesTelegram(t, applied)) : telegrams;
+  return countFilterOptions(counted);
 }
 
 /** Telegrams per filter option, for the count bubbles in the filter pane. */

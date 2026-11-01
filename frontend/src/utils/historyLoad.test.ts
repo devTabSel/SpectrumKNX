@@ -2,15 +2,23 @@ import { expect, test } from 'vitest';
 import { applyFilterParams, buildHistoryUrl, rangeToMs } from './historyLoad';
 import { DEFAULT_FILTERS } from '../types/filters';
 
-test('applyFilterParams sends the Time-Delta-Context window when enabled', () => {
-  const url = applyFilterParams('/api/telegrams', { ...DEFAULT_FILTERS, deltaBeforeMs: 500, deltaAfterMs: 250 });
-  expect(url).toContain('delta_before_ms=500');
-  expect(url).toContain('delta_after_ms=250');
+test('applyFilterParams sends panel filters including direction and never the delta window', () => {
+  const url = applyFilterParams('/api/telegrams', {
+    ...DEFAULT_FILTERS,
+    sources: ['1.1.1'],
+    directions: ['Incoming', 'Outgoing'],
+    deltaBeforeMs: 500,
+    deltaAfterMs: 250,
+  });
+  expect(url).toContain('source_address=1.1.1');
+  expect(url).toContain(`direction=${encodeURIComponent('Incoming,Outgoing')}`);
+  expect(url).not.toContain('delta_before_ms');
+  expect(url).not.toContain('delta_after_ms');
 });
 
-test('applyFilterParams omits the window while disabled, even with stored values (#318)', () => {
+test('applyFilterParams omits the delta window even when it is enabled', () => {
   const url = applyFilterParams('/api/telegrams', {
-    ...DEFAULT_FILTERS, deltaBeforeMs: 500, deltaAfterMs: 250, deltaContextEnabled: false,
+    ...DEFAULT_FILTERS, deltaBeforeMs: 500, deltaAfterMs: 250, deltaContextEnabled: true,
   });
   expect(url).not.toContain('delta_before_ms');
   expect(url).not.toContain('delta_after_ms');

@@ -106,16 +106,22 @@ test('Ctrl/Cmd+Shift+click adds the range to existing marks', () => {
   expect(marked(container)).toEqual([true, true, false, false, true]);
 });
 
-test('clear-marks pill appears only when marked and removes every mark', () => {
+test('the marks pill counts the mouse selection once and clears it', () => {
   const { container } = renderTable();
   expect(screen.queryByTitle('Clear all marks')).not.toBeInTheDocument();
 
   fireEvent.click(rows(container)[0]);
   fireEvent.click(rows(container)[2], { ctrlKey: true });
   expect(marked(container).filter(Boolean)).toHaveLength(2);
+  expect(screen.getByTitle('Clear all marks')).toHaveTextContent('Clear 2 marks');
+
+  fireEvent.click(rows(container)[0].querySelector('.mark-stripe')!);
+  expect(screen.getByTitle('Clear all marks')).toHaveTextContent('Clear 2 marks');
 
   fireEvent.click(screen.getByTitle('Clear all marks'));
   expect(marked(container).filter(Boolean)).toHaveLength(0);
+  expect(rows(container)[0].querySelector('.mark-stripe')).toHaveAttribute('aria-pressed', 'false');
+  expect(rows(container)[2].querySelector('.mark-stripe')).toHaveAttribute('aria-pressed', 'false');
   expect(screen.queryByTitle('Clear all marks')).not.toBeInTheDocument();
 });
 
@@ -143,7 +149,7 @@ test('prev/next-mark arrows appear with the marks and stop live-following (#442)
   fireEvent.click(screen.getByTitle('Jump to previous mark'));
   expect(onListFollowChange).toHaveBeenLastCalledWith(false);
 
-  // Jumping never changes what is marked.
+  // Jumping never changes the mouse selection.
   expect(marked(container)).toEqual([false, true, false, true, false]);
 });
 

@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { X, RefreshCw, BarChart2, ChevronDown, ChevronRight } from 'lucide-react';
+import { X, RefreshCw, BarChart2, ChevronDown, ChevronRight, Search } from 'lucide-react';
 import { apiUrl } from '../utils/basePath';
 import type { FilterOptions } from '../types/filters';
+import { matchesAnyText } from '../utils/quickFilter';
+import { AddressActions } from './telegramCell';
 
 interface StatEntry {
   address: string;
@@ -47,14 +49,13 @@ interface StatTableProps {
 }
 
 const StatTable: React.FC<StatTableProps> = ({ entries, total, sortKey, sortDir, onSort, searchQuery, entryKind }) => {
-  const q = searchQuery.toLowerCase();
   const matches = useCallback(
-    (e: StatEntry) => e.address.toLowerCase().includes(q) || e.name.toLowerCase().includes(q),
-    [q],
+    (e: StatEntry) => matchesAnyText(searchQuery, e.address, e.name),
+    [searchQuery],
   );
   const visible = useMemo(
-    () => !q ? entries : entries.filter(e => matches(e) || (e.children?.some(matches) ?? false)),
-    [entries, q, matches],
+    () => searchQuery.trim() ? entries.filter(e => matches(e) || (e.children?.some(matches) ?? false)) : entries,
+    [entries, searchQuery, matches],
   );
   const maxCount = useMemo(() => Math.max(1, ...entries.map(e => e.count)), [entries]);
 
@@ -112,6 +113,7 @@ const StatTable: React.FC<StatTableProps> = ({ entries, total, sortKey, sortDir,
                         {hasChildren ? (isOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />) : null}
                       </span>
                       {e.address}
+                      <AddressActions inline mode={entryKind} address={e.address} name={e.name} />
                     </span>
                   </td>
                   <td style={{ padding: '0.4rem 0.75rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200 }}>
@@ -136,6 +138,7 @@ const StatTable: React.FC<StatTableProps> = ({ entries, total, sortKey, sortDir,
                     <tr key={`${e.address}>${c.address}`} style={{ borderBottom: '1px solid var(--border-subtle)', background: 'var(--bg-inset)' }}>
                       <td style={{ padding: '0.3rem 0.75rem 0.3rem 2.1rem', fontFamily: "'JetBrains Mono', monospace", color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
                         {c.address}
+                        <AddressActions inline mode={entryKind === 'ga' ? 'pa' : 'ga'} address={c.address} name={c.name} />
                       </td>
                       <td style={{ padding: '0.3rem 0.75rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 200, fontSize: '0.75rem' }}>
                         {c.name}
@@ -239,11 +242,8 @@ interface HierarchyRowProps {
 const HierarchyRow: React.FC<HierarchyRowProps> = ({ node, maxCount, total, depth, searchQuery }) => {
   const [open, setOpen] = useState(depth < 1);
   const hasChildren = node.children.length > 0;
-  const q = searchQuery.toLowerCase();
-  const matchesSelf = !q || node.key.toLowerCase().includes(q) || node.label.toLowerCase().includes(q);
-  const matchesAny = matchesSelf || node.children.some(c =>
-    c.key.toLowerCase().includes(q) || c.label.toLowerCase().includes(q)
-  );
+  const matchesSelf = matchesAnyText(searchQuery, node.key, node.label);
+  const matchesAny = matchesSelf || node.children.some(c => matchesAnyText(searchQuery, c.key, c.label));
   if (!matchesAny) return null;
 
   const pct = total > 0 ? (node.count / total) * 100 : 0;
@@ -269,6 +269,7 @@ const HierarchyRow: React.FC<HierarchyRowProps> = ({ node, maxCount, total, dept
           fontFamily: "'JetBrains Mono', monospace",
         }}>
           {node.label}
+          {isLeaf && <AddressActions inline mode="ga" address={node.key} />}
         </span>
         <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.75rem', color: 'var(--text-main)', fontWeight: 600, marginLeft: '0.5rem', flexShrink: 0 }}>
           {formatCount(node.count)}
@@ -381,14 +382,47 @@ export const StatisticsOverlay: React.FC<StatisticsOverlayProps> = ({
         flexShrink: 0, background: 'var(--bg-subtle)',
       }}>
         <BarChart2 size={16} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} />
-        <span style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--text-main)' }}>Traffic Statistics</span>
+        <span style={{ fontWeight: 700, fontSize: '0.9rem', color: 'var(--text-main)', flexShrink: 0 }}>Traffic Statistics</span>
+        <div style={{
+          width: 220, flexShrink: 0, display: 'flex', alignItems: 'center', gap: '0.5rem',
+          background: 'var(--bg-tag)', border: '1px solid var(--border-color)',
+          borderRadius: '7px', padding: '0.45rem 0.65rem', transition: 'border-color 0.2s',
+        }}>
+          <Search size={13} style={{ color: 'var(--text-dim)', flexShrink: 0 }} />
+          <input
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+            placeholder="filter..."
+            aria-label="Filter statistics"
+            style={{
+              background: 'transparent', border: 'none', outline: 'none',
+              color: 'var(--text-main)', fontSize: '0.8125rem', flex: 1, minWidth: 0,
+              fontFamily: 'inherit',
+            }}
+          />
+          {searchQuery && (
+            <button
+              type="button"
+              aria-label="Clear filter"
+              title="Clear filter"
+              onClick={() => setSearchQuery('')}
+              style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, color: 'var(--text-dim)', display: 'flex' }}
+            >
+              <X size={11} />
+            </button>
+          )}
+        </div>
         {data && (
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', background: 'var(--bg-tag)', padding: '0.15rem 0.5rem', borderRadius: '999px', border: '1px solid var(--border-color)' }}>
+          <span style={{
+            fontSize: '0.75rem', color: 'var(--text-dim)', background: 'var(--bg-tag)',
+            padding: '0.15rem 0.5rem', borderRadius: '999px', border: '1px solid var(--border-color)',
+            marginLeft: 'auto',
+          }}>
             {formatCount(data.total)} total
           </span>
         )}
         {timeAgo && (
-          <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginLeft: 'auto' }}>
+          <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginLeft: data ? undefined : 'auto' }}>
             Updated {timeAgo}
           </span>
         )}
@@ -396,16 +430,24 @@ export const StatisticsOverlay: React.FC<StatisticsOverlayProps> = ({
           onClick={fetchStats}
           disabled={isLoading}
           title="Refresh"
-          style={{ background: 'transparent', border: 'none', cursor: isLoading ? 'not-allowed' : 'pointer', color: 'var(--text-dim)', padding: '0.2rem', display: 'flex', marginLeft: timeAgo ? undefined : 'auto' }}
+          style={{ background: 'transparent', border: 'none', cursor: isLoading ? 'not-allowed' : 'pointer', color: 'var(--text-dim)', padding: '0.2rem', display: 'flex', marginLeft: data || timeAgo ? undefined : 'auto' }}
         >
           <RefreshCw size={14} style={isLoading ? { animation: 'spin 1s linear infinite' } : undefined} />
         </button>
-        <button onClick={onClose} style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', padding: '0.2rem', display: 'flex' }}>
-          <X size={16} />
+        <button
+          onClick={onClose}
+          title="Close"
+          aria-label="Close"
+          style={{
+            background: 'var(--bg-tag)', border: '1px solid var(--border-color)', borderRadius: 7,
+            cursor: 'pointer', color: 'var(--text-main)', padding: '0.3rem', display: 'flex', flexShrink: 0,
+          }}
+        >
+          <X size={16} strokeWidth={2.25} />
         </button>
       </div>
 
-      {/* Tab bar + search */}
+      {/* Tab bar */}
       <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--border-color)', flexShrink: 0, gap: '0.25rem', padding: '0 0.5rem' }}>
         {tabs.map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
@@ -419,14 +461,6 @@ export const StatisticsOverlay: React.FC<StatisticsOverlayProps> = ({
             {t.label}
           </button>
         ))}
-        <div style={{ flex: 1 }} />
-        <input
-          value={searchQuery}
-          onChange={e => setSearchQuery(e.target.value)}
-          placeholder="Filter…"
-          className="glass-input"
-          style={{ padding: '0.3rem 0.6rem', fontSize: '0.78rem', borderRadius: 6, width: 160, margin: '0.25rem 0' }}
-        />
       </div>
 
       {/* Content */}

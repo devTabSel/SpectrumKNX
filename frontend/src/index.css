@@ -31,6 +31,8 @@
   --info: #3b82f6;
   /* Native form controls (date picker icon, select popup) follow the theme (#438) */
   --native-scheme: dark;
+  /* Row jump frame: white on dark, black on light. */
+  --jump-flash: #fff;
 
   /* KNX Specific Colors */
   --dpt-1: #3b82f6;  /* Switch */
@@ -64,6 +66,7 @@
     --success: #13733a;
     --error: #c81e1e;
     --native-scheme: light;
+    --jump-flash: #000;
   }
 }
 
@@ -116,6 +119,7 @@
   --success: #13733a;
   --error: #c81e1e;
   --native-scheme: light;
+  --jump-flash: #000;
 }
 
 * {

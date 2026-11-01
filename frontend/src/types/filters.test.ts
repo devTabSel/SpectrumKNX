@@ -1,5 +1,27 @@
 import { describe, expect, test } from 'vitest';
-import { DEFAULT_FILTERS, countFilterOptions, countSelections, dptKey, effectiveDeltaContext, enabledFilters, hasActiveFilters, isFilterDisabled, matchesDpt, matchesTelegram, pruneDisabled, toggleFilterDisabled } from './filters';
+import { DEFAULT_FILTERS, countAppliedFilterOptions, countFilterOptions, countSelections, dptKey, effectiveDeltaContext, enabledFilters, focusAddressesForList, hasActiveFilters, isFilterDisabled, matchesDpt, matchesTelegram, passesFocusAddressFilter, pruneDisabled, toggleFilterDisabled } from './filters';
+
+describe('passesFocusAddressFilter', () => {
+  const telegram = { source_address: '1.1.1', target_address: '1/2/3' };
+
+  test('an empty selection does not hide telegrams', () => {
+    expect(passesFocusAddressFilter(telegram, [], [])).toBe(true);
+  });
+
+  test('devices and group addresses each constrain their side, and both sides combine', () => {
+    expect(passesFocusAddressFilter(telegram, [], ['1.1.1'])).toBe(true);
+    expect(passesFocusAddressFilter(telegram, [], ['1.1.2'])).toBe(false);
+    expect(passesFocusAddressFilter(telegram, ['1/2/3'], [])).toBe(true);
+    expect(passesFocusAddressFilter(telegram, ['1/2/4'], ['1.1.1'])).toBe(false);
+    expect(passesFocusAddressFilter(telegram, ['1/2/3'], ['1.1.1'])).toBe(true);
+  });
+
+  test('a side narrows the list only while its filter-focused checkbox is on', () => {
+    expect(focusAddressesForList(['1/2/3'], ['1.1.1'], false, false)).toEqual({ gas: [], devices: [] });
+    expect(focusAddressesForList(['1/2/3'], ['1.1.1'], true, false)).toEqual({ gas: [], devices: ['1.1.1'] });
+    expect(focusAddressesForList(['1/2/3'], ['1.1.1'], false, true)).toEqual({ gas: ['1/2/3'], devices: [] });
+  });
+});
 
 describe('effectiveDeltaContext', () => {
   test('returns the stored before/after values when enabled', () => {
@@ -11,6 +33,13 @@ describe('effectiveDeltaContext', () => {
     const f = { ...DEFAULT_FILTERS, deltaBeforeMs: 500, deltaAfterMs: 250, deltaContextEnabled: false };
     expect(effectiveDeltaContext(f)).toEqual({ before: 0, after: 0 });
     expect(f.deltaBeforeMs).toBe(500); // re-enabling would restore these, not lose them
+    expect(f.deltaAfterMs).toBe(250);
+  });
+
+  test('zeroes the effective window when the Δt column filter is off, without touching the stored values', () => {
+    const f = { ...DEFAULT_FILTERS, deltaBeforeMs: 500, deltaAfterMs: 250, deltaContextEnabled: true };
+    expect(effectiveDeltaContext(f, false)).toEqual({ before: 0, after: 0 });
+    expect(f.deltaBeforeMs).toBe(500);
     expect(f.deltaAfterMs).toBe(250);
   });
 });
@@ -120,6 +149,29 @@ test('countFilterOptions tallies telegrams per filter option', () => {
   expect(counts.directions).toEqual({ Incoming: 5 });
   // Subtypes count under their own key and under the bare main type.
   expect(counts.dpts).toEqual({ '9.001': 2, '9.004': 1, '9': 3, '14': 1 });
+});
+
+test('countAppliedFilterOptions counts only telegrams the selections would keep', () => {
+  const t = (source_address: string, target_address: string, simplified_type: string) =>
+    ({ source_address, target_address, simplified_type, direction: 'Incoming', dpt_main: null, dpt_sub: null });
+  const telegrams = [
+    t('1.1.1', '1/0/1', 'Write'),
+    t('1.1.1', '1/0/2', 'Read'),
+    t('1.1.2', '1/0/1', 'Write'),
+  ];
+  const filters = { ...DEFAULT_FILTERS, sources: ['1.1.1'] };
+
+  const counts = countAppliedFilterOptions(telegrams, filters);
+  expect(counts.sources).toEqual({ '1.1.1': 2 });
+  expect(counts.targets).toEqual({ '1/0/1': 1, '1/0/2': 1 });
+  expect(counts.types).toEqual({ Write: 1, Read: 1 });
+
+  // A switched-off selection does not constrain the count.
+  const withBoth = { ...DEFAULT_FILTERS, sources: ['1.1.1', '1.1.2'], disabled: ['sources:1.1.2'] };
+  expect(countAppliedFilterOptions(telegrams, withBoth).sources).toEqual({ '1.1.1': 2 });
+
+  // No selection counts the whole set.
+  expect(countAppliedFilterOptions(telegrams, DEFAULT_FILTERS).sources).toEqual({ '1.1.1': 2, '1.1.2': 1 });
 });
 
 describe('switching single filters off (#437)', () => {

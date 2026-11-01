@@ -1,11 +1,13 @@
 import React, { useMemo, useState } from 'react';
-import { LineChart, ListX, Search, Filter, Clock } from 'lucide-react';
+import { LineChart, ListX, Search } from 'lucide-react';
 import type { Telegram } from '../hooks/useWebSocket';
 import { OptionRow } from './FilterPanel';
-import { SendToGaPopover } from './SendToGaPopover';
+import { AddressActions } from './telegramCell';
 import { RAW_DPT_OPTIONS } from '../utils/rawDpt';
 import { getPref, setPref } from '../utils/prefs';
-import { rowIconBtnStyle } from '../utils/buttonStyles';
+import { matchesAnyText } from '../utils/quickFilter';
+import { useRowMarks } from '../hooks/useRowMarks';
+import { applyToggle, toggleGesture, type ToggleGesture } from '../utils/toggleClick';
 
 interface TargetCount {
   address: string;
@@ -28,13 +30,16 @@ interface VisualizerSidebarProps {
   /** Per-target row actions (#341): write/filter/last-seen. */
   writeEnabled?: boolean;
   onFilterGAs?: (addresses: string[]) => void;
-  onLastSeen?: (address: string | string[], mode: 'ga' | 'pa') => void;
+  onLastSeen?: (address: string | string[], mode: 'ga' | 'pa', gesture?: ToggleGesture, clicked?: string) => void;
+  /** Shift or alt on the loupe opens the focus list. The checkbox opens Visualization. */
+  onOpenFocus?: () => void;
+  onOpenVisualizer?: () => void;
 }
 
 export const VisualizerSidebar: React.FC<VisualizerSidebarProps> = ({
   telegrams, selectedTargets, onTargetsChange,
   untypedTargets, dptOverrides = {}, onDptOverrideChange,
-  writeEnabled, onFilterGAs, onLastSeen,
+  writeEnabled, onLastSeen, onOpenVisualizer,
 }) => {
   // Persisted so the Targets filter survives closing/reopening the panel and
   // reloads, like the other visualization prefs (#361).
@@ -66,17 +71,23 @@ export const VisualizerSidebar: React.FC<VisualizerSidebarProps> = ({
   }, [telegrams]);
 
   const filteredTargets = useMemo(() => {
-    const q = search.toLowerCase();
-    if (!q) return targetCounts;
-    return targetCounts.filter(t => t.address.toLowerCase().includes(q) || t.name.toLowerCase().includes(q));
+    return targetCounts.filter(t => matchesAnyText(search, t.address, t.name));
   }, [targetCounts, search]);
 
-  const toggle = (address: string) => {
-    if (selectedTargets.includes(address)) {
-      onTargetsChange(selectedTargets.filter(a => a !== address));
-    } else {
-      onTargetsChange([...selectedTargets, address]);
+  const visible = filteredTargets.map(t => t.address);
+  const { marked, lastMarked, markAt, targetsFor } = useRowMarks(visible);
+  const runSelection = (address: string, gesture: ToggleGesture, navigate?: () => void) => {
+    if (gesture.kind === 'none') return;
+    if (gesture.kind === 'toggle') {
+      onTargetsChange(applyToggle(
+        selectedTargets,
+        targetsFor(address),
+        !selectedTargets.includes(address),
+        gesture.exclusive,
+      ));
+      if (!gesture.navigate) return;
     }
+    navigate?.();
   };
 
   return (
@@ -110,7 +121,7 @@ export const VisualizerSidebar: React.FC<VisualizerSidebarProps> = ({
           <Search size={13} style={{ color: 'var(--text-dim)', flexShrink: 0 }} />
           <input
             type="text"
-            placeholder="Search targets..."
+            placeholder="filter..."
             value={search}
             onChange={e => changeSearch(e.target.value)}
             style={{
@@ -138,41 +149,23 @@ export const VisualizerSidebar: React.FC<VisualizerSidebarProps> = ({
                 sublabel={t.name}
                 checked={selected}
                 count={t.count}
-                onToggle={() => toggle(t.address)}
-                actions={(writeEnabled || onFilterGAs || onLastSeen) && (
-                  <>
-                    {writeEnabled && (
-                      <SendToGaPopover
-                        address={t.address}
-                        name={t.name}
-                        dptMain={t.dptMain}
-                        dptSub={t.dptSub}
-                        buttonStyle={rowIconBtnStyle}
-                      />
-                    )}
-                    {onFilterGAs && (
-                      <button
-                        style={rowIconBtnStyle}
-                        title="Filter by this group address"
-                        onClick={() => onFilterGAs([t.address])}
-                        onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-                        onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-                      >
-                        <Filter size={11} />
-                      </button>
-                    )}
-                    {onLastSeen && (
-                      <button
-                        style={rowIconBtnStyle}
-                        title="Show last seen values"
-                        onClick={() => onLastSeen([t.address], 'ga')}
-                        onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-                        onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-                      >
-                        <Clock size={11} />
-                      </button>
-                    )}
-                  </>
+                marked={marked.includes(t.address)}
+                anchor={marked.includes(t.address) && lastMarked === t.address}
+                onMark={e => markAt(e, t.address)}
+                onToggle={e => runSelection(t.address, toggleGesture(e), onOpenVisualizer)}
+                actions={(
+                  <AddressActions
+                    inline
+                    mode="ga"
+                    address={t.address}
+                    name={t.name}
+                    dptMain={t.dptMain}
+                    dptSub={t.dptSub}
+                    onLastSeen={onLastSeen
+                      ? (_address, _mode, gesture) => onLastSeen(targetsFor(t.address), 'ga', gesture, t.address)
+                      : undefined}
+                    canSend={writeEnabled}
+                  />
                 )}
               />
               {needsDpt && (

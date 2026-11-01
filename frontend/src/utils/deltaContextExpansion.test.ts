@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { expandWithDeltaContext } from './deltaContextExpansion';
+import { expandWithDeltaContext, retainKeptRows } from './deltaContextExpansion';
 
 interface Item {
   key: string;
@@ -28,7 +28,7 @@ describe('expandWithDeltaContext', () => {
     expect(out.contextKeys).toEqual(new Set(['b']));
   });
 
-  it('a flagged item anchors its own window even when it does not match the filter, and is not itself context', () => {
+  it('a flagged non-match anchors its own window and stays a context row', () => {
     const items = [
       item('a', '2024-01-01T10:00:00.000Z'), // flagged, doesn't match
       item('b', '2024-01-01T10:00:00.500Z'), // near the flagged item
@@ -36,13 +36,30 @@ describe('expandWithDeltaContext', () => {
     ];
     const out = expandWithDeltaContext(items, [false, false, false], keyOf, new Set(['a']), 0, 1000);
     expect(out.items.map(keyOf)).toEqual(['a', 'b']);
-    expect(out.contextKeys).toEqual(new Set(['b'])); // 'a' is flagged, not context
+    expect(out.contextKeys).toEqual(new Set(['a', 'b']));
   });
 
-  it('a flagged item is shown even with no window at all (before=after=0)', () => {
+  it('flagging a context row keeps it context and extends the window past the original anchor', () => {
+    const items = [
+      item('match', '2024-01-01T10:00:00.000Z'),
+      item('context', '2024-01-01T10:00:00.400Z'), // inside the match window
+      item('further', '2024-01-01T10:00:01.200Z'), // outside the match window, inside the context row's
+      item('far', '2024-01-01T10:00:05.000Z'),
+    ];
+    const matches = [true, false, false, false];
+    const before = expandWithDeltaContext(items, matches, keyOf, new Set(), 0, 1000);
+    expect(before.items.map(keyOf)).toEqual(['match', 'context']);
+    expect(before.contextKeys).toEqual(new Set(['context']));
+
+    const flagged = expandWithDeltaContext(items, matches, keyOf, new Set(['context']), 0, 1000);
+    expect(flagged.items.map(keyOf)).toEqual(['match', 'context', 'further']);
+    expect(flagged.contextKeys).toEqual(new Set(['context', 'further']));
+  });
+
+  it('a flag does not keep a non-match when no window is set', () => {
     const items = [item('a', '2024-01-01T10:00:00Z'), item('b', '2024-01-01T10:00:01Z')];
-    const out = expandWithDeltaContext(items, [false, false], keyOf, new Set(['a']), 0, 0);
-    expect(out.items.map(keyOf)).toEqual(['a']);
+    const out = expandWithDeltaContext(items, [false, true], keyOf, new Set(['a']), 0, 0);
+    expect(out.items.map(keyOf)).toEqual(['b']);
     expect(out.contextKeys).toEqual(new Set());
   });
 
@@ -83,5 +100,24 @@ describe('expandWithDeltaContext', () => {
     const unflagged = expandWithDeltaContext(items, matches, keyOf, new Set(), 0, 1000, false);
     expect(unflagged.items.map(keyOf)).toEqual(['m1', 'm2']);
     expect(unflagged.contextKeys).toEqual(new Set());
+  });
+
+  it('keeping a context row visible does not take it out of the context set or turn it into an anchor', () => {
+    const items = [
+      item('match', '2024-01-01T10:00:00.000Z'),
+      item('context', '2024-01-01T10:00:00.500Z'),
+      item('outside', '2024-01-01T10:00:05.000Z'),
+    ];
+    const expanded = expandWithDeltaContext(items, [true, false, false], keyOf, new Set(), 0, 1000);
+    const kept = retainKeptRows(items, expanded, keyOf, new Set(['context', 'outside']), () => true);
+    expect(kept.items.map(keyOf)).toEqual(['match', 'context', 'outside']);
+    expect(kept.contextKeys).toEqual(new Set(['context']));
+  });
+
+  it('a kept row the panel filter rejects stays out', () => {
+    const items = [item('kept', '2024-01-01T10:00:05.000Z')];
+    const expanded = expandWithDeltaContext(items, [false], keyOf, new Set(), 0, 1000);
+    const kept = retainKeptRows(items, expanded, keyOf, new Set(['kept']), () => false);
+    expect(kept.items).toEqual([]);
   });
 });

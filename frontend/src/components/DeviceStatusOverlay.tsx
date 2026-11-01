@@ -1,30 +1,24 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { X, RefreshCw, Activity, Layers, ChevronDown, ChevronRight, Clock } from 'lucide-react';
+import { X, RefreshCw, Activity, Layers, ChevronDown, ChevronRight } from 'lucide-react';
 import { apiUrl } from '../utils/basePath';
 import type { Telegram } from '../hooks/useWebSocket';
 import type { DeviceNode, Ko, Channel } from './BuildingOverlay';
+import { AddressActions } from './telegramCell';
+import type { ToggleGesture } from '../utils/toggleClick';
 
 interface DeviceStatusOverlayProps {
   device: DeviceNode;
   /** Newest telegram from the live websocket feed; used to update values in place. */
   latestTelegram: Telegram | null;
   onClose: () => void;
-  onLastSeen?: (address: string | string[], mode: 'ga' | 'pa') => void;
+  onLastSeen?: (address: string | string[], mode: 'ga' | 'pa', gesture: ToggleGesture) => void;
+  /** Toggles the address in the focus list. */
+  onFocusFilter?: (address: string, mode: 'ga' | 'pa', reveal?: ToggleGesture) => void;
+  /** Group addresses checked in the Focus list. */
+  focusGas?: readonly string[];
+  /** Devices checked in the Focus list. */
+  focusDevices?: readonly string[];
 }
-
-const iconBtnStyle: React.CSSProperties = {
-  background: 'transparent',
-  border: 'none',
-  cursor: 'pointer',
-  color: 'var(--text-dim)',
-  padding: '0.2rem',
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  borderRadius: '4px',
-  transition: 'color 0.15s, background-color 0.15s',
-  flexShrink: 0,
-};
 
 const mono: React.CSSProperties = { fontFamily: "'JetBrains Mono', monospace" };
 
@@ -69,8 +63,10 @@ const GaItem: React.FC<{
   ga: { address: string; name?: string | null };
   depth: number;
   valuesByGA: Record<string, Telegram>;
-  onLastSeen?: (address: string | string[], mode: 'ga' | 'pa') => void;
-}> = ({ ga, depth, valuesByGA, onLastSeen }) => {
+  onLastSeen?: (address: string | string[], mode: 'ga' | 'pa', gesture: ToggleGesture) => void;
+  onFocusFilter?: (address: string, mode: 'ga' | 'pa', reveal?: ToggleGesture) => void;
+  focused?: boolean;
+}> = ({ ga, depth, valuesByGA, onLastSeen, onFocusFilter, focused = false }) => {
   const t = valuesByGA[ga.address];
   const [hovered, setHovered] = useState(false);
 
@@ -123,21 +119,17 @@ const GaItem: React.FC<{
         )}
       </div>
 
-      {onLastSeen && (
-        <button
-          style={{
-            ...iconBtnStyle,
-            opacity: hovered ? 1 : 0,
-            transition: 'opacity 0.1s',
-          }}
-          title="Show history log"
-          onClick={e => { e.stopPropagation(); onLastSeen(ga.address, 'ga'); }}
-          onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-          onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-        >
-          <Clock size={12} />
-        </button>
-      )}
+      <span style={{ display: 'inline-flex', opacity: hovered || focused ? 1 : 0, transition: 'opacity 0.1s' }}>
+        <AddressActions
+          inline
+          mode="ga"
+          address={ga.address}
+          name={ga.name}
+          focusOn={focused}
+          onFocus={onFocusFilter}
+          onLastSeen={onLastSeen}
+        />
+      </span>
     </div>
   );
 };
@@ -146,8 +138,10 @@ const KoItem: React.FC<{
   ko: Ko;
   depth: number;
   valuesByGA: Record<string, Telegram>;
-  onLastSeen?: (address: string | string[], mode: 'ga' | 'pa') => void;
-}> = ({ ko, depth, valuesByGA, onLastSeen }) => {
+  onLastSeen?: (address: string | string[], mode: 'ga' | 'pa', gesture: ToggleGesture) => void;
+  onFocusFilter?: (address: string, mode: 'ga' | 'pa', reveal?: ToggleGesture) => void;
+  focusGas?: readonly string[];
+}> = ({ ko, depth, valuesByGA, onLastSeen, onFocusFilter, focusGas }) => {
   const dptText = ko.dpts.map(d => d.name || `DPT ${d.main}`).join(', ') || '—';
   const hasGAs = ko.group_addresses.length > 0;
 
@@ -183,7 +177,7 @@ const KoItem: React.FC<{
       {hasGAs && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.15rem' }}>
           {ko.group_addresses.map(ga => (
-            <GaItem key={ga.address} ga={ga} depth={depth + 1} valuesByGA={valuesByGA} onLastSeen={onLastSeen} />
+            <GaItem key={ga.address} ga={ga} depth={depth + 1} valuesByGA={valuesByGA} onLastSeen={onLastSeen} onFocusFilter={onFocusFilter} focused={!!focusGas?.includes(ga.address)} />
           ))}
         </div>
       )}
@@ -195,8 +189,10 @@ const ChannelRow: React.FC<{
   channel: Channel;
   depth: number;
   valuesByGA: Record<string, Telegram>;
-  onLastSeen?: (address: string | string[], mode: 'ga' | 'pa') => void;
-}> = ({ channel, depth, valuesByGA, onLastSeen }) => {
+  onLastSeen?: (address: string | string[], mode: 'ga' | 'pa', gesture: ToggleGesture) => void;
+  onFocusFilter?: (address: string, mode: 'ga' | 'pa', reveal?: ToggleGesture) => void;
+  focusGas?: readonly string[];
+}> = ({ channel, depth, valuesByGA, onLastSeen, onFocusFilter, focusGas }) => {
   const [open, setOpen] = useState(true);
   const koCount = channel.kos.length;
   if (koCount === 0) return null;
@@ -228,7 +224,7 @@ const ChannelRow: React.FC<{
       {open && (
         <div style={{ borderLeft: '1px solid var(--border-subtle)', marginLeft: `${1.1 + depth * 1.25}rem` }}>
           {channel.kos.map((ko: Ko, idx: number) => (
-            <KoItem key={`${ko.number}-${idx}`} ko={ko} depth={0} valuesByGA={valuesByGA} onLastSeen={onLastSeen} />
+            <KoItem key={`${ko.number}-${idx}`} ko={ko} depth={0} valuesByGA={valuesByGA} onLastSeen={onLastSeen} onFocusFilter={onFocusFilter} focusGas={focusGas} />
           ))}
         </div>
       )}
@@ -237,7 +233,7 @@ const ChannelRow: React.FC<{
 };
 
 export const DeviceStatusOverlay: React.FC<DeviceStatusOverlayProps> = ({
-  device, latestTelegram, onClose, onLastSeen,
+  device, latestTelegram, onClose, onLastSeen, onFocusFilter, focusGas, focusDevices,
 }) => {
   const [valuesByGA, setValuesByGA] = useState<Record<string, Telegram>>({});
   const [isLoading, setIsLoading] = useState(false);
@@ -295,7 +291,17 @@ export const DeviceStatusOverlay: React.FC<DeviceStatusOverlayProps> = ({
           <Activity size={15} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} />
           <div style={{ minWidth: 0 }}>
             <div style={{ fontWeight: 600, fontSize: '0.875rem' }}>
-              Device Status — <span style={mono}>{device.address}</span> {device.name}
+              Device Status — <span style={mono}>{device.address}</span>
+              <AddressActions
+                inline
+                mode="pa"
+                address={device.address}
+                name={device.name}
+                focusOn={!!focusDevices?.includes(device.address)}
+                onFocus={onFocusFilter}
+                onLastSeen={onLastSeen}
+              />
+              {device.name}
             </div>
             <div style={{ fontSize: '0.73rem', color: 'var(--text-dim)', marginTop: '0.1rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {[device.manufacturer, device.hardware].filter(Boolean).join(' · ')}
@@ -333,6 +339,8 @@ export const DeviceStatusOverlay: React.FC<DeviceStatusOverlayProps> = ({
                 depth={0}
                 valuesByGA={valuesByGA}
                 onLastSeen={onLastSeen}
+                onFocusFilter={onFocusFilter}
+                focusGas={focusGas}
               />
             ))}
 
@@ -358,6 +366,8 @@ export const DeviceStatusOverlay: React.FC<DeviceStatusOverlayProps> = ({
                       depth={0}
                       valuesByGA={valuesByGA}
                       onLastSeen={onLastSeen}
+                      onFocusFilter={onFocusFilter}
+                      focusGas={focusGas}
                     />
                   ))}
                 </div>

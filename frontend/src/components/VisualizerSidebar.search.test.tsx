@@ -22,11 +22,11 @@ afterEach(() => localStorage.clear());
 
 test('persists the Targets search across panel remounts via prefs (#361)', () => {
   const { unmount } = render(sidebar());
-  fireEvent.change(screen.getByPlaceholderText('Search targets...'), { target: { value: '1/2' } });
+  fireEvent.change(screen.getByPlaceholderText('filter...'), { target: { value: '1/2' } });
   expect(getPref('vizTargetSearch')).toBe('1/2');
   unmount();
 
   // Reopening the panel restores the persisted filter.
   render(sidebar());
-  expect(screen.getByPlaceholderText('Search targets...')).toHaveValue('1/2');
+  expect(screen.getByPlaceholderText('filter...')).toHaveValue('1/2');
 });

@@ -1,8 +1,10 @@
 import { useSyncExternalStore } from 'react';
 import { getPref, setPref } from './prefs';
 
-// Colours the user gives to group addresses in the target filter, so their
-// telegrams can be told apart in the list while several are filtered (#509).
+// Colours the user gives to group addresses and devices in the focus lists, so
+// their telegrams can be told apart in the list (#509). A telegram uses its
+// group-address colour when it has one, and the sending device's colour only
+// otherwise.
 //
 // Module scope mirrored to the stored preferences: the filter panel sets a
 // colour and the telegram table reads it, in the Group Monitor and in History
@@ -18,6 +20,11 @@ export const TARGET_COLORS = [
   '#f97316', // orange
   '#14b8a6', // teal
 ] as const;
+
+/** Gray stripe of a highlighted row the focus lists left uncoloured. The slate itself, so its brightness sits with the solid focus-list colours. */
+export const UNCOLORED_MARK_STRIPE = 'var(--text-dim)';
+/** Stripe of a highlighted context row. Solid amber, the same weight as a focus-list colour. */
+export const CONTEXT_MARK_STRIPE = 'var(--warning, #f59e0b)';
 
 const PREF = 'targetColors';
 
@@ -74,7 +81,26 @@ export function nextTargetColor(
   return at === TARGET_COLORS.length - 1 ? null : TARGET_COLORS[at + 1];
 }
 
-/** Sets or, with null, removes the colour of a group address. */
+/** The colour painted on a telegram: its group address, else its sending device. */
+export function telegramColor(
+  colors: Record<string, string>,
+  telegram: { target_address: string; source_address: string },
+): string | undefined {
+  return colors[telegram.target_address] ?? colors[telegram.source_address];
+}
+
+/** Removes every colour whose address matches. One update for the whole set. */
+export function clearTargetColors(match: (address: string) => boolean): void {
+  const next: Record<string, string> = {};
+  let changed = false;
+  for (const [address, color] of Object.entries(colors)) {
+    if (match(address)) changed = true;
+    else next[address] = color;
+  }
+  if (changed) update(next);
+}
+
+/** Sets or, with null, removes the colour of a group address or device. */
 export function setTargetColor(address: string, color: string | null): void {
   const next = { ...colors };
   if (color === null) delete next[address];

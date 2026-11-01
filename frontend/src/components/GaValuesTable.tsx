@@ -1,10 +1,11 @@
 import React, { useState, useMemo, useContext } from 'react';
 import { format } from 'date-fns';
-import { Filter, Clock, LineChart, ChevronUp, ChevronDown } from 'lucide-react';
+import { ChevronUp, ChevronDown } from 'lucide-react';
 import { GaNameWidthContext } from '../utils/gaNameWidth';
 import { useLastSeenValues } from '../hooks/useLastSeenValues';
-import { SendToGaPopover } from './SendToGaPopover';
+import { AddressActions } from './telegramCell';
 import type { Telegram } from '../hooks/useWebSocket';
+import type { ToggleGesture } from '../utils/toggleClick';
 
 // Sortable table of group addresses with their last seen values (#269).
 // Used by the building view for a KO's linked GAs and a function's GAs (#306).
@@ -29,9 +30,20 @@ interface GaValuesTableProps {
   /** Show the per-row "send to this GA" action when the bus is writable. */
   writeEnabled?: boolean;
   onFilterGAs: (addresses: string[]) => void;
-  onLastSeen: (address: string | string[], mode: 'ga' | 'pa') => void;
+  onLastSeen: (address: string | string[], mode: 'ga' | 'pa', gesture: ToggleGesture) => void;
   /** Open the visualization panel plotting this GA (#307). */
-  onVisualizeGAs: (addresses: string[]) => void;
+  onVisualizeGAs: (addresses: string[], gesture: ToggleGesture) => void;
+  /** Toggle this GA in the Focus-list target filter. Falls back to the panel filter. */
+  onFocusFilter?: (address: string, mode: 'ga' | 'pa', reveal?: ToggleGesture) => void;
+  focusFilterGas?: readonly string[];
+  /** The KO table shows the columns without the header row. */
+  hideHeader?: boolean;
+  /** Header is centered in a short gap between the KO row and the first address row. */
+  alignToKo?: boolean;
+  /** Left edge of the communication-object name. The GA column lines up with it. */
+  insetLeft?: string;
+  /** Fixed tracks matching the communication-object summary on the row above. */
+  alignColumns?: { ga: string; name: string; dpt: string; time: string; actions: string };
 }
 
 const gaSortValue = (address: string): number => {
@@ -52,6 +64,23 @@ const formatDptLabel = (dpt?: GaTableEntry['dpt']): string | null => {
   return desc ? `${num} ${desc}` : num;
 };
 
+/** Column tracks shared by a KO summary and its group-address table, so DPT, time and value line up. */
+export function gaAlignColumns(addresses: string[], dptTexts: string[], nameCh: number | null): {
+  ga: string; name: string; dpt: string; time: string; actions: string; grid: string;
+} {
+  const gaChars = Math.max(4, ...addresses.map(address => address.length));
+  const dptChars = Math.max(3, ...dptTexts.map(text => text.length));
+  const name = `calc(${nameCh ?? 16}ch + 1rem)`;
+  const ga = `calc(${gaChars}ch + 1.75rem)`;
+  const dpt = `calc(${dptChars}ch + 1.25rem)`;
+  const time = '12rem';
+  const actions = '9.5rem';
+  return {
+    ga, name, dpt, time, actions,
+    grid: `${ga} ${name} ${dpt} ${time} minmax(0, 1fr) ${actions}`,
+  };
+}
+
 const cellStyle: React.CSSProperties = {
   padding: '0.25rem 0.5rem',
   fontSize: '0.72rem',
@@ -62,18 +91,18 @@ const cellStyle: React.CSSProperties = {
   verticalAlign: 'middle',
 };
 
-const iconBtnStyle: React.CSSProperties = {
-  background: 'transparent', border: 'none', cursor: 'pointer',
-  color: 'var(--text-dim)', padding: '0.15rem', borderRadius: '3px',
-  display: 'inline-flex', alignItems: 'center', verticalAlign: 'middle',
-};
+/** Equal, short space above and below a table header, between the parent row and the first address. */
+const HEADER_GAP = '0.1rem';
+const headerBandStyle: React.CSSProperties = { paddingTop: HEADER_GAP, paddingBottom: HEADER_GAP, lineHeight: 1 };
 
 const HeaderCell: React.FC<{
   label: string;
   sortKey?: SortKey;
   sort: { key: SortKey; dir: 'asc' | 'desc' } | null;
   onSort: (key: SortKey) => void;
-}> = ({ label, sortKey, sort, onSort }) => {
+  /** Drop the left padding so the label starts on the column edge. */
+  flush?: boolean;
+}> = ({ label, sortKey, sort, onSort, flush = false }) => {
   const active = sortKey != null && sort?.key === sortKey;
   return (
     <th
@@ -83,6 +112,9 @@ const HeaderCell: React.FC<{
         letterSpacing: '0.04em', color: 'var(--text-dim)',
         cursor: sortKey ? 'pointer' : 'default', userSelect: 'none',
         borderBottom: '1px solid var(--border-subtle)',
+        boxSizing: 'border-box',
+        ...headerBandStyle,
+        ...(flush ? { paddingLeft: 0 } : {}),
       }}
       onClick={sortKey ? (e => { e.stopPropagation(); onSort(sortKey); }) : undefined}
       title={sortKey ? `Sort by ${label.toLowerCase()}` : undefined}
@@ -96,7 +128,8 @@ const HeaderCell: React.FC<{
 };
 
 export const GaValuesTable: React.FC<GaValuesTableProps> = ({
-  entries, depth, latestTelegram, writeEnabled, onFilterGAs, onLastSeen, onVisualizeGAs,
+  entries, depth, latestTelegram, writeEnabled, onLastSeen, onVisualizeGAs,
+  onFocusFilter, focusFilterGas, hideHeader = false, alignToKo = false, insetLeft, alignColumns,
 }) => {
   const [sort, setSort] = useState<{ key: SortKey; dir: 'asc' | 'desc' } | null>(null);
   const nameWidthCh = useContext(GaNameWidthContext);
@@ -137,22 +170,43 @@ export const GaValuesTable: React.FC<GaValuesTableProps> = ({
   }, [entries, sort, valuesByGA]);
 
   return (
-    <div style={{ padding: `0.15rem 0.75rem 0.4rem ${0.75 + depth * 1.1}rem` }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'auto' }}>
+    <div style={alignToKo ? {
+      marginTop: HEADER_GAP,
+      padding: `0 0.75rem 0.2rem ${insetLeft ?? `calc(${0.75 + depth * 1.1}rem + 12px + 0.4rem)`}`,
+    } : { padding: `${HEADER_GAP} 0.75rem 0.2rem ${0.75 + depth * 1.1}rem` }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: alignColumns ? 'fixed' : 'auto' }}>
+        {alignColumns && (
+          <colgroup>
+            <col style={{ width: alignColumns.ga }} />
+            <col style={{ width: alignColumns.name }} />
+            <col style={{ width: alignColumns.dpt }} />
+            <col style={{ width: alignColumns.time }} />
+            <col />
+            <col style={{ width: alignColumns.actions }} />
+          </colgroup>
+        )}
+        {!hideHeader && (
         <thead>
           <tr>
-            <HeaderCell label="GA" sortKey="ga" sort={sort} onSort={handleSort} />
+            <HeaderCell label="GA" sortKey="ga" sort={sort} onSort={handleSort} flush={!!alignColumns} />
             <HeaderCell label="Name" sortKey="name" sort={sort} onSort={handleSort} />
             <HeaderCell label="DPT" sort={sort} onSort={handleSort} />
             <HeaderCell label="Time" sortKey="time" sort={sort} onSort={handleSort} />
             <HeaderCell label="Value" sort={sort} onSort={handleSort} />
-            <th style={{ ...cellStyle, borderBottom: '1px solid var(--border-subtle)', width: '1%' }} />
+            <th style={{
+              ...cellStyle, boxSizing: 'border-box', borderBottom: '1px solid var(--border-subtle)',
+              width: alignColumns ? undefined : '1%',
+              ...headerBandStyle,
+            }} />
           </tr>
         </thead>
+        )}
         <tbody>
-          {sorted.map(entry => {
+          {sorted.map((entry, rowIndex) => {
             const t = valuesByGA[entry.address];
             const dptLabel = formatDptLabel(entry.dpt);
+            const focusOn = !!onFocusFilter && !!focusFilterGas?.includes(entry.address);
+            const firstBand = rowIndex === 0 ? { paddingTop: HEADER_GAP } : {};
             return (
               <tr
                 key={entry.address}
@@ -161,7 +215,7 @@ export const GaValuesTable: React.FC<GaValuesTableProps> = ({
                 onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
                 onMouseLeave={e => (e.currentTarget.style.background = entry.sending ? 'rgba(99,102,241,0.08)' : 'transparent')}
               >
-                <td style={{ ...cellStyle, width: '1%' }}>
+                <td style={{ ...cellStyle, boxSizing: 'border-box', width: alignColumns ? undefined : '1%', ...(alignColumns ? { paddingLeft: 0 } : {}), ...firstBand }}>
                   {/* The sending GA is framed rather than icon-tagged (#295). */}
                   <span
                     aria-label={entry.sending ? 'sending' : undefined}
@@ -180,19 +234,19 @@ export const GaValuesTable: React.FC<GaValuesTableProps> = ({
                     }}
                   >{entry.address}</span>
                 </td>
-                <td style={{ ...cellStyle, ...nameColumnStyle, color: 'var(--text-dim)' }} title={entry.name || undefined}>
+                <td style={{ ...cellStyle, boxSizing: 'border-box', ...(alignColumns ? {} : nameColumnStyle), color: 'var(--text-dim)', ...firstBand }} title={entry.name || undefined}>
                   {entry.name || '—'}
                 </td>
-                <td style={{ ...cellStyle, width: '1%', color: 'var(--text-dim)' }} title={dptLabel || undefined}>
+                <td style={{ ...cellStyle, boxSizing: 'border-box', width: alignColumns ? undefined : '1%', color: 'var(--text-dim)', ...firstBand }} title={dptLabel || undefined}>
                   {dptLabel || '—'}
                 </td>
                 <td
-                  style={{ ...cellStyle, width: '1%', color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}
+                  style={{ ...cellStyle, boxSizing: 'border-box', width: alignColumns ? undefined : '1%', color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums', ...firstBand }}
                   title={t ? `by ${t.source_address}${t.source_name ? ` (${t.source_name})` : ''}` : 'Never updated'}
                 >
                   {t ? format(new Date(t.timestamp), 'yyyy-MM-dd HH:mm:ss.SS') : ''}
                 </td>
-                <td style={{ ...cellStyle, fontWeight: 600, color: t ? 'var(--text-main)' : 'var(--text-dim)' }}>
+                <td style={{ ...cellStyle, boxSizing: 'border-box', fontWeight: 600, color: t ? 'var(--text-main)' : 'var(--text-dim)', ...firstBand }}>
                   {t && (
                     <>
                       {t.value_formatted ?? t.value_numeric ?? '—'}
@@ -200,45 +254,20 @@ export const GaValuesTable: React.FC<GaValuesTableProps> = ({
                     </>
                   )}
                 </td>
-                <td style={{ ...cellStyle, width: '1%' }}>
-                  <span style={{ display: 'inline-flex', alignItems: 'center' }}>
-                    {writeEnabled && entry.dpt?.main != null && (
-                      <SendToGaPopover
-                        address={entry.address}
-                        name={entry.name}
-                        dptMain={entry.dpt.main}
-                        dptSub={entry.dpt.sub}
-                        buttonStyle={iconBtnStyle}
-                      />
-                    )}
-                    <button
-                      style={iconBtnStyle}
-                      title="Visualize this group address"
-                      onClick={e => { e.stopPropagation(); onVisualizeGAs([entry.address]); }}
-                      onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-                      onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-                    >
-                      <LineChart size={11} />
-                    </button>
-                    <button
-                      style={iconBtnStyle}
-                      title="Filter by this group address"
-                      onClick={e => { e.stopPropagation(); onFilterGAs([entry.address]); }}
-                      onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-                      onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-                    >
-                      <Filter size={11} />
-                    </button>
-                    <button
-                      style={iconBtnStyle}
-                      title="Show last seen values"
-                      onClick={e => { e.stopPropagation(); onLastSeen([entry.address], 'ga'); }}
-                      onMouseEnter={e => (e.currentTarget.style.color = 'var(--accent-primary)')}
-                      onMouseLeave={e => (e.currentTarget.style.color = 'var(--text-dim)')}
-                    >
-                      <Clock size={11} />
-                    </button>
-                  </span>
+                <td style={{ ...cellStyle, boxSizing: 'border-box', width: alignColumns ? undefined : '1%', overflow: 'visible', ...firstBand }}>
+                  <AddressActions
+                    inline
+                    mode="ga"
+                    address={entry.address}
+                    name={entry.name}
+                    dptMain={entry.dpt?.main}
+                    dptSub={entry.dpt?.sub}
+                    focusOn={focusOn}
+                    onFocus={onFocusFilter}
+                    onVisualize={(_address, _mode, gesture) => onVisualizeGAs([entry.address], gesture)}
+                    onLastSeen={onLastSeen}
+                    canSend={writeEnabled}
+                  />
                 </td>
               </tr>
             );
