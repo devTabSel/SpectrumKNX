@@ -25,6 +25,35 @@ beforeAll(() => {
   } as unknown as typeof ResizeObserver;
   Element.prototype.getBoundingClientRect = () =>
     ({ width: 1000, height: 800, top: 0, bottom: 800, left: 0, right: 1000, x: 0, y: 0, toJSON: () => {} }) as DOMRect;
+  Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+    configurable: true,
+    get() {
+      if (this.classList?.contains('custom-scrollbar')) return 800;
+      if (this.classList?.contains('log-row')) return 85;
+      return 800;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+    configurable: true,
+    get() { return 1000; },
+  });
+  Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+    configurable: true,
+    get() {
+      if (this.classList?.contains('custom-scrollbar')) return 800;
+      if (this.classList?.contains('log-row')) return 85;
+      return 0;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get() {
+      if (!this.classList?.contains('custom-scrollbar')) return 0;
+      const inner = this.firstElementChild as HTMLElement | null;
+      const height = inner ? Number.parseFloat(inner.style.height) : 0;
+      return Number.isFinite(height) && height > 0 ? height : 800;
+    },
+  });
 });
 
 const visibleColumns = {

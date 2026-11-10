@@ -45,6 +45,7 @@ import { StatisticsOverlay } from './components/StatisticsOverlay';
 import { BuildingOverlay, type DeviceNode } from './components/BuildingOverlay';
 import { DatabaseOverlay } from './components/DatabaseOverlay';
 import { WriteToBusPanel } from './components/WriteToBusPanel';
+import { DptCatalogProvider } from './components/DptCatalogContext';
 import { UpdateNotification } from './components/UpdateNotification';
 import { LegacyTimestampBanner } from './components/LegacyTimestampBanner';
 import { LoginScreen } from './components/LoginScreen';
@@ -802,6 +803,7 @@ function App() {
   }
 
   return (
+    <DptCatalogProvider value={filterOptions.dpts}>
     <div className="container dashboard-grid" style={{ padding: '1.5rem', gap: '1.5rem' }}>
 
       {/* ── Main area (Full Width) ─── */}
@@ -1365,6 +1367,7 @@ function App() {
                     onQuickLastSeen={handleQuickLastSeen}
                     canSend={serverConfig?.status?.write_enabled}
                     onGotoTelegram={handleGotoTelegram}
+                    latestTelegram={latestTelegram}
                     quickFilterOpen={quickFilterOpen}
                     onQuickFilterOpenChange={setQuickFilterOpen}
                     quickFilterEnabled={quickFilterEnabled}
@@ -1486,6 +1489,7 @@ function App() {
         .subtitle-name { font-size: 0.7rem; color: var(--text-dim); margin-top: 0.15rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       `}</style>
     </div>
+    </DptCatalogProvider>
   );
 }
 

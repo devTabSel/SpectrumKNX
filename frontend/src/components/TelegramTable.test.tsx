@@ -522,3 +522,149 @@ test('dragging a column header onto another reorders header and rows, and is rem
     .toEqual(['Δt', 'TARGET', 'SOURCE', 'TYPE', 'DPT', 'VALUE', 'TIME']);
   localStorage.removeItem('spectrum-knx.columnOrder');
 });
+
+test('scrolling to the live edge alone does not resume live-follow', () => {
+  const onListFollowChange = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(10, 9)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+  const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+  // Leave the edge, then return to the top (desc live edge) via scroll only.
+  port.scrollTop = 200;
+  fireEvent.scroll(port);
+  onListFollowChange.mockClear();
+  port.scrollTop = 0;
+  fireEvent.scroll(port);
+  expect(onListFollowChange).not.toHaveBeenCalledWith(true);
+});
+
+test('wheel toward the live edge while newest is visible resumes live-follow', () => {
+  const onListFollowChange = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(10, 9)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+  const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+  port.scrollTop = 0;
+  fireEvent.scroll(port);
+  onListFollowChange.mockClear();
+  // Newest-first: further scroll toward top (deltaY < 0) engages follow.
+  fireEvent.wheel(port, { deltaY: -40 });
+  expect(onListFollowChange).toHaveBeenCalledWith(true);
+});
+
+test('newest-on-bottom: wheel toward bottom at the live edge resumes live-follow', () => {
+  const asc: SortConfig = [{ key: 'timestamp', direction: 'asc' }];
+  const oldestFirst = makeList(10, 9).slice().reverse();
+  const onListFollowChange = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={oldestFirst}
+      visibleColumns={visibleColumns}
+      sortConfig={asc}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+  const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+  // Put the viewport at the bottom live edge.
+  port.scrollTop = Math.max(0, port.scrollHeight - port.clientHeight);
+  fireEvent.scroll(port);
+  onListFollowChange.mockClear();
+  fireEvent.wheel(port, { deltaY: 40 });
+  expect(onListFollowChange).toHaveBeenCalledWith(true);
+});
+
+test('click in the scroll area pauses live-follow while Time-sorted', () => {
+  const onListFollowChange = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(6, 5)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow
+      onListFollowChange={onListFollowChange}
+    />,
+  );
+  const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+  const row = container.querySelector('.log-row') as HTMLElement;
+  fireEvent.pointerDown(row, { bubbles: true });
+  expect(onListFollowChange).toHaveBeenCalledWith(false);
+  // Scrollbar press (target === port) must not pause by itself.
+  onListFollowChange.mockClear();
+  fireEvent.pointerDown(port, { bubbles: true });
+  expect(onListFollowChange).not.toHaveBeenCalled();
+});
+
+test('clicking a row icon pauses live-follow even when click is stopped', () => {
+  const onListFollowChange = vi.fn();
+  const onListAnchorKeyChange = vi.fn();
+  const props = {
+    telegrams: makeList(6, 5),
+    visibleColumns,
+    sortConfig,
+    onSort: vi.fn(),
+    activeFilters: DEFAULT_FILTERS,
+    onQuickFilter: vi.fn(),
+    onQuickVisualize: vi.fn(),
+    canSend: true as const,
+    listFollow: true as const,
+    onListFollowChange,
+    onListAnchorKeyChange,
+  };
+  const { container, rerender } = render(<TelegramTable {...props} />);
+  const filterIcon = container.querySelector('.quick-filter-btn') as HTMLElement;
+  expect(filterIcon).toBeTruthy();
+  // Icons stopPropagation on click; pause must still run via pointerdown capture.
+  fireEvent.pointerDown(filterIcon, { bubbles: true });
+  expect(onListFollowChange).toHaveBeenCalledWith(false);
+  // Pausing at the live edge must pin a row — otherwise scrollTop 0 keeps showing new telegrams.
+  expect(onListAnchorKeyChange).toHaveBeenCalled();
+
+  // Parent acknowledges pause, then re-engages — then the send icon must pause again.
+  rerender(<TelegramTable {...props} listFollow={false} />);
+  rerender(<TelegramTable {...props} listFollow />);
+  onListFollowChange.mockClear();
+  onListAnchorKeyChange.mockClear();
+  const sendIcon = container.querySelector('.quick-send-btn') as HTMLElement;
+  expect(sendIcon).toBeTruthy();
+  fireEvent.pointerDown(sendIcon, { bubbles: true });
+  expect(onListFollowChange).toHaveBeenCalledWith(false);
+  expect(onListAnchorKeyChange).toHaveBeenCalled();
+
+  // Real click path (host open → captureListScroll) also pauses + pins.
+  rerender(<TelegramTable {...props} listFollow={false} />);
+  rerender(<TelegramTable {...props} listFollow />);
+  onListFollowChange.mockClear();
+  onListAnchorKeyChange.mockClear();
+  fireEvent.click(sendIcon);
+  expect(onListFollowChange).toHaveBeenCalledWith(false);
+  expect(onListAnchorKeyChange).toHaveBeenCalled();
+});

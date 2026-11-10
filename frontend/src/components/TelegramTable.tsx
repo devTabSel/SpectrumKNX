@@ -4,7 +4,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
 import { ChevronUp, ChevronDown, Filter, LineChart, ListFilter, X, Clock, Info, Power, Circle, CircleDot, Download } from 'lucide-react';
 import { dptKey, type ActiveFilters } from '../types/filters';
-import { SendToGaPopover } from './SendToGaPopover';
+import { SendToGaHost, SendToGaPopover, type ListScrollSnapshot } from './SendToGaPopover';
 import { GotoTimeControl } from './GotoTimeControl';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
@@ -35,6 +35,8 @@ interface TelegramTableProps {
   canSend?: boolean;
   /** Jump from the send popover's last-value timestamp to the telegram list. */
   onGotoTelegram?: (telegram: Telegram) => void;
+  /** Live bus feed for the send popover's wait-for-read-response. */
+  latestTelegram?: Telegram | null;
 
   // Lifted Quick-Filter state (#280, #309, #341)
   quickFilterOpen?: boolean;
@@ -180,6 +182,7 @@ function countNewerThan(rows: { timestamp: string }[], newestMs: number, ascendi
 
 export const TelegramTable: React.FC<TelegramTableProps> = ({
   telegrams, visibleColumns, sortConfig, onSort, activeFilters, onQuickFilter, onQuickVisualize, onQuickLastSeen, canSend, onGotoTelegram,
+  latestTelegram,
   quickFilterOpen, onQuickFilterOpenChange, quickFilterEnabled, onQuickFilterEnabledChange, quickPatterns, onQuickPatternsChange,
   onDeltaContextChange, onDeltaContextEnabledChange,
   listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
@@ -596,8 +599,18 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // because the user jumped away" from "because rows were inserted" (#435).
   const scrollbarHeldRef = useRef(false);
   const userScrollUntilRef = useRef(0);
+  const touchYRef = useRef<number | null>(null);
+  // Latest time-sort / live-edge for the global key listener (mount-once).
+  const isTimeSortRef = useRef(isTimeSort);
+  const liveEdgeRef = useRef(liveEdge);
+  isTimeSortRef.current = isTimeSort;
+  liveEdgeRef.current = liveEdge;
   const noteUserScroll = () => { userScrollUntilRef.current = performance.now() + 300; };
   const userScrolling = () => scrollbarHeldRef.current || performance.now() < userScrollUntilRef.current;
+  // Engage live follow from a gesture while the global key handler is mounted.
+  const tryEngageLiveFollowRef = useRef<(towardLive: boolean) => void>(() => {});
+  // Pin viewport after pause — assigned once captureAnchor is defined below.
+  const captureAnchorRef = useRef<(selectedKey?: string | null) => void>(() => {});
   useEffect(() => {
     const release = () => {
       if (!scrollbarHeldRef.current) return;
@@ -606,7 +619,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     };
     // Keys scroll the list without it holding focus, so listen globally.
     const onKey = (e: KeyboardEvent) => {
-      if (SCROLL_KEYS.has(e.key)) userScrollUntilRef.current = performance.now() + 300;
+      if (!SCROLL_KEYS.has(e.key)) return;
+      userScrollUntilRef.current = performance.now() + 300;
+      const towardTop = e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home';
+      const towardBottom = e.key === 'ArrowDown' || e.key === 'PageDown' || e.key === 'End' || e.key === ' ';
+      const towardLive = liveEdgeRef.current === 'top' ? towardTop : towardBottom;
+      tryEngageLiveFollowRef.current(towardLive);
     };
     window.addEventListener('pointerup', release);
     window.addEventListener('pointercancel', release);
@@ -675,6 +693,88 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       : el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
   };
 
+  /**
+   * Pause live-follow (Time-sort click / leave edge). Idempotent.
+   * Always pins a viewport anchor so staying at scrollTop 0 (live edge) does
+   * not keep revealing new telegrams after follow has stopped — that is what
+   * made the send-icon click look like live-follow was still on.
+   */
+  const pauseLiveFollow = () => {
+    if (!atEdgeRef.current) return;
+    atEdgeRef.current = false;
+    setFollowingLive(false);
+    onListFollowChange?.(false);
+    captureAnchorRef.current();
+  };
+
+  /** Snapshot for send-popover "restore list position" (anchor key + viewport offset). */
+  const captureListScroll = useCallback((): ListScrollSnapshot | null => {
+    // Opening the send popover is a click in the scroll area — pause live-follow.
+    pauseLiveFollow();
+    const el = parentRef.current;
+    if (!el) return null;
+    const scrollTop = el.scrollTop;
+    if (anchorRef.current) {
+      return { scrollTop, key: anchorRef.current.key, offset: anchorRef.current.offset };
+    }
+    const items = virtualizer.getVirtualItems();
+    const first = items[0];
+    if (first == null) return { scrollTop, key: null, offset: 0 };
+    const t = telegramRows[first.index];
+    if (!t) return { scrollTop, key: null, offset: 0 };
+    const key = anchorKey(t);
+    const offset = rowOffset(key) ?? (first.start - scrollTop);
+    // Pin even if pause was a no-op (already paused without an anchor).
+    anchorRef.current = { key, offset };
+    onListAnchorKeyChange?.(key);
+    return { scrollTop, key, offset };
+  }, [virtualizer, telegramRows, onListAnchorKeyChange]);
+
+  /** Restore the list to the send-popover open snapshot; pauses live-follow. */
+  const restoreListScroll = useCallback((snap: ListScrollSnapshot) => {
+    const el = parentRef.current;
+    if (!el) return;
+    pauseLiveFollow();
+    if (snap.key) {
+      const idx = telegramRows.findIndex(r => anchorKey(r) === snap.key);
+      if (idx >= 0) {
+        markProgrammatic();
+        virtualizer.scrollToIndex(idx, { align: 'start' });
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const found = rowOffset(snap.key!);
+          if (found != null) {
+            markProgrammatic();
+            el.scrollTop += found - snap.offset;
+            anchorRef.current = { key: snap.key!, offset: snap.offset };
+            onListAnchorKeyChange?.(snap.key!);
+          } else {
+            markProgrammatic();
+            el.scrollTop = snap.scrollTop;
+          }
+        }));
+        return;
+      }
+    }
+    markProgrammatic();
+    el.scrollTop = snap.scrollTop;
+  }, [virtualizer, telegramRows, onListAnchorKeyChange]);
+
+  /**
+   * Resume live-follow only when the newest telegram is already visible
+   * (at the live edge) and the user keeps scrolling toward that edge.
+   * Merely reaching the edge via scroll does not engage.
+   */
+  const tryEngageLiveFollow = (towardLive: boolean) => {
+    if (!isTimeSort || !towardLive || atEdgeRef.current) return;
+    if (!checkAtEdge()) return;
+    atEdgeRef.current = true;
+    setFollowingLive(true);
+    onListFollowChange?.(true);
+    anchorRef.current = null;
+    onListAnchorKeyChange?.(null);
+  };
+  tryEngageLiveFollowRef.current = tryEngageLiveFollow;
+
   // Record the row to pin across list updates. `selectedKey` is the row the
   // user is working on; it wins while any part of it is inside the viewport, so
   // rows arriving above it (a reload, Time-Delta-Context) can't push it away
@@ -721,28 +821,30 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       captureRetriesRef.current = 0;
     }
   };
+  captureAnchorRef.current = captureAnchor;
 
   const handleScroll = () => {
     // Ignore the scrolls our own compensation triggers.
     if (programmaticScrollRef.current || refindingAnchorRef.current) return;
     markCursorRef.current = null;
     const atEdge = checkAtEdge();
-    if (atEdge !== atEdgeRef.current) {
-      atEdgeRef.current = atEdge;
-      setFollowingLive(atEdge);
-      onListFollowChange?.(atEdge);
-    }
-    if (atEdge) {
-      anchorRef.current = null;
-      onListAnchorKeyChange?.(null);
+    if (atEdgeRef.current) {
+      if (!atEdge) {
+        // Left the live edge → pause follow. Reaching the edge alone never engages.
+        pauseLiveFollow();
+        captureAnchor();
+      } else {
+        anchorRef.current = null;
+        onListAnchorKeyChange?.(null);
+      }
     } else {
       captureAnchor();
     }
   };
 
-  // Clicking a row (a) marks it (#310) and (b) pauses live-following just like
-  // scrolling away (#266) — the row being read must not move. The jump-to-live
-  // pill is the way back.
+  // Clicking a row (a) marks it (#310) and (b) pauses live-following (#266) —
+  // the row being read must not move. The jump-to-live pill / further scroll
+  // toward the live edge is the way back.
   const handleRowClick = (e: React.MouseEvent, key: string, index: number) => {
     // ── Marks (#310) ──
     const additive = e.ctrlKey || e.metaKey;
@@ -779,12 +881,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     // Not yet in selectedKeyRef — that follows the state update above.
     const selectedKey = nextKeys.includes(key) ? key : null;
 
-    // ── Pause live-following on an edge click (#266), unchanged ──
-    if (isTimeSort && atEdgeRef.current) {
-      atEdgeRef.current = false;
-      setFollowingLive(false);
-      onListFollowChange?.(false);
-    }
+    // ── Pause live-following on any row click while following (#266) ──
+    if (isTimeSort) pauseLiveFollow();
     // Hold the clicked row still from here on (#435).
     if (!atEdgeRef.current) captureAnchor(selectedKey);
   };
@@ -937,12 +1035,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     setStripeOffset(0);
     anchorRef.current = null;
     onListAnchorKeyChange?.(null);
-    const atEdge = checkAtEdge();
-    if (atEdge !== atEdgeRef.current) {
-      atEdgeRef.current = atEdge;
-      setFollowingLive(atEdge);
-      onListFollowChange?.(atEdge);
-    }
+    // Sort moves the live edge — drop follow until the user re-engages
+    // (further scroll at the new edge or the jump-to-live pill).
+    pauseLiveFollow();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortConfig]);
 
@@ -1213,6 +1308,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   dptSub={t.dpt_sub}
                   buttonClassName="quick-send-btn"
                   onGotoTelegram={onGotoTelegram}
+                  latestTelegram={latestTelegram}
                 />
               )}
             </div>
@@ -1333,7 +1429,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   }
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div data-telegram-table style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <SendToGaHost
+        latestTelegram={latestTelegram}
+        onGotoTelegram={onGotoTelegram}
+        captureListScroll={captureListScroll}
+        restoreListScroll={restoreListScroll}
+      >
       {/* Quick info bar (#311): collapsible summary directly above the header. */}
       {infoOpen && infoMetrics && (
         <div style={{
@@ -1385,7 +1487,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             <span style={infoChipStyle}>{infoMetrics.targetCount} target{infoMetrics.targetCount !== 1 ? 's' : ''}</span>
             <span style={infoChipStyle}>{infoMetrics.dptCount} DPT{infoMetrics.dptCount !== 1 ? 's' : ''}</span>
             {infoMetrics.typeCounts.map(([type, n]) => (
-              <span key={type} style={infoChipStyle}>{type}: {n}</span>
+              <span key={type} style={infoChipStyle}>{type.toUpperCase()}: {n}</span>
             ))}
             {infoMetrics.contextCount > 0 && (
               <span style={infoChipStyle} title="Rows shown only as unfiltered Time-Delta-Context, not real filter matches (#343)">
@@ -1660,10 +1762,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       {isTimeSort && !followingLive && newerCount > 0 && (
         <button
           onClick={jumpToLive}
+          data-jump-to-live-pill=""
           className="jump-to-live-pill"
           style={{
             position: 'absolute', left: '50%', transform: 'translateX(-50%)',
-            [liveEdge]: '1rem', zIndex: 20,
+            // Above the send popover (z-index 1000) so the pill stays visible
+            // and clickable even when the card sits under it.
+            [liveEdge]: '1rem', zIndex: 1100,
           }}
           title="Jump back to the live edge"
         >
@@ -1694,11 +1799,35 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       {/* Virtualized Body */}
       <div
         ref={parentRef}
+        data-telegram-scroll
         onScroll={handleScroll}
-        onWheel={noteUserScroll}
-        onTouchMove={noteUserScroll}
-        // A press on the container itself (not on a row) is the scrollbar.
-        onPointerDown={e => { if (e.target === e.currentTarget) scrollbarHeldRef.current = true; }}
+        onWheel={e => {
+          noteUserScroll();
+          const towardLive = liveEdge === 'top' ? e.deltaY < 0 : e.deltaY > 0;
+          tryEngageLiveFollow(towardLive);
+        }}
+        onTouchStart={e => { touchYRef.current = e.touches[0]?.clientY ?? null; }}
+        onTouchMove={e => {
+          noteUserScroll();
+          const y = e.touches[0]?.clientY;
+          const prev = touchYRef.current;
+          if (y == null || prev == null) return;
+          // Finger down (y↑) scrolls toward top; finger up toward bottom.
+          const towardLive = liveEdge === 'top' ? y > prev : y < prev;
+          touchYRef.current = y;
+          tryEngageLiveFollow(towardLive);
+        }}
+        onTouchEnd={() => { touchYRef.current = null; }}
+        onPointerDownCapture={e => {
+          // A press on the container itself (not on a row) is the scrollbar.
+          if (e.target === e.currentTarget) {
+            scrollbarHeldRef.current = true;
+            return;
+          }
+          // Any press in the list content pauses live-follow (Time-sort),
+          // including icons that stopPropagation on click — capture runs first.
+          if (isTimeSort) pauseLiveFollow();
+        }}
         // overflow-anchor off: we compensate scrollTop manually on prepend (#202),
         // so the browser's native anchoring must not also move the viewport.
         style={{ flex: 1, overflowY: 'auto', position: 'relative', overflowAnchor: 'none' }}
@@ -1778,6 +1907,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         )}
       </div>
       </div>
+      </SendToGaHost>
     </div>
   );
 };
@@ -1823,6 +1953,11 @@ style.textContent = `
   .log-row:hover .quick-last-seen-btn,
   .log-row:hover .quick-send-btn {
     opacity: 0.6;
+  }
+
+  .quick-send-btn[data-send-popover-open] {
+    opacity: 1;
+    color: var(--accent-primary);
   }
 
   .quick-filter-btn:hover, .quick-visualize-btn:hover, .quick-last-seen-btn:hover, .quick-send-btn:hover {
