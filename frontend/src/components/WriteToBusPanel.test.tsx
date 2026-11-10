@@ -1,6 +1,16 @@
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { WriteToBusPanel, mergeColTracks, midTracksTemplate, resolvePanelHeight, scrollLeftOnViewportResize, shouldAutoGrowPanelHeight } from './WriteToBusPanel';
+import {
+  WriteToBusPanel,
+  expectedPanelDpt,
+  topRowHintFromRow,
+  topRowHintMatches,
+  mergeColTracks,
+  midTracksTemplate,
+  resolvePanelHeight,
+  scrollLeftOnViewportResize,
+  shouldAutoGrowPanelHeight,
+} from './WriteToBusPanel';
 
 test('hiding the value column drops that track, not the DPT track', () => {
   const tracks = [90, 100, 20, 30, 40, 50, 60, 70, 80, 90];
@@ -243,9 +253,21 @@ test('adds and removes rows, sending to multiple GAs independently (#215)', asyn
 
   // One row initially; plain delete is blocked (aria-disabled), ctrl-reset stays available.
   expect(screen.getAllByPlaceholderText('GA')).toHaveLength(1);
-  expect(screen.getByRole('button', { name: /At least one row is required/ }))
-    .toHaveAttribute('aria-disabled', 'true');
-  fireEvent.click(screen.getByRole('button', { name: /At least one row is required/ }));
+  const minus = screen.getByRole('button', { name: /At least one row is required/ });
+  const plus = screen.getByRole('button', { name: /Add a row below/ });
+  expect(minus).toHaveAttribute('aria-disabled', 'true');
+  // Dim via color, not opacity — so a focus ring would stay full strength.
+  expect(minus.style.opacity).toBe('');
+  expect(minus.style.color).toMatch(/color-mix/);
+  // Minus/Plus share the same icon box and stroke so they read as equal size.
+  expect(minus.style.width).toBe(plus.style.width);
+  expect(minus.style.height).toBe(plus.style.height);
+  const minusSvg = minus.querySelector('svg');
+  const plusSvg = plus.querySelector('svg');
+  expect(minusSvg?.getAttribute('width')).toBe(plusSvg?.getAttribute('width'));
+  expect(minusSvg?.getAttribute('height')).toBe(plusSvg?.getAttribute('height'));
+  expect(minusSvg?.getAttribute('stroke-width')).toBe(plusSvg?.getAttribute('stroke-width'));
+  fireEvent.click(minus);
   expect(screen.getAllByPlaceholderText('GA')).toHaveLength(1);
 
   fireEvent.click(screen.getByRole('button', { name: /Add a row below/ }));
@@ -301,6 +323,20 @@ test('ctrl-click minus resets the row instead of removing it', async () => {
   });
   expect((screen.getAllByPlaceholderText(/Value/)[0] as HTMLInputElement).value).toBe('');
   expect((screen.getAllByPlaceholderText('every')[0] as HTMLInputElement).value).toBe('');
+});
+
+test('ctrl-click on aria-disabled minus still initializes the sole row', () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', dpt: '1.001', value: '1', delay: '2', every: '5' },
+  ]));
+  render(<WriteToBusPanel targets={[]} onClose={() => {}} />);
+  const minus = screen.getByRole('button', { name: /At least one row is required/ });
+  expect(minus).toHaveAttribute('aria-disabled', 'true');
+  fireEvent.click(minus, { ctrlKey: true });
+  expect(screen.getByPlaceholderText('GA')).toHaveValue('');
+  expect(screen.getByPlaceholderText('delay')).toHaveValue('');
+  expect(screen.getByPlaceholderText('every')).toHaveValue('');
+  expect(screen.getAllByPlaceholderText('GA')).toHaveLength(1);
 });
 
 test('ctrl-click plus duplicates the row without an active job', async () => {
@@ -694,6 +730,7 @@ test('delay and every show unit s beside the value inside the field shell', () =
   expect(container.querySelectorAll('[data-seconds-field]')).toHaveLength(2);
   expect(screen.queryByText('s')).not.toBeInTheDocument();
 
+  fireEvent.change(screen.getByPlaceholderText('GA'), { target: { value: '1/2/3' } });
   const delay = screen.getByPlaceholderText('delay');
   const every = screen.getByPlaceholderText('every');
   fireEvent.change(delay, { target: { value: '2' } });
@@ -710,8 +747,23 @@ test('delay and every show unit s beside the value inside the field shell', () =
   expect(every).toHaveStyle({ textAlign: 'right' });
 });
 
+test('delay and every are disabled until a GA is entered', () => {
+  render(<WriteToBusPanel targets={[]} onClose={() => {}} />);
+  const delay = screen.getByPlaceholderText('delay');
+  const every = screen.getByPlaceholderText('every');
+  expect(delay).toBeDisabled();
+  expect(every).toBeDisabled();
+  expect(delay).toHaveAttribute('title', 'Enter a group address first');
+  expect(every).toHaveAttribute('title', 'Enter a group address first');
+
+  fireEvent.change(screen.getByPlaceholderText('GA'), { target: { value: '1/2/3' } });
+  expect(delay).not.toBeDisabled();
+  expect(every).not.toBeDisabled();
+});
+
 test('delay and every clear invalid input only on blur', () => {
   render(<WriteToBusPanel targets={[]} onClose={() => {}} />);
+  fireEvent.change(screen.getByPlaceholderText('GA'), { target: { value: '1/2/3' } });
   const delay = screen.getByPlaceholderText('delay');
   const every = screen.getByPlaceholderText('every');
 
@@ -2225,22 +2277,27 @@ test('leaving the name field fills the matching address', () => {
   expect(name).toHaveValue('Living room light');
 });
 
-test('Enter in the name field selects the highlighted suggestion', () => {
+test('Enter in the name field selects the highlighted suggestion', async () => {
   render(<WriteToBusPanel targets={NAMED} onClose={() => {}} />);
   const name = screen.getByPlaceholderText('Group name');
   fireEvent.change(name, { target: { value: 'Helligkeit' } });
+  // Typing clears the highlight; ArrowDown selects the top match for Enter.
+  fireEvent.keyDown(name, { key: 'ArrowDown' });
+  await waitFor(() => expect(screen.getByRole('option', { name: /Helligkeit/ })).toBeInTheDocument());
   fireEvent.keyDown(name, { key: 'Enter' });
   expect(screen.getByPlaceholderText('GA')).toHaveValue('1/1/97');
   expect(name).toHaveValue('EGD_BWM55TG2A_Helligkeit');
 });
 
-test('an incomplete value resolves both fields of that row only', () => {
+test('an incomplete value resolves both fields of that row only', async () => {
   render(<WriteToBusPanel targets={NAMED} onClose={() => {}} />);
   fireEvent.click(screen.getByRole('button', { name: /Add a row below/ }));
   const addresses = screen.getAllByPlaceholderText('GA');
   const names = screen.getAllByPlaceholderText('Group name');
 
   fireEvent.change(addresses[0], { target: { value: '1/1' } });
+  fireEvent.keyDown(addresses[0], { key: 'ArrowDown' });
+  await waitFor(() => expect(screen.getByRole('option', { name: /1\/1\/97/ })).toBeInTheDocument());
   fireEvent.blur(addresses[0]);
   expect(addresses[0]).toHaveValue('1/1/97');
   expect(names[0]).toHaveValue('EGD_BWM55TG2A_Helligkeit');
@@ -2248,6 +2305,8 @@ test('an incomplete value resolves both fields of that row only', () => {
   expect(names[1]).toHaveValue('');
 
   fireEvent.change(names[1], { target: { value: 'Living' } });
+  fireEvent.keyDown(names[1], { key: 'ArrowDown' });
+  await waitFor(() => expect(screen.getByRole('option', { name: /Living room light/ })).toBeInTheDocument());
   fireEvent.blur(names[1]);
   expect(addresses[1]).toHaveValue('1/2/3');
   expect(names[1]).toHaveValue('Living room light');
@@ -2262,4 +2321,311 @@ test('choosing a name suggestion updates both fields', () => {
   fireEvent.mouseDown(screen.getByRole('option', { name: /Living room light/ }));
   expect(screen.getByPlaceholderText('GA')).toHaveValue('1/2/3');
   expect(name).toHaveValue('Living room light');
+});
+
+// ── GA blur: empty initializes; invalid / incomplete / unknown reverts ───────
+
+test('clearing the GA field on blur initializes the whole row', () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', name: 'Living room light', dpt: '1.001', value: '1', delay: '2', every: '5' },
+  ]));
+  render(<WriteToBusPanel targets={NAMED} onClose={() => {}} />);
+  const ga = screen.getByPlaceholderText('GA');
+  expect(ga).toHaveValue('1/2/3');
+  fireEvent.focus(ga);
+  fireEvent.change(ga, { target: { value: '' } });
+  fireEvent.blur(ga);
+  expect(ga).toHaveValue('');
+  expect(screen.getByPlaceholderText('Group name')).toHaveValue('');
+  expect(screen.getByLabelText('Datapoint type')).toHaveValue('');
+  expect(screen.getByPlaceholderText('Value')).toHaveValue('');
+  expect(screen.getByPlaceholderText('delay')).toHaveValue('');
+  expect(screen.getByPlaceholderText('every')).toHaveValue('');
+});
+
+test('incomplete GA with a project loaded reverts on blur', () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', name: 'Living room light', dpt: '1.001', value: '', delay: '', every: '' },
+  ]));
+  render(<WriteToBusPanel targets={NAMED} onClose={() => {}} />);
+  const ga = screen.getByPlaceholderText('GA');
+  fireEvent.focus(ga);
+  // Typing clears the highlight so blur commits free text instead of picking a suggestion.
+  fireEvent.change(ga, { target: { value: '1/' } });
+  fireEvent.blur(ga);
+  expect(ga).toHaveValue('1/2/3');
+  expect(screen.getByPlaceholderText('Group name')).toHaveValue('Living room light');
+});
+
+test('invalid GA with a project loaded reverts on blur', () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', name: 'Living room light', dpt: '1.001', value: '', delay: '', every: '' },
+  ]));
+  render(<WriteToBusPanel targets={NAMED} onClose={() => {}} />);
+  const ga = screen.getByPlaceholderText('GA');
+  fireEvent.focus(ga);
+  fireEvent.change(ga, { target: { value: 'not-a-ga' } });
+  fireEvent.blur(ga);
+  expect(ga).toHaveValue('1/2/3');
+  expect(screen.getByPlaceholderText('Group name')).toHaveValue('Living room light');
+});
+
+test('unknown complete GA with a project loaded reverts on blur', () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', name: 'Living room light', dpt: '1.001', value: '', delay: '', every: '' },
+  ]));
+  render(<WriteToBusPanel targets={NAMED} onClose={() => {}} />);
+  const ga = screen.getByPlaceholderText('GA');
+  fireEvent.focus(ga);
+  fireEvent.change(ga, { target: { value: '9/9/9' } });
+  fireEvent.blur(ga);
+  expect(ga).toHaveValue('1/2/3');
+  expect(screen.getByPlaceholderText('Group name')).toHaveValue('Living room light');
+});
+
+test('valid project GA still commits name on blur', () => {
+  render(<WriteToBusPanel targets={NAMED} onClose={() => {}} />);
+  const ga = screen.getByPlaceholderText('GA');
+  fireEvent.focus(ga);
+  fireEvent.change(ga, { target: { value: '1/1/97' } });
+  fireEvent.blur(ga);
+  expect(ga).toHaveValue('1/1/97');
+  expect(screen.getByPlaceholderText('Group name')).toHaveValue('EGD_BWM55TG2A_Helligkeit');
+});
+
+test('unknown GA name reverts on blur', () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', name: 'Living room light', dpt: '1.001', value: '', delay: '', every: '' },
+  ]));
+  render(<WriteToBusPanel targets={NAMED} onClose={() => {}} />);
+  const name = screen.getByPlaceholderText('Group name');
+  fireEvent.focus(name);
+  fireEvent.change(name, { target: { value: 'Custom free name' } });
+  fireEvent.blur(name);
+  expect(name).toHaveValue('Living room light');
+  expect(screen.getByPlaceholderText('GA')).toHaveValue('1/2/3');
+});
+
+test('clearing the GA name on blur leaves it empty', () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', name: 'Living room light', dpt: '1.001', value: '', delay: '', every: '' },
+  ]));
+  render(<WriteToBusPanel targets={NAMED} onClose={() => {}} />);
+  const name = screen.getByPlaceholderText('Group name');
+  fireEvent.focus(name);
+  fireEvent.change(name, { target: { value: '' } });
+  fireEvent.blur(name);
+  expect(name).toHaveValue('');
+  expect(screen.getByPlaceholderText('GA')).toHaveValue('1/2/3');
+});
+
+test('without a project, complete free-entry GA is kept and invalid reverts', () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', dpt: '1.001', value: '', delay: '', every: '' },
+  ]));
+  render(<WriteToBusPanel targets={[]} onClose={() => {}} />);
+  const ga = screen.getByPlaceholderText('GA');
+
+  fireEvent.focus(ga);
+  fireEvent.change(ga, { target: { value: '5/5/5' } });
+  fireEvent.blur(ga);
+  expect(ga).toHaveValue('5/5/5');
+
+  fireEvent.focus(ga);
+  fireEvent.change(ga, { target: { value: 'nope' } });
+  fireEvent.blur(ga);
+  expect(ga).toHaveValue('5/5/5');
+});
+
+test('topRowHintFromRow / topRowHintMatches use only the top row semantics', () => {
+  expect(expectedPanelDpt(9, 1)).toBe('9.001');
+  expect(expectedPanelDpt(null, 1)).toBe('');
+  const top = { address: '1/2/3', dpt: '9.001', delay: '', every: '' };
+  const hint = topRowHintFromRow(top);
+  expect(hint).toEqual({ address: '1/2/3', dpt: '9.001' });
+  expect(topRowHintMatches(hint, '1/2/3', 9, 1)).toBe(true);
+  expect(topRowHintMatches(hint, '4/5/6', 9, 1)).toBe(false);
+  expect(topRowHintMatches(hint, '1/2/3', 5, 1)).toBe(false);
+  // Delay/every must be empty for a hint.
+  expect(topRowHintFromRow({ ...top, delay: '2' })).toBeNull();
+  expect(topRowHintFromRow({ ...top, every: '5' })).toBeNull();
+  expect(topRowHintFromRow({ address: '', dpt: '9.001', delay: '', every: '' })).toBeNull();
+});
+
+test('onTopRowHintChange reports the top row and clears on unmount', () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', dpt: '9.001', value: '21', delay: '', every: '' },
+    { address: '4/5/6', dpt: '5.001', value: '1', delay: '', every: '' },
+  ]));
+  const onTopRowHintChange = vi.fn();
+  const { unmount } = render(
+    <WriteToBusPanel targets={[]} onClose={() => {}} onTopRowHintChange={onTopRowHintChange} />,
+  );
+  expect(onTopRowHintChange).toHaveBeenCalledWith({ address: '1/2/3', dpt: '9.001' });
+  unmount();
+  expect(onTopRowHintChange).toHaveBeenLastCalledWith(null);
+});
+
+test('header Add row at top inserts a blank row at index 0', () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', dpt: '9.001', value: '21', delay: '', every: '' },
+    { address: '4/5/6', dpt: '5.001', value: '1', delay: '', every: '' },
+  ]));
+  render(<WriteToBusPanel targets={[]} onClose={() => {}} />);
+  expect(screen.getAllByPlaceholderText('GA')).toHaveLength(2);
+  fireEvent.click(screen.getByRole('button', { name: /^Add row at top$/i }));
+  const gas = screen.getAllByPlaceholderText('GA');
+  expect(gas).toHaveLength(3);
+  expect(gas[0]).toHaveValue('');
+  expect(gas[1]).toHaveValue('1/2/3');
+  expect(gas[2]).toHaveValue('4/5/6');
+});
+
+// ── Ctrl-send request: clear matching top row or insert above ────────────────
+
+test('ctrlSendRequest clears a matching top row (same GA, DPT, empty delay/every)', async () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', name: 'Light', dpt: '1.001', value: '1', delay: '', every: '' },
+  ]));
+  const onCtrlSendHandled = vi.fn();
+  const { rerender } = render(
+    <WriteToBusPanel
+      targets={[{ address: '1/2/3', name: 'Light', main: 1, sub: 1 }]}
+      onClose={() => {}}
+      ctrlSendRequest={null}
+      onCtrlSendHandled={onCtrlSendHandled}
+    />,
+  );
+  expect(screen.getByPlaceholderText('GA')).toHaveValue('1/2/3');
+
+  rerender(
+    <WriteToBusPanel
+      targets={[{ address: '1/2/3', name: 'Light', main: 1, sub: 1 }]}
+      onClose={() => {}}
+      ctrlSendRequest={{ nonce: 1, address: '1/2/3', dptMain: 1, dptSub: 1 }}
+      onCtrlSendHandled={onCtrlSendHandled}
+    />,
+  );
+  await waitFor(() => expect(screen.getByPlaceholderText('GA')).toHaveValue(''));
+  expect(screen.getByPlaceholderText('Group name')).toHaveValue('');
+  expect(onCtrlSendHandled).toHaveBeenCalled();
+});
+
+test('ctrlSendRequest fills an empty top row instead of inserting', async () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '', dpt: '', value: '', delay: '', every: '' },
+  ]));
+  const onCtrlSendHandled = vi.fn();
+  const { rerender } = render(
+    <WriteToBusPanel
+      targets={[{ address: '1/2/3', name: 'Light', main: 1, sub: 1 }]}
+      onClose={() => {}}
+      ctrlSendRequest={null}
+      onCtrlSendHandled={onCtrlSendHandled}
+    />,
+  );
+  expect(screen.getAllByPlaceholderText('GA')).toHaveLength(1);
+
+  rerender(
+    <WriteToBusPanel
+      targets={[{ address: '1/2/3', name: 'Light', main: 1, sub: 1 }]}
+      onClose={() => {}}
+      ctrlSendRequest={{ nonce: 4, address: '1/2/3', dptMain: 1, dptSub: 1 }}
+      onCtrlSendHandled={onCtrlSendHandled}
+    />,
+  );
+  await waitFor(() => expect(screen.getByPlaceholderText('GA')).toHaveValue('1/2/3'));
+  expect(screen.getAllByPlaceholderText('GA')).toHaveLength(1);
+  expect(screen.getByPlaceholderText('Group name')).toHaveValue('Light');
+  expect(onCtrlSendHandled).toHaveBeenCalled();
+});
+
+test('ctrlSendRequest inserts at top when DPT differs or delay/every set', async () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', dpt: '5.001', value: '', delay: '', every: '' },
+  ]));
+  const onCtrlSendHandled = vi.fn();
+  const { rerender, container } = render(
+    <WriteToBusPanel
+      targets={[{ address: '1/2/3', name: 'Light', main: 1, sub: 1 }]}
+      onClose={() => {}}
+      ctrlSendRequest={null}
+      onCtrlSendHandled={onCtrlSendHandled}
+    />,
+  );
+
+  rerender(
+    <WriteToBusPanel
+      targets={[{ address: '1/2/3', name: 'Light', main: 1, sub: 1 }]}
+      onClose={() => {}}
+      ctrlSendRequest={{ nonce: 2, address: '1/2/3', name: 'Light', dptMain: 1, dptSub: 1 }}
+      onCtrlSendHandled={onCtrlSendHandled}
+    />,
+  );
+  await waitFor(() => expect(screen.getAllByPlaceholderText('GA')).toHaveLength(2));
+  const gas = screen.getAllByPlaceholderText('GA');
+  expect(gas[0]).toHaveValue('1/2/3');
+  expect(gas[1]).toHaveValue('1/2/3');
+  expect(screen.getAllByPlaceholderText('Group name')[0]).toHaveValue('Light');
+  expect(container.querySelector('.row-outline-flash')).toBeTruthy();
+  expect(onCtrlSendHandled).toHaveBeenCalled();
+});
+
+test('ctrlSendRequest inserts a new GA at the top', async () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '4/5/6', dpt: '5.001', value: '', delay: '', every: '' },
+  ]));
+  const { rerender } = render(
+    <WriteToBusPanel
+      targets={[
+        { address: '1/2/3', name: 'Light', main: 1, sub: 1 },
+        { address: '4/5/6', name: 'Other', main: 5, sub: 1 },
+      ]}
+      onClose={() => {}}
+      ctrlSendRequest={null}
+    />,
+  );
+  rerender(
+    <WriteToBusPanel
+      targets={[
+        { address: '1/2/3', name: 'Light', main: 1, sub: 1 },
+        { address: '4/5/6', name: 'Other', main: 5, sub: 1 },
+      ]}
+      onClose={() => {}}
+      ctrlSendRequest={{ nonce: 3, address: '1/2/3', dptMain: 1, dptSub: 1 }}
+    />,
+  );
+  await waitFor(() => expect(screen.getAllByPlaceholderText('GA')[0]).toHaveValue('1/2/3'));
+  expect(screen.getAllByPlaceholderText('GA')[1]).toHaveValue('4/5/6');
+});
+
+test('ctrlSendRequest is a no-op when the panel already has more than one row', async () => {
+  localStorage.setItem(ROWS_KEY, JSON.stringify([
+    { address: '1/2/3', dpt: '1.001', value: '', delay: '', every: '' },
+    { address: '4/5/6', dpt: '5.001', value: '', delay: '', every: '' },
+  ]));
+  const onCtrlSendHandled = vi.fn();
+  const { rerender } = render(
+    <WriteToBusPanel
+      targets={[]}
+      onClose={() => {}}
+      ctrlSendRequest={null}
+      onCtrlSendHandled={onCtrlSendHandled}
+    />,
+  );
+  expect(screen.getAllByPlaceholderText('GA')).toHaveLength(2);
+
+  rerender(
+    <WriteToBusPanel
+      targets={[]}
+      onClose={() => {}}
+      ctrlSendRequest={{ nonce: 9, address: '7/8/9', dptMain: 1, dptSub: 1 }}
+      onCtrlSendHandled={onCtrlSendHandled}
+    />,
+  );
+  await waitFor(() => expect(onCtrlSendHandled).toHaveBeenCalled());
+  const gas = screen.getAllByPlaceholderText('GA');
+  expect(gas).toHaveLength(2);
+  expect(gas[0]).toHaveValue('1/2/3');
+  expect(gas[1]).toHaveValue('4/5/6');
 });

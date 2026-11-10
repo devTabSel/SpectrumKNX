@@ -167,7 +167,7 @@ export function ProjectUploadWizard({ onSuccess, isClosable = false, onClose }: 
               padding: '0.85rem', borderRadius: '8px', border: 'none',
               background: isLoading || !file ? 'rgba(99,102,241,0.5)' : 'var(--accent-primary)',
               color: 'white', fontWeight: 600, fontSize: '1rem',
-              cursor: isLoading || !file ? 'not-allowed' : 'pointer',
+              cursor: isLoading || !file ? 'default' : 'pointer',
               display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
               transition: 'background 0.2s', marginTop: '0.5rem'
             }}

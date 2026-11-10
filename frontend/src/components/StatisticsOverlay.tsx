@@ -396,7 +396,7 @@ export const StatisticsOverlay: React.FC<StatisticsOverlayProps> = ({
           onClick={fetchStats}
           disabled={isLoading}
           title="Refresh"
-          style={{ background: 'transparent', border: 'none', cursor: isLoading ? 'not-allowed' : 'pointer', color: 'var(--text-dim)', padding: '0.2rem', display: 'flex', marginLeft: timeAgo ? undefined : 'auto' }}
+          style={{ background: 'transparent', border: 'none', cursor: isLoading ? 'default' : 'pointer', color: 'var(--text-dim)', padding: '0.2rem', display: 'flex', marginLeft: timeAgo ? undefined : 'auto' }}
         >
           <RefreshCw size={14} style={isLoading ? { animation: 'spin 1s linear infinite' } : undefined} />
         </button>

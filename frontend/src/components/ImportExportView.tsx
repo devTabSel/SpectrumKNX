@@ -199,7 +199,7 @@ export function ImportExportView() {
                   }}
                   style={{
                     display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem',
-                    padding: '1.75rem', borderRadius: '10px', cursor: isRunning ? 'not-allowed' : 'pointer',
+                    padding: '1.75rem', borderRadius: '10px', cursor: isRunning ? 'default' : 'pointer',
                     border: `1.5px dashed ${isDragging ? 'var(--accent-primary)' : 'var(--border-color)'}`,
                     background: isDragging ? 'rgba(99,102,241,0.08)' : 'var(--bg-inset)',
                     transition: 'all 0.15s ease', opacity: isRunning ? 0.5 : 1,
@@ -225,7 +225,7 @@ export function ImportExportView() {
                     padding: '0.75rem', borderRadius: '8px', border: 'none',
                     background: !file || isRunning || starting ? 'rgba(99,102,241,0.5)' : 'var(--accent-primary)',
                     color: 'white', fontWeight: 600, fontSize: '0.95rem',
-                    cursor: !file || isRunning || starting ? 'not-allowed' : 'pointer',
+                    cursor: !file || isRunning || starting ? 'default' : 'pointer',
                     display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem',
                   }}
                 >

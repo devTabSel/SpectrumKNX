@@ -44,7 +44,11 @@ import { LastSeenOverlay } from './components/LastSeenOverlay';
 import { StatisticsOverlay } from './components/StatisticsOverlay';
 import { BuildingOverlay, type DeviceNode } from './components/BuildingOverlay';
 import { DatabaseOverlay } from './components/DatabaseOverlay';
-import { WriteToBusPanel } from './components/WriteToBusPanel';
+import {
+  WriteToBusPanel,
+  type CtrlSendRequest,
+  type SendPanelTopRowHint,
+} from './components/WriteToBusPanel';
 import { DptCatalogProvider } from './components/DptCatalogContext';
 import { UpdateNotification } from './components/UpdateNotification';
 import { LegacyTimestampBanner } from './components/LegacyTimestampBanner';
@@ -274,6 +278,11 @@ function App() {
   const [latestTelegram, setLatestTelegram] = useState<Telegram | null>(null);
   const [isDatabaseOpen, setIsDatabaseOpen] = useState(initialWorkspace?.view === 'database');
   const [isSendOpen, setIsSendOpen] = useState(false);
+  /** Top send-panel row hint for TT send-icon blue (cleared when panel closes). */
+  const [sendPanelTopHint, setSendPanelTopHint] = useState<SendPanelTopRowHint | null>(null);
+  /** Ctrl-click send-icon request consumed by WriteToBusPanel (clear or insert top row). */
+  const [ctrlSendRequest, setCtrlSendRequest] = useState<CtrlSendRequest | null>(null);
+  const ctrlSendNonceRef = useRef(0);
   const [backendVersion, setBackendVersion] = useState<string>('loading...');
   const [projectStatus, setProjectStatus] = useState<{
     upload_feature_active: boolean;
@@ -701,6 +710,29 @@ function App() {
     setListGoto({ id: listGotoSeq.current, telegram });
   }, []);
 
+  const handleAltSend = useCallback(() => {
+    setIsSendOpen(o => !o);
+  }, []);
+
+  const handleCtrlSend = useCallback((info: {
+    address: string;
+    name?: string | null;
+    dptMain?: number | null;
+    dptSub?: number | null;
+  }) => {
+    setIsSendOpen(true);
+    ctrlSendNonceRef.current += 1;
+    setCtrlSendRequest({ ...info, nonce: ctrlSendNonceRef.current });
+  }, []);
+
+  const handleCtrlSendHandled = useCallback(() => {
+    setCtrlSendRequest(null);
+  }, []);
+
+  const handleSendPanelTopHintChange = useCallback((hint: SendPanelTopRowHint | null) => {
+    setSendPanelTopHint(hint);
+  }, []);
+
   const handleQuickLastSeen = useCallback((address: string | string[], mode: 'ga' | 'pa') => {
     setLastSeenAddresses(Array.isArray(address) ? address : [address]);
     setLastSeenMode(mode);
@@ -880,7 +912,7 @@ function App() {
                         color: isHistoryLoading ? 'var(--accent-primary)' : 'var(--text-dim)',
                         padding: '0.15rem',
                         opacity: bufferFull ? 0.4 : 1,
-                        cursor: bufferFull ? 'not-allowed' : 'pointer',
+                        cursor: bufferFull ? 'default' : 'pointer',
                       }}
                     >
                       <Download size={15} />
@@ -1228,9 +1260,16 @@ function App() {
               <WriteToBusPanel
                 targets={filterOptions.targets}
                 dptCatalog={filterOptions.dpts}
-                onClose={() => setIsSendOpen(false)}
+                onClose={() => {
+                  setSendPanelTopHint(null);
+                  setCtrlSendRequest(null);
+                  setIsSendOpen(false);
+                }}
                 latestTelegram={latestTelegram}
                 onGotoTelegram={handleGotoTelegram}
+                onTopRowHintChange={handleSendPanelTopHintChange}
+                ctrlSendRequest={ctrlSendRequest}
+                onCtrlSendHandled={handleCtrlSendHandled}
               />
             )}
             {/* Content row: filter panel + table */}
@@ -1367,6 +1406,9 @@ function App() {
                     onQuickLastSeen={handleQuickLastSeen}
                     canSend={serverConfig?.status?.write_enabled}
                     onGotoTelegram={handleGotoTelegram}
+                    onAltSend={handleAltSend}
+                    onCtrlSend={handleCtrlSend}
+                    sendPanelTopHint={isSendOpen ? sendPanelTopHint : null}
                     latestTelegram={latestTelegram}
                     quickFilterOpen={quickFilterOpen}
                     onQuickFilterOpenChange={setQuickFilterOpen}
@@ -1477,9 +1519,14 @@ function App() {
         .nav-item:hover { background: var(--bg-hover); color: var(--text-main); }
         .nav-item.active { background: rgba(99,102,241,0.1); color: var(--accent-primary); }
         .icon-button { background: transparent; border: none; cursor: pointer; color: var(--text-dim); transition: all 0.2s; }
+        .icon-button:disabled { cursor: default; pointer-events: none; }
+        /* Chevrons only — send-panel Minus keeps ctrl-reset while aria-disabled. */
+        .icon-button[data-ga-chevron][aria-disabled="true"],
+        .icon-button[data-dpt-chevron][aria-disabled="true"],
+        .icon-button[data-value-chevron][aria-disabled="true"] { cursor: default; pointer-events: none; }
         .chip-spinner { width: 12px; height: 12px; border: 2px solid rgba(99,102,241,0.2); border-top-color: var(--accent-primary); border-radius: 50%; animation: chip-spin 0.8s linear infinite; display: inline-block; }
         @keyframes chip-spin { to { transform: rotate(360deg); } }
-        .icon-button:hover { color: var(--text-main); transform: scale(1.1); }
+        .icon-button:hover:not(:disabled):not([aria-disabled="true"]) { color: var(--text-main); transform: scale(1.1); }
         .setting-item { display: flex; align-items: center; gap: 0.6rem; background: transparent; border: none; color: var(--text-main); cursor: pointer; width: 100%; padding: 0.35rem 0; text-align: left; }
         .checkbox.checked { background: var(--accent-primary); border-color: var(--accent-primary); }
         .sort-header { background: transparent; border: none; color: inherit; text-transform: inherit; letter-spacing: inherit; font-size: inherit; font-weight: inherit; cursor: pointer; display: flex; align-items: center; gap: 0.25rem; padding: 0; }

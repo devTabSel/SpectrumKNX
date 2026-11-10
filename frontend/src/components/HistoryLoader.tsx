@@ -4,6 +4,8 @@ import type { Telegram } from '../hooks/useWebSocket';
 import type { ActiveFilters } from '../types/filters';
 import type { LoaderTimeRange } from './HistorySearch';
 import { loadHistoryTelegrams, type HistoryMetadata, type LoadedRange } from '../utils/historyLoad';
+import { useDatabaseTimeRange } from '../hooks/useDatabaseTimeRange';
+import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 
 interface HistoryLoaderProps {
   onClose: () => void;
@@ -31,6 +33,7 @@ const UNIT_TO_SECONDS: Record<Unit, number> = {
 };
 
 export const HistoryLoader: React.FC<HistoryLoaderProps> = ({ onClose, onLoad, onAsyncLoad, limit, mode = 'search', filters, timeRange, onTimeRangeChange }) => {
+  const dbRange = useDatabaseTimeRange();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'loading' | 'success'>('idle');
@@ -49,31 +52,10 @@ export const HistoryLoader: React.FC<HistoryLoaderProps> = ({ onClose, onLoad, o
     onTimeRangeChange?.({ relValue, relUnit, startTime, endTime, ...patch });
   };
 
-  // Some browsers allow typing more than 4 digits into the year segment of a
-  // datetime-local input. Clamp to 4 digits to prevent e.g. "202600-01-01T00:00".
+  // Clamp oversized years (e.g. pasted "202600-01-01T00:00") to 4 digits.
   const clampYear = (value: string) => {
     const match = value.match(/^(\d{5,})(-.+)$/);
     return match ? match[1].slice(0, 4) + match[2] : value;
-  };
-
-  const handleStartTimeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
-    const clamped = clampYear(val);
-    if (clamped !== val) {
-      e.target.value = clamped;
-    }
-    setStartTime(clamped);
-    persistTimeRange({ startTime: clamped });
-  };
-
-  const handleEndTimeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
-    const clamped = clampYear(val);
-    if (clamped !== val) {
-      e.target.value = clamped;
-    }
-    setEndTime(clamped);
-    persistTimeRange({ endTime: clamped });
   };
 
   const doFetch = useCallback(async (range: LoadedRange) => {
@@ -218,34 +200,50 @@ export const HistoryLoader: React.FC<HistoryLoaderProps> = ({ onClose, onLoad, o
              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
               <div>
                 <label style={{ display: 'block', fontSize: '0.65rem', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.35rem' }}>From</label>
-                <input
-                  type="datetime-local"
-                  max="9999-12-31T23:59"
+                <ThemedDatetimePicker
                   className="glass-input"
+                  mode="datetime"
+                  withSeconds={false}
                   style={{ width: '100%' }}
                   value={startTime}
-                  onChange={handleStartTimeChange}
-                  onBlur={e => {
-                    const v = clampYear(e.target.value);
-                    if (v !== e.target.value) { e.target.value = v; }
-                    setStartTime(v);
+                  minDate={dbRange?.minDate}
+                  maxDate={dbRange?.maxDate}
+                  minDateTime={dbRange?.minDateTime}
+                  maxDateTime={dbRange?.maxDateTime}
+                  aria-label="From"
+                  onChange={v => {
+                    const clamped = clampYear(v);
+                    setStartTime(clamped);
+                    persistTimeRange({ startTime: clamped });
+                  }}
+                  onBlur={() => {
+                    const v = clampYear(startTime);
+                    if (v !== startTime) setStartTime(v);
                     persistTimeRange({ startTime: v });
                   }}
                 />
               </div>
               <div>
                 <label style={{ display: 'block', fontSize: '0.65rem', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.35rem' }}>To</label>
-                <input
-                  type="datetime-local"
-                  max="9999-12-31T23:59"
+                <ThemedDatetimePicker
                   className="glass-input"
+                  mode="datetime"
+                  withSeconds={false}
                   style={{ width: '100%' }}
                   value={endTime}
-                  onChange={handleEndTimeChange}
-                  onBlur={e => {
-                    const v = clampYear(e.target.value);
-                    if (v !== e.target.value) { e.target.value = v; }
-                    setEndTime(v);
+                  minDate={dbRange?.minDate}
+                  maxDate={dbRange?.maxDate}
+                  minDateTime={dbRange?.minDateTime}
+                  maxDateTime={dbRange?.maxDateTime}
+                  aria-label="To"
+                  onChange={v => {
+                    const clamped = clampYear(v);
+                    setEndTime(clamped);
+                    persistTimeRange({ endTime: clamped });
+                  }}
+                  onBlur={() => {
+                    const v = clampYear(endTime);
+                    if (v !== endTime) setEndTime(v);
                     persistTimeRange({ endTime: v });
                   }}
                 />
@@ -291,13 +289,12 @@ export const HistoryLoader: React.FC<HistoryLoaderProps> = ({ onClose, onLoad, o
         .section-label { display: flex; align-items: center; gap: 0.4rem; font-size: 0.65rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.65rem; }
         .quick-load-btn { display: flex; align-items: center; justify-content: center; padding: 0.65rem 0.5rem; background: var(--bg-subtle); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-main); font-size: 0.8125rem; cursor: pointer; transition: all 0.2s; }
         .quick-load-btn:hover:not(:disabled) { background: rgba(99,102,241,0.1); border-color: var(--accent-primary); color: var(--accent-primary); }
-        .quick-load-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .quick-load-btn:disabled { opacity: 0.5; cursor: default; }
         .glass-input { background: var(--bg-tag); border: 1px solid var(--border-color); border-radius: 8px; padding: 0.65rem 0.75rem; color: var(--text-main); font-family: inherit; font-size: 0.8125rem; outline: none; transition: border-color 0.2s; box-sizing: border-box; }
-        .glass-input:focus { border-color: var(--accent-primary); }
-        .glass-input::-webkit-calendar-picker-indicator { cursor: pointer; }
+        .glass-input::-webkit-calendar-picker-indicator { cursor: pointer; opacity: 1; }
         .search-submit-btn { display: flex; align-items: center; justify-content: center; gap: 0.6rem; padding: 0.8rem; background: rgba(99,102,241,0.12); border: 1px solid var(--accent-primary); border-radius: 8px; color: var(--accent-primary); font-weight: 600; font-size: 0.875rem; cursor: pointer; transition: all 0.2s; }
         .search-submit-btn:hover:not(:disabled) { background: var(--accent-primary); color: white; }
-        .search-submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .search-submit-btn:disabled { opacity: 0.5; cursor: default; }
         .spinner { width: 18px; height: 18px; border: 2px solid rgba(99,102,241,0.15); border-top-color: var(--accent-primary); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }

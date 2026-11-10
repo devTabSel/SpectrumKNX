@@ -912,7 +912,7 @@ export const BuildingOverlay: React.FC<BuildingOverlayProps> = ({
           onClick={fetchBuilding}
           disabled={isLoading}
           title="Refresh"
-          style={{ background: 'transparent', border: 'none', cursor: isLoading ? 'not-allowed' : 'pointer', color: 'var(--text-dim)', padding: '0.2rem', display: 'flex' }}
+          style={{ background: 'transparent', border: 'none', cursor: isLoading ? 'default' : 'pointer', color: 'var(--text-dim)', padding: '0.2rem', display: 'flex' }}
         >
           <RefreshCw size={14} style={isLoading ? { animation: 'spin 1s linear infinite' } : undefined} />
         </button>

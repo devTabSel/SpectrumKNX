@@ -2,10 +2,12 @@ import React, { useMemo, useRef, useEffect, useLayoutEffect, useState, useCallba
 import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
-import { ChevronUp, ChevronDown, Filter, LineChart, ListFilter, X, Clock, Info, Power, Circle, CircleDot, Download } from 'lucide-react';
+import { ChevronUp, ChevronDown, Filter, LineChart, ListFilter, X, Clock, Info, Power, Circle, CircleDot, Download, Play, Pause } from 'lucide-react';
 import { dptKey, type ActiveFilters } from '../types/filters';
 import { SendToGaHost, SendToGaPopover, type ListScrollSnapshot } from './SendToGaPopover';
 import { GotoTimeControl } from './GotoTimeControl';
+import { ThemedDatetimePicker } from './ThemedDatetimePicker';
+import { useDatabaseTimeRange } from '../hooks/useDatabaseTimeRange';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
 import { compileQuickFilters, type QuickCellValue, type QuickPatterns } from '../utils/quickFilter';
@@ -18,6 +20,12 @@ import { moveColumn, readColumnOrderPref, writeColumnOrderPref } from '../utils/
 import { formatDpt } from '../utils/knxSend';
 import { TT, ttTypeClass, ttDirectionClass, ttDptDotClass } from '../utils/telegramCellStyles';
 import { BusValueText } from './BusValueText';
+import {
+  ROW_OUTLINE_FLASH_CLASS,
+  ROW_OUTLINE_FLASH_CSS,
+  ROW_OUTLINE_FLASH_MS,
+} from '../utils/rowOutlineFlash';
+import { topRowHintMatches, type SendPanelTopRowHint } from './WriteToBusPanel';
 
 export type { SortKey, SortLevel, SortConfig };
 
@@ -37,6 +45,17 @@ interface TelegramTableProps {
   onGotoTelegram?: (telegram: Telegram) => void;
   /** Live bus feed for the send popover's wait-for-read-response. */
   latestTelegram?: Telegram | null;
+  /** Alt-click on a row send icon → toggle the send panel. */
+  onAltSend?: () => void;
+  /** Ctrl/Cmd-click on a row send icon → clear or insert that GA in the send panel. */
+  onCtrlSend?: (info: {
+    address: string;
+    name?: string | null;
+    dptMain?: number | null;
+    dptSub?: number | null;
+  }) => void;
+  /** Top send-panel row hint while the panel is open (send-icon blue). */
+  sendPanelTopHint?: SendPanelTopRowHint | null;
 
   // Lifted Quick-Filter state (#280, #309, #341)
   quickFilterOpen?: boolean;
@@ -124,6 +143,14 @@ const COLUMN_WIDTHS_PREF = 'columnWidths';
 // button is not the user scrolling (#435).
 const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' ']);
 
+/** Row chrome is mouse-driven — keep it out of Tab order and field focus. */
+const NO_FIELD_FOCUS = {
+  tabIndex: -1 as const,
+  onMouseDown: (e: React.MouseEvent) => { e.preventDefault(); },
+};
+
+const SCROLL_FOCUSABLE = 'button, [role="button"], a[href], input, select, textarea';
+
 const getDPTLabel = (dpt_main: number | null) => {
   if (dpt_main === 1) return 'DPT 1.x – Binary / Switch';
   if (dpt_main === 5) return 'DPT 5.x – 8-bit unsigned';
@@ -182,7 +209,7 @@ function countNewerThan(rows: { timestamp: string }[], newestMs: number, ascendi
 
 export const TelegramTable: React.FC<TelegramTableProps> = ({
   telegrams, visibleColumns, sortConfig, onSort, activeFilters, onQuickFilter, onQuickVisualize, onQuickLastSeen, canSend, onGotoTelegram,
-  latestTelegram,
+  latestTelegram, onAltSend, onCtrlSend, sendPanelTopHint = null,
   quickFilterOpen, onQuickFilterOpenChange, quickFilterEnabled, onQuickFilterEnabledChange, quickPatterns, onQuickPatternsChange,
   onDeltaContextChange, onDeltaContextEnabledChange,
   listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
@@ -194,6 +221,21 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   gotoRequest,
 }) => {
   const parentRef = useRef<HTMLDivElement>(null);
+  const dbRange = useDatabaseTimeRange();
+  const [flashRowKey, setFlashRowKey] = useState<string | null>(null);
+  const [flashNonce, setFlashNonce] = useState(0);
+
+  /** Reusable accent outline flash for a telegram list row (by anchor key). */
+  const flashTelegramRow = useCallback((key: string) => {
+    setFlashRowKey(key);
+    setFlashNonce(n => n + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!flashRowKey) return;
+    const t = window.setTimeout(() => setFlashRowKey(null), ROW_OUTLINE_FLASH_MS);
+    return () => window.clearTimeout(t);
+  }, [flashRowKey, flashNonce]);
 
   // ── Column widths (persisted, shared across live & history views) ──
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
@@ -553,6 +595,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       contextCount,
     };
   }, [telegramRows, contextKeys]);
+
+  /** Empty TIME von/bis placeholders track the live buffer span. */
+  const timeFilterPlaceholders = useMemo(() => {
+    if (!infoMetrics) return { from: undefined as string | undefined, to: undefined as string | undefined };
+    const fmt = (iso: string) => format(new Date(iso), "yyyy-MM-dd'T'HH:mm:ss");
+    return {
+      from: fmt(telegramRows[infoMetrics.oldestIdx].timestamp),
+      to: fmt(telegramRows[infoMetrics.newestIdx].timestamp),
+    };
+  }, [infoMetrics, telegramRows]);
 
   const virtualizer = useVirtualizer({
     count: telegramRows.length,
@@ -1085,6 +1137,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       setMarkedKeysList([key]);
       setLastMarked(key);
       markCursorRef.current = key;
+      requestAnimationFrame(() => requestAnimationFrame(() => flashTelegramRow(key)));
       return;
     }
     const ms = new Date(gotoRequest.telegram.timestamp).getTime();
@@ -1221,6 +1274,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         return (
           <div className={`${TT.cell} ${TT.deltaRow}`}>
             <button
+              {...NO_FIELD_FOCUS}
               style={{
                 background: 'transparent', border: 'none', cursor: 'pointer', padding: '0.15rem',
                 borderRadius: '4px', display: 'flex', alignItems: 'center', flexShrink: 0,
@@ -1251,6 +1305,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 {t.source_address}
               </div>
               <button
+                {...NO_FIELD_FOCUS}
                 className={`quick-filter-btn ${activeFilters.sources.includes(t.source_address) ? 'active' : ''}`}
                 onClick={(e) => { e.stopPropagation(); onQuickFilter('sources', t.source_address); }}
                 title="Toggle source filter"
@@ -1260,6 +1315,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               </button>
               {onQuickLastSeen && (
                 <button
+                  {...NO_FIELD_FOCUS}
                   className="quick-last-seen-btn"
                   onClick={(e) => { e.stopPropagation(); onQuickLastSeen(t.source_address, 'pa'); }}
                   title="Show last seen values for this device"
@@ -1284,6 +1340,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 {t.target_address}
               </div>
               <button
+                {...NO_FIELD_FOCUS}
                 className={`quick-filter-btn ${activeFilters.targets.includes(t.target_address) ? 'active' : ''}`}
                 onClick={(e) => { e.stopPropagation(); onQuickFilter('targets', t.target_address); }}
                 title="Toggle target filter"
@@ -1293,6 +1350,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               </button>
               {onQuickLastSeen && (
                 <button
+                  {...NO_FIELD_FOCUS}
                   className="quick-last-seen-btn"
                   onClick={(e) => { e.stopPropagation(); onQuickLastSeen(t.target_address, 'ga'); }}
                   title="Show last seen values for this GA"
@@ -1306,9 +1364,19 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   name={t.target_name}
                   dptMain={t.dpt_main}
                   dptSub={t.dpt_sub}
+                  triggerId={anchorKey(t)}
                   buttonClassName="quick-send-btn"
+                  suppressTriggerFocus
                   onGotoTelegram={onGotoTelegram}
                   latestTelegram={latestTelegram}
+                  onAltSend={onAltSend}
+                  onCtrlSend={onCtrlSend}
+                  panelMatched={topRowHintMatches(
+                    sendPanelTopHint,
+                    t.target_address,
+                    t.dpt_main,
+                    t.dpt_sub,
+                  )}
                 />
               )}
             </div>
@@ -1331,6 +1399,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 {t.simplified_type || t.telegram_type}
               </div>
               <button
+                {...NO_FIELD_FOCUS}
                 className={`quick-filter-btn ${activeFilters.types.includes(t.simplified_type || t.telegram_type) ? 'active' : ''}`}
                 onClick={(e) => { e.stopPropagation(); onQuickFilter('types', t.simplified_type || t.telegram_type); }}
                 title="Toggle type filter"
@@ -1353,6 +1422,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 <div title={getDPTLabel(t.dpt_main)} className={ttDptDotClass(t.dpt_main)} />
                 <span title={t.dpt_name ?? undefined} className={TT.dpt}>{t.dpt_name}</span>
                 <button
+                  {...NO_FIELD_FOCUS}
                   className={`quick-filter-btn ${activeFilters.dpts.includes(dptKey(t.dpt_main, t.dpt_sub)) ? 'active' : ''}`}
                   onClick={(e) => { e.stopPropagation(); if (t.dpt_main != null) onQuickFilter('dpts', dptKey(t.dpt_main, t.dpt_sub)); }}
                   title="Toggle DPT filter"
@@ -1373,8 +1443,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 value={t}
                 dpt={formatDpt(t.dpt_main, t.dpt_sub)}
                 as="span"
+                allowFocus={false}
               />
               <button
+                {...NO_FIELD_FOCUS}
                 className="quick-visualize-btn"
                 onClick={(e) => { e.stopPropagation(); onQuickVisualize(t.target_address); }}
                 title="Visualize this target"
@@ -1389,6 +1461,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   dpt={formatDpt(t.dpt_main, t.dpt_sub)}
                   as="span"
                   defaultShowHex
+                  allowFocus={false}
                 />
               </div>
             )}
@@ -1574,7 +1647,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               </button>
             )}
             {c.id === 'time' && isTimeSort && (
-              <GotoTimeControl seedMs={newestMs} onGoto={gotoTime} />
+              <GotoTimeControl
+                seedMs={newestMs}
+                onGoto={gotoTime}
+                minDate={dbRange?.minDate}
+                maxDate={dbRange?.maxDate}
+                minDateTime={dbRange?.minDateTime}
+                maxDateTime={dbRange?.maxDateTime}
+              />
             )}
             {c.id === 'delta' ? (
               <button
@@ -1614,6 +1694,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           before/after, #371) which don't go through the pattern pipeline. */}
       {quickOpen && (
         <div
+          className={`quick-filter-bar${quickEnabled ? '' : ' quick-filter-bar--disabled'}`}
           style={{
             display: 'grid',
             gridTemplateColumns: gridTemplate,
@@ -1621,7 +1702,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             borderBottom: '1px solid var(--border-color)',
             flexShrink: 0,
             paddingRight: '8px', // align with the header's scrollbar compensation
-            opacity: quickEnabled ? 1 : 0.5,
           }}
         >
           {visibleCols.map(c => (
@@ -1638,7 +1718,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               )}
               {c.id === 'delta' && (
                 <button
-                  className={`quick-filter-bar-toggle ${deltaFlagState !== 'none' ? 'open' : ''}`}
+                  className={`quick-filter-bar-toggle${deltaFlagState !== 'none' ? ' open' : ''}${activeFilters.deltaContextEnabled ? '' : ' quick-filter-bar-toggle--muted'}`}
                   onClick={handleDeltaToggleClick}
                   title={[
                     deltaFlagState === 'all'
@@ -1652,8 +1732,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   ].join(' ')}
                   style={{
                     marginTop: '0.2rem',
-                    opacity: activeFilters.deltaContextEnabled ? 1 : 0.5,
-                    color: deltaFlagState === 'all' ? 'var(--accent-primary)' : undefined,
+                    // Only when enabled: muted class uses color-mix and must not lose to inline color.
+                    color: deltaFlagState === 'all' && activeFilters.deltaContextEnabled
+                      ? 'var(--accent-primary)'
+                      : undefined,
                   }}
                 >
                   <Power size={12} />
@@ -1663,21 +1745,19 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 {c.id === 'delta' ? (
                   <>
                     <input
-                      className="quick-filter-bar-input"
+                      className={`quick-filter-bar-input${activeFilters.deltaContextEnabled ? '' : ' quick-filter-bar-input--muted'}`}
                       type="number" min={0} step={10}
                       value={activeFilters.deltaBeforeMs || ''}
                       placeholder="before ms"
                       aria-label="Time-Delta-Context before (ms)"
-                      style={{ opacity: activeFilters.deltaContextEnabled ? 1 : 0.5 }}
                       onChange={e => onDeltaContextChange?.(Math.max(0, Number(e.target.value) || 0), activeFilters.deltaAfterMs)}
                     />
                     <input
-                      className="quick-filter-bar-input"
+                      className={`quick-filter-bar-input${activeFilters.deltaContextEnabled ? '' : ' quick-filter-bar-input--muted'}`}
                       type="number" min={0} step={10}
                       value={activeFilters.deltaAfterMs || ''}
                       placeholder="after ms"
                       aria-label="Time-Delta-Context after (ms)"
-                      style={{ opacity: activeFilters.deltaContextEnabled ? 1 : 0.5 }}
                       onChange={e => onDeltaContextChange?.(activeFilters.deltaBeforeMs, Math.max(0, Number(e.target.value) || 0))}
                     />
                   </>
@@ -1691,22 +1771,74 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     onChange={e => setQuickCell('type', 'top', e.target.value)}
                   />
                 ) : c.id === 'time' ? (
-                  <>
-                    <input
-                      className="quick-filter-bar-input"
-                      type="datetime-local" step="1"
-                      value={currentPatterns.time?.top ?? ''}
-                      aria-label="Quick filter TIME from"
-                      onChange={e => setQuickCell('time', 'top', e.target.value)}
-                    />
-                    <input
-                      className="quick-filter-bar-input"
-                      type="datetime-local" step="1"
-                      value={currentPatterns.time?.bottom ?? ''}
-                      aria-label="Quick filter TIME to"
-                      onChange={e => setQuickCell('time', 'bottom', e.target.value)}
-                    />
-                  </>
+                  <div
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'flex-end',
+                      gap: '0.25rem',
+                    }}
+                  >
+                    <div style={{ width: '100%', minWidth: 0 }}>
+                      <ThemedDatetimePicker
+                        className="quick-filter-bar-input"
+                        mode="datetime"
+                        withSeconds
+                        showChevron={false}
+                        value={currentPatterns.time?.top ?? ''}
+                        placeholder={timeFilterPlaceholders.from}
+                        minDate={dbRange?.minDate}
+                        maxDate={dbRange?.maxDate}
+                        minDateTime={dbRange?.minDateTime}
+                        maxDateTime={dbRange?.maxDateTime}
+                        actions="since"
+                        aria-label="Quick filter TIME from"
+                        onChange={v => setQuickCell('time', 'top', v)}
+                        style={{ textAlign: 'right' }}
+                      />
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', width: '100%', minWidth: 0 }}>
+                      <button
+                        type="button"
+                        className={`quick-filter-bar-toggle${followingLive ? ' open' : ''}`}
+                        title={followingLive ? 'Pause live follow' : 'Jump to live'}
+                        aria-label={followingLive ? 'Pause live follow' : 'Jump to live'}
+                        onClick={() => {
+                          if (followingLive) pauseLiveFollow();
+                          else jumpToLive();
+                        }}
+                        style={{
+                          flexShrink: 0,
+                          color: followingLive ? 'var(--accent-primary)' : '#22c55e',
+                        }}
+                      >
+                        {followingLive
+                          ? <Pause size={12} fill="currentColor" />
+                          : <Play size={12} fill="currentColor" />}
+                      </button>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <ThemedDatetimePicker
+                          className="quick-filter-bar-input"
+                          mode="datetime"
+                          withSeconds
+                          showChevron={false}
+                          value={currentPatterns.time?.bottom ?? ''}
+                          placeholder={timeFilterPlaceholders.to}
+                          minDate={dbRange?.minDate}
+                          maxDate={dbRange?.maxDate}
+                          minDateTime={dbRange?.minDateTime}
+                          maxDateTime={dbRange?.maxDateTime}
+                          actions="before"
+                          aria-label="Quick filter TIME to"
+                          onChange={v => setQuickCell('time', 'bottom', v)}
+                          onLive={jumpToLive}
+                          style={{ textAlign: 'right' }}
+                        />
+                      </div>
+                    </div>
+                  </div>
                 ) : c.id === 'value' ? (
                   <>
                     <input
@@ -1828,6 +1960,18 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           // including icons that stopPropagation on click — capture runs first.
           if (isTimeSort) pauseLiveFollow();
         }}
+        onMouseDownCapture={e => {
+          // Block field focus in the scroll body; the click still fires.
+          const t = e.target;
+          if (!(t instanceof Element)) return;
+          if (t.closest(SCROLL_FOCUSABLE)) e.preventDefault();
+        }}
+        onFocusCapture={e => {
+          // Safety net for Tab / programmatic focus — never keep focus here.
+          const t = e.target;
+          if (!(t instanceof HTMLElement) || t === e.currentTarget) return;
+          t.blur();
+        }}
         // overflow-anchor off: we compensate scrollTop manually on prepend (#202),
         // so the browser's native anchoring must not also move the viewport.
         style={{ flex: 1, overflowY: 'auto', position: 'relative', overflowAnchor: 'none' }}
@@ -1855,6 +1999,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               // match (#343) — a distinct wash, but marks still take priority.
               const isContext = !marked && !!contextKeys?.has(key);
               const targetColor = activeTargetColors[t.target_address];
+              const flashing = flashRowKey === key;
               return (
                 <div
                   key={virtualRow.key}
@@ -1897,6 +2042,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   title={isContext ? 'Unfiltered Time-Delta-Context — this telegram did not match the active filters' : undefined}
                   className={`log-row${marked ? ' marked' : ''}${latest ? ' latest' : ''}${isContext ? ' context' : ''}`}
                 >
+                  {flashing && (
+                    <span
+                      key={flashNonce}
+                      className={ROW_OUTLINE_FLASH_CLASS}
+                      aria-hidden
+                      style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 2 }}
+                    />
+                  )}
                   {visibleCols.map(c => (
                     <React.Fragment key={c.id}>{renderCell(c.id, t)}</React.Fragment>
                   ))}
@@ -1930,6 +2083,14 @@ style.textContent = `
     position: relative;
   }
 
+  .quick-filter-btn:focus, .quick-filter-btn:focus-visible,
+  .quick-visualize-btn:focus, .quick-visualize-btn:focus-visible,
+  .quick-last-seen-btn:focus, .quick-last-seen-btn:focus-visible,
+  .quick-send-btn:focus, .quick-send-btn:focus-visible {
+    /* Beat .log-row:hover … opacity: 0.6 so the focus ring stays full strength. */
+    opacity: 1 !important;
+  }
+
   .quick-filter-btn.active {
     opacity: 1;
     color: var(--accent-primary);
@@ -1955,7 +2116,10 @@ style.textContent = `
     opacity: 0.6;
   }
 
-  .quick-send-btn[data-send-popover-open] {
+  .log-row:hover .quick-send-btn[data-send-popover-open],
+  .quick-send-btn[data-send-popover-open],
+  .log-row:hover .quick-send-btn[data-send-panel-match],
+  .quick-send-btn[data-send-panel-match] {
     opacity: 1;
     color: var(--accent-primary);
   }
@@ -2035,7 +2199,7 @@ style.textContent = `
   }
 
   .marks-pill button:disabled {
-    opacity: 0.4;
+    color: color-mix(in srgb, var(--text-dim) 40%, transparent);
     cursor: default;
   }
 
@@ -2062,49 +2226,77 @@ style.textContent = `
     color: var(--accent-primary);
   }
 
+  /* Dim via color-mix, never opacity — focus ring must stay full strength. */
+  .quick-filter-bar--disabled .quick-filter-bar-input,
+  .quick-filter-bar-input--muted {
+    color: color-mix(in srgb, var(--text-main) 50%, transparent);
+    border-color: color-mix(in srgb, var(--border-color) 50%, transparent);
+  }
+
+  .quick-filter-bar--disabled .quick-filter-bar-input::placeholder,
+  .quick-filter-bar-input--muted::placeholder {
+    color: color-mix(in srgb, var(--text-dim) 50%, transparent);
+  }
+
+  .quick-filter-bar--disabled .quick-filter-bar-toggle,
+  .quick-filter-bar-toggle--muted {
+    color: color-mix(in srgb, var(--text-dim) 50%, transparent);
+  }
+
+  .quick-filter-bar--disabled .quick-filter-bar-toggle.open,
+  .quick-filter-bar-toggle--muted.open {
+    color: color-mix(in srgb, var(--accent-primary) 50%, transparent);
+  }
+
   .quick-filter-bar-input {
     width: 100%;
     min-width: 0;
-    background: var(--bg-tag);
+    background: var(--bg-inset);
     border: 1px solid var(--border-color);
-    border-radius: 5px;
+    border-radius: 6px;
     padding: 0.25rem 0.45rem;
     color: var(--text-main);
     font-size: 0.72rem;
     font-family: var(--font-mono, monospace);
     outline: none;
     transition: border-color 0.15s;
+    color-scheme: var(--native-scheme);
   }
 
-  .quick-filter-bar-input:focus {
-    border-color: var(--accent-primary);
+  .quick-filter-bar-input::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 1;
   }
 
   .goto-time-popover {
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    padding: 0.4rem;
+    padding: 0.7rem 0.8rem;
     background: var(--bg-panel);
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
     border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border-radius: 10px;
     box-shadow: var(--shadow-lg);
   }
 
   .goto-time-input {
-    background: var(--bg-tag);
+    background: var(--bg-inset);
     border: 1px solid var(--border-color);
-    border-radius: 5px;
+    border-radius: 6px;
     padding: 0.25rem 0.45rem;
     color: var(--text-main);
     font-size: 0.75rem;
     font-family: var(--font-mono, monospace);
     outline: none;
     transition: border-color 0.15s;
+    color-scheme: var(--native-scheme);
   }
 
-  .goto-time-input:focus {
-    border-color: var(--accent-primary);
+  .goto-time-input::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    opacity: 1;
   }
 
   .goto-time-go {
@@ -2125,7 +2317,7 @@ style.textContent = `
 
   .goto-time-go:disabled {
     opacity: 0.5;
-    cursor: not-allowed;
+    cursor: default;
   }
 
   /* Column reordering: the dragged header dims, and a bar on the hovered
@@ -2172,5 +2364,7 @@ style.textContent = `
   .col-resize-handle:hover::after {
     background: var(--accent-primary);
   }
+
+  ${ROW_OUTLINE_FLASH_CSS}
 `;
 document.head.appendChild(style);

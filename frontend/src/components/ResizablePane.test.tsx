@@ -49,3 +49,25 @@ test('a closed pane collapses and offers no handle', () => {
   expect(pane().parentElement!.style.width).toBe('0px');
   expect(screen.queryByTitle(HANDLE)).not.toBeInTheDocument();
 });
+
+test('a closed pane is inert so its controls are not tab-focusable', () => {
+  const { rerender } = render(
+    <ResizablePane open={false} prefKey={KEY}>
+      <button type="button">inside</button>
+    </ResizablePane>,
+  );
+  const closed = screen.getByRole('button', { name: 'inside', hidden: true }).parentElement!;
+  expect(closed).toHaveAttribute('inert');
+  expect(closed).toHaveAttribute('aria-hidden', 'true');
+
+  rerender(
+    <ResizablePane open prefKey={KEY}>
+      <button type="button">inside</button>
+    </ResizablePane>,
+  );
+  const openInner = screen.getByRole('button', { name: 'inside' }).parentElement!;
+  expect(openInner).not.toHaveAttribute('inert');
+  expect(openInner).not.toHaveAttribute('aria-hidden');
+  screen.getByRole('button', { name: 'inside' }).focus();
+  expect(screen.getByRole('button', { name: 'inside' })).toHaveFocus();
+});

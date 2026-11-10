@@ -171,7 +171,7 @@ export const DatabaseOverlay: React.FC<DatabaseOverlayProps> = ({ onClose }) => 
           onClick={fetchInfo}
           disabled={isLoading}
           title="Refresh"
-          style={{ background: 'transparent', border: 'none', cursor: isLoading ? 'not-allowed' : 'pointer', color: 'var(--text-dim)', padding: '0.2rem', display: 'flex', marginLeft: 'auto' }}
+          style={{ background: 'transparent', border: 'none', cursor: isLoading ? 'default' : 'pointer', color: 'var(--text-dim)', padding: '0.2rem', display: 'flex', marginLeft: 'auto' }}
         >
           <RefreshCw size={14} style={isLoading ? { animation: 'spin 1s linear infinite' } : undefined} />
         </button>
@@ -224,7 +224,7 @@ export const DatabaseOverlay: React.FC<DatabaseOverlayProps> = ({ onClose }) => 
                         className="glass-button"
                         disabled={busy}
                         onClick={() => requestPreview(presetCutoff(p.days))}
-                        style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-tag)', color: 'var(--text-main)', cursor: busy ? 'not-allowed' : 'pointer' }}
+                        style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-tag)', color: 'var(--text-main)', cursor: busy ? 'default' : 'pointer' }}
                       >
                         Older than {p.label}
                       </button>
@@ -245,7 +245,7 @@ export const DatabaseOverlay: React.FC<DatabaseOverlayProps> = ({ onClose }) => 
                       // as local time instead, so the cutoff matches the date the user
                       // actually picked in their own timezone (#416).
                       onClick={() => requestPreview(new Date(`${cutoffDate}T00:00:00`).toISOString())}
-                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-tag)', color: 'var(--text-main)', cursor: busy || !cutoffDate ? 'not-allowed' : 'pointer' }}
+                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-tag)', color: 'var(--text-main)', cursor: busy || !cutoffDate ? 'default' : 'pointer' }}
                     >
                       Preview
                     </button>
@@ -254,7 +254,7 @@ export const DatabaseOverlay: React.FC<DatabaseOverlayProps> = ({ onClose }) => 
                       disabled={busy}
                       onClick={() => requestPreview(null)}
                       title="Delete all stored telegrams"
-                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', borderRadius: 6, border: '1px solid var(--error)', background: 'transparent', color: 'var(--error)', cursor: busy ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem' }}
+                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.8rem', borderRadius: 6, border: '1px solid var(--error)', background: 'transparent', color: 'var(--error)', cursor: busy ? 'default' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.35rem' }}
                     >
                       <Trash2 size={13} /> Delete all
                     </button>
@@ -281,7 +281,7 @@ export const DatabaseOverlay: React.FC<DatabaseOverlayProps> = ({ onClose }) => 
                         <button
                           disabled={isPurging}
                           onClick={confirmPurge}
-                          style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem', fontWeight: 600, borderRadius: 6, border: 'none', background: 'var(--error)', color: 'white', cursor: isPurging ? 'not-allowed' : 'pointer' }}
+                          style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem', fontWeight: 600, borderRadius: 6, border: 'none', background: 'var(--error)', color: 'white', cursor: isPurging ? 'default' : 'pointer' }}
                         >
                           {isPurging ? 'Deleting…' : `Delete ${preview.count.toLocaleString()} telegrams`}
                         </button>
@@ -304,7 +304,7 @@ export const DatabaseOverlay: React.FC<DatabaseOverlayProps> = ({ onClose }) => 
                     <button
                       disabled={busy}
                       onClick={runOptimize}
-                      style={{ padding: '0.45rem 0.9rem', fontSize: '0.8rem', fontWeight: 600, borderRadius: 6, border: '1px solid var(--accent-primary)', background: 'transparent', color: 'var(--accent-primary)', cursor: busy ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+                      style={{ padding: '0.45rem 0.9rem', fontSize: '0.8rem', fontWeight: 600, borderRadius: 6, border: '1px solid var(--accent-primary)', background: 'transparent', color: 'var(--accent-primary)', cursor: busy ? 'default' : 'pointer', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
                     >
                       <HardDrive size={14} /> {isOptimizing ? 'Reclaiming…' : 'Reclaim space'}
                     </button>

@@ -13,6 +13,8 @@
   --accent-secondary: #a855f7;
   --text-main: #f8fafc;
   --text-dim: #94a3b8;
+  /* Focus / fading outline: high contrast vs theme background */
+  --focus-ring: #ffffff;
   --border-color: rgba(255, 255, 255, 0.1);
   --border-subtle: rgba(255, 255, 255, 0.05);
   --border-hover: rgba(255, 255, 255, 0.2);
@@ -31,6 +33,8 @@
   --info: #3b82f6;
   /* Native form controls (date picker icon, select popup) follow the theme (#438) */
   --native-scheme: dark;
+  /* Native date/time popup chrome follows the app theme */
+  color-scheme: var(--native-scheme);
 
   /* KNX Specific Colors */
   --dpt-1: #3b82f6;  /* Switch */
@@ -90,6 +94,7 @@
     --accent-secondary: #9333ea;
     --text-main: #0f172a;
     --text-dim: #566176;
+    --focus-ring: #000000;
     --border-color: rgba(0, 0, 0, 0.1);
     --border-subtle: rgba(0, 0, 0, 0.07);
     --border-hover: rgba(0, 0, 0, 0.2);
@@ -117,6 +122,7 @@
   --accent-secondary: #a855f7;
   --text-main: #f8fafc;
   --text-dim: #94a3b8;
+  --focus-ring: #ffffff;
   --border-color: rgba(255, 255, 255, 0.1);
   --border-subtle: rgba(255, 255, 255, 0.05);
   --border-hover: rgba(255, 255, 255, 0.2);
@@ -142,6 +148,7 @@
   --accent-secondary: #9333ea;
   --text-main: #0f172a;
   --text-dim: #566176;
+  --focus-ring: #000000;
   --border-color: rgba(0, 0, 0, 0.1);
   --border-subtle: rgba(0, 0, 0, 0.07);
   --border-hover: rgba(0, 0, 0, 0.2);
@@ -212,6 +219,9 @@ code, pre {
   transition: border-color 0.15s ease;
 }
 
+/* Placeholders app-wide — match send-panel glass-input look. */
+input::placeholder,
+textarea::placeholder,
 .glass-input::placeholder,
 .glass-input input::placeholder {
   color: var(--text-dim);
@@ -220,8 +230,96 @@ code, pre {
   font-weight: 400;
 }
 
-.glass-input:focus {
-  border-color: var(--accent-primary);
+/* Empty date/time: dim edit text only — never opacity on the whole input
+   (that would dim the picker button and focus ring). */
+input[type="date"]:not(:focus):invalid,
+input[type="time"]:not(:focus):invalid,
+input[type="datetime-local"]:not(:focus):invalid,
+input[type="date"][value=""]:not(:focus),
+input[type="time"][value=""]:not(:focus),
+input[type="datetime-local"][value=""]:not(:focus) {
+  color: var(--text-dim);
+  font-style: italic;
+  font-weight: 400;
+}
+
+input[type="date"]:focus,
+input[type="time"]:focus,
+input[type="datetime-local"]:focus,
+input[type="date"]:not([value=""]),
+input[type="time"]:not([value=""]),
+input[type="datetime-local"]:not([value=""]) {
+  color: var(--text-main);
+  font-style: normal;
+  font-weight: inherit;
+}
+
+input[type="date"]:not(:focus):invalid::-webkit-datetime-edit,
+input[type="time"]:not(:focus):invalid::-webkit-datetime-edit,
+input[type="datetime-local"]:not(:focus):invalid::-webkit-datetime-edit,
+input[type="date"][value=""]:not(:focus)::-webkit-datetime-edit,
+input[type="time"][value=""]:not(:focus)::-webkit-datetime-edit,
+input[type="datetime-local"][value=""]:not(:focus)::-webkit-datetime-edit {
+  color: inherit;
+  font-style: inherit;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator,
+input[type="time"]::-webkit-calendar-picker-indicator,
+input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  opacity: 1;
+}
+
+/* Exactly one focus ring: on the focused control (never shell + chevron). */
+button:focus,
+button:focus-visible,
+[role="button"]:focus,
+[role="button"]:focus-visible,
+.quick-filter-bar-input:focus,
+.goto-time-input:focus {
+  outline: none;
+  outline-offset: 0;
+  box-shadow: inset 0 0 0 1px var(--focus-ring);
+}
+
+/* Shell ring only while the text/select field itself is focused.
+   Also when .glass-input is the input (HistoryLoader, etc.). */
+input.glass-input:focus,
+input.glass-input:focus-visible,
+textarea.glass-input:focus,
+textarea.glass-input:focus-visible,
+select.glass-input:focus,
+select.glass-input:focus-visible,
+.glass-input:has(input:focus),
+.glass-input:has(input:focus-visible),
+.glass-input:has(textarea:focus),
+.glass-input:has(textarea:focus-visible),
+.glass-input:has(select:focus),
+.glass-input:has(select:focus-visible) {
+  outline: none;
+  outline-offset: 0;
+  box-shadow: inset 0 0 0 1px var(--focus-ring);
+}
+
+.glass-input input:focus,
+.glass-input input:focus-visible,
+.glass-input textarea:focus,
+.glass-input textarea:focus-visible,
+.glass-input select:focus,
+.glass-input select:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* Disabled / aria-disabled: never dim the focus ring via opacity. */
+button:disabled:focus,
+button:disabled:focus-visible,
+button[aria-disabled="true"]:focus,
+button[aria-disabled="true"]:focus-visible {
+  opacity: 1;
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--focus-ring);
 }
 
 /* Animations */
@@ -431,6 +529,27 @@ code, pre {
   font-family: 'JetBrains Mono', monospace, var(--font-mono, monospace);
   border: var(--tt-raw-border);
 }
+
+/* Disabled / non-editable controls: no "forbidden" cursor on hover. */
+:disabled,
+[disabled],
+[aria-disabled="true"] {
+  cursor: default;
+}
+
+/* Suggestion chevrons inherit the field's disabled state (no hover/click).
+   Do not blanket aria-disabled icon-buttons — the send-panel Minus stays
+   clickable for ctrl/cmd-reset while visually disabled (single row). */
+button.icon-button:disabled,
+button.icon-button[data-ga-chevron]:disabled,
+button.icon-button[data-dpt-chevron]:disabled,
+button.icon-button[data-value-chevron]:disabled,
+button.icon-button[data-ga-chevron][aria-disabled="true"],
+button.icon-button[data-dpt-chevron][aria-disabled="true"],
+button.icon-button[data-value-chevron][aria-disabled="true"] {
+  pointer-events: none;
+}
+
 
 /* Scrollbar styling */
 ::-webkit-scrollbar {

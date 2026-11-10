@@ -69,7 +69,13 @@ export const ResizablePane: React.FC<ResizablePaneProps> = ({ open, prefKey, chi
       display: 'flex',
       flexDirection: 'column',
     }}>
-      <div ref={innerRef} style={{ width: cssWidth, flex: 1, overflow: 'hidden' }}>
+      <div
+        ref={innerRef}
+        // Closed panes stay mounted (local UI state) but must not take Tab focus.
+        inert={!open ? true : undefined}
+        aria-hidden={open ? undefined : true}
+        style={{ width: cssWidth, flex: 1, overflow: 'hidden' }}
+      >
         {children}
       </div>
       {open && (

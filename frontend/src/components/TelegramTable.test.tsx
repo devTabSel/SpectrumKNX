@@ -668,3 +668,89 @@ test('clicking a row icon pauses live-follow even when click is stopped', () => 
   expect(onListFollowChange).toHaveBeenCalledWith(false);
   expect(onListAnchorKeyChange).toHaveBeenCalled();
 });
+
+test('open send icons stay fully opaque under row hover CSS', () => {
+  const styleText = Array.from(document.head.querySelectorAll('style'))
+    .map(s => s.textContent ?? '')
+    .join('\n');
+  expect(styleText).toMatch(/\.log-row:hover \.quick-send-btn\[data-send-popover-open\]/);
+  expect(styleText).toMatch(/\.quick-send-btn\[data-send-panel-match\]/);
+  expect(styleText).toMatch(/row-outline-flash/);
+  expect(styleText).toMatch(/\.quick-filter-btn:focus[^}]*opacity:\s*1\s*!important/s);
+  expect(styleText).toMatch(/\.goto-time-input\s*\{[^}]*color-scheme:\s*var\(--native-scheme\)/s);
+  expect(styleText).toMatch(/\.quick-filter-bar-input\s*\{[^}]*color-scheme:\s*var\(--native-scheme\)/s);
+  expect(styleText).toMatch(/\.marks-pill button:disabled\s*\{[^}]*color-mix/s);
+  expect(styleText).not.toMatch(/\.marks-pill button:disabled\s*\{[^}]*opacity:\s*0\.4/s);
+  // Quick-filter disabled/muted dims via color-mix so focus rings stay full strength.
+  expect(styleText).toMatch(/\.quick-filter-bar--disabled \.quick-filter-bar-input\s*,\s*\.quick-filter-bar-input--muted\s*\{[^}]*color-mix/s);
+  expect(styleText).toMatch(/\.quick-filter-bar--disabled \.quick-filter-bar-toggle\s*,\s*\.quick-filter-bar-toggle--muted\s*\{[^}]*color-mix/s);
+  expect(styleText).not.toMatch(/\.quick-filter-bar--disabled[^{]*\{[^}]*opacity\s*:/s);
+  expect(styleText).toMatch(/\.goto-time-popover\s*\{[^}]*border-radius:\s*10px/s);
+  expect(styleText).toMatch(/\.goto-time-popover\s*\{[^}]*backdrop-filter:\s*var\(--glass-blur\)/s);
+  expect(styleText).toMatch(/\.goto-time-input::-webkit-calendar-picker-indicator\s*\{[^}]*opacity:\s*1/s);
+});
+
+test('scroll-area controls do not keep field focus', () => {
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(3, 1)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+    />,
+  );
+  const scroll = container.querySelector('[data-telegram-scroll]') as HTMLElement;
+  const filterBtn = container.querySelector('.quick-filter-btn') as HTMLButtonElement;
+  expect(scroll).toBeTruthy();
+  expect(filterBtn).toBeTruthy();
+  expect(filterBtn.tabIndex).toBe(-1);
+  fireEvent.mouseDown(filterBtn);
+  expect(filterBtn).not.toHaveFocus();
+  filterBtn.focus();
+  expect(filterBtn).not.toHaveFocus();
+});
+
+test('alt-click on send icon forwards onAltSend', () => {
+  const onAltSend = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(3, 1)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      canSend
+      onAltSend={onAltSend}
+    />,
+  );
+  const sendIcon = container.querySelector('.quick-send-btn') as HTMLElement;
+  expect(sendIcon).toBeTruthy();
+  fireEvent.click(sendIcon, { altKey: true });
+  expect(onAltSend).toHaveBeenCalledTimes(1);
+});
+
+test('sendPanelTopHint marks matching send icon with data-send-panel-match', () => {
+  const telegrams = [
+    makeTelegram({ target_address: '1/2/3', dpt_main: 9, dpt_sub: 1 }),
+    makeTelegram({ target_address: '4/5/6', dpt_main: 1, dpt_sub: 1 }),
+  ];
+  const { container } = render(
+    <TelegramTable
+      telegrams={telegrams}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      canSend
+      sendPanelTopHint={{ address: '1/2/3', dpt: '9.001' }}
+    />,
+  );
+  const matched = container.querySelectorAll('.quick-send-btn[data-send-panel-match]');
+  expect(matched).toHaveLength(1);
+});
