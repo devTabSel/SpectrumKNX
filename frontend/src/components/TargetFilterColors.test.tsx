@@ -107,27 +107,27 @@ test('telegrams to a coloured target are marked in the list', () => {
   setTargetColor('1/2/3', TARGET_COLORS[3]);
   const { container } = renderTable();
 
-  expect(rowOf(container, '1/2/3').style.boxShadow).toContain('inset 4px 0 0 0');
-  expect(rowOf(container, '1/2/3').style.boxShadow).toContain(TARGET_COLORS[3]);
-  expect(rowOf(container, '1/2/4').style.boxShadow).toBe('');
-  expect(rowOf(container, '2/0/1').style.boxShadow).toBe('');
+  expect(rowOf(container, '1/2/3').style.background).toContain(TARGET_COLORS[3]);
+  expect(rowOf(container, '1/2/3').style.boxShadow).toBe('');
+  expect(rowOf(container, '1/2/4').style.background).not.toContain(TARGET_COLORS[3]);
+  expect(rowOf(container, '2/0/1').style.background).not.toContain(TARGET_COLORS[3]);
 });
 
 test('the list follows a colour set while it is shown', () => {
   const { container } = renderTable();
-  expect(rowOf(container, '1/2/4').style.boxShadow).toBe('');
+  expect(rowOf(container, '1/2/4').style.background).not.toContain(TARGET_COLORS[0]);
   act(() => setTargetColor('1/2/4', TARGET_COLORS[0]));
-  expect(rowOf(container, '1/2/4').style.boxShadow).toContain('inset 4px 0 0 0');
+  expect(rowOf(container, '1/2/4').style.background).toContain(TARGET_COLORS[0]);
 });
 
 test('a colour only marks rows while its address is in the target filter', () => {
   setTargetColor('1/2/3', TARGET_COLORS[0]);
   const { container } = renderTable({ ...DEFAULT_FILTERS, targets: ['1/2/4'] });
-  expect(rowOf(container, '1/2/3').style.boxShadow).toBe('');
+  expect(rowOf(container, '1/2/3').style.background).not.toContain(TARGET_COLORS[0]);
 });
 
 test('a switched-off filter keeps marking its rows', () => {
   setTargetColor('1/2/3', TARGET_COLORS[0]);
   const { container } = renderTable({ ...FILTERS, disabled: ['targets:1/2/3'] });
-  expect(rowOf(container, '1/2/3').style.boxShadow).toContain('inset 4px 0 0 0');
+  expect(rowOf(container, '1/2/3').style.background).toContain(TARGET_COLORS[0]);
 });

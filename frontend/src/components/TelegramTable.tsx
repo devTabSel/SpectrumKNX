@@ -2,24 +2,62 @@ import React, { Fragment, useMemo, useRef, useEffect, useLayoutEffect, useState,
 import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
-import { ChevronUp, ChevronDown, Filter, LineChart, ListFilter, X, Clock, Info, Power, Circle, CircleDot, Download } from 'lucide-react';
-import { dptKey, type ActiveFilters } from '../types/filters';
+import { ChevronUp, ChevronDown, Filter, LineChart, X, Clock, Circle, PlusCircle, Download, List, Search } from 'lucide-react';
+import { effectiveDeltaContext, type ActiveFilters } from '../types/filters';
+import { contextRailSigns } from '../utils/deltaContextExpansion';
 import { SendToGaPopover } from './SendToGaPopover';
 import { GotoTimeControl } from './GotoTimeControl';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
-import { compileQuickFilters, type QuickCellValue, type QuickPatterns } from '../utils/quickFilter';
+import {
+  compileQuickFilters,
+  DEFAULT_QUICK_FILTER_COLUMN_ENABLED,
+  type QuickCellValue,
+  type QuickPatterns,
+  type QuickFilterColumnEnabled,
+} from '../utils/quickFilter';
 import { useTargetColors } from '../utils/targetColors';
 import { anchorKey } from '../utils/anchorKey';
 import { downloadTelegramsCsv } from '../utils/telegramCsv';
 import { adjacentMark } from '../utils/adjacentMark';
+import { forceIncludeKeys } from '../utils/forceIncludeKeys';
 import { peakRate } from '../utils/peakRate';
 import { moveColumn, readColumnOrderPref, writeColumnOrderPref } from '../utils/columnOrder';
+import { dptDescriptionLabel, dptKeyLabel } from '../utils/dpt';
+import {
+  actionableMarkedKeysFrom,
+  addMarkReason,
+  clearHiddenReasons,
+  clearNonHiddenReasons,
+  hasMarkReason,
+  hiddenKeysFrom,
+  markedKeysFrom,
+  removeMarkReason,
+  setSoleMarkReason,
+  syncAutoMarkReason,
+  syncContextMarkReasons,
+  toggleMarkReason,
+  visibleMarkedKeysFrom,
+  type MarkReasonsMap,
+} from '../utils/markReasons';
+import {
+  clearAllMarkColorIndices,
+  getMarkColorIndex,
+  markColorFromIndex,
+  nextMarkColorIndex,
+  setMarkColorIndex,
+  type MarkColorIndexMap,
+} from '../utils/markColors';
 
 export type { SortKey, SortLevel, SortConfig };
 
 interface TelegramTableProps {
   telegrams: Telegram[];
+  /**
+   * Full (unfiltered) buffer used to force-include marked/selected rows that
+   * the parent already dropped. Defaults to `telegrams`.
+   */
+  forceIncludeFrom?: Telegram[];
   visibleColumns: { [key: string]: boolean };
   sortConfig: SortConfig;
   /** `additive` (ctrl/cmd-click) adds/toggles a sort level instead of replacing the whole config (#311). */
@@ -70,8 +108,11 @@ interface TelegramTableProps {
 
   // Lifted row marks (#310): keys of marked telegrams + the most-recently
   // clicked one. Lifted so marks survive main-panel navigation.
-  markedKeys?: string[];
-  onMarkedKeysChange?: (keys: string[]) => void;
+  markReasons?: MarkReasonsMap;
+  onMarkReasonsChange?: (reasons: MarkReasonsMap) => void;
+  /** Per-row colour index into MARK_COLOR_PALETTE (parallel to mark reasons). */
+  markColorIndices?: MarkColorIndexMap;
+  onMarkColorIndicesChange?: (indices: MarkColorIndexMap) => void;
   lastMarkedKey?: string | null;
   onLastMarkedKeyChange?: (key: string | null) => void;
 
@@ -88,15 +129,33 @@ interface TelegramTableProps {
   contextForAllMatches?: boolean;
   onContextForAllMatchesChange?: (all: boolean) => void;
 
-  /** Keys (via the same anchor identity) of rows present only as unfiltered
-   * Time-Delta-Context around a match/flag, not because they matched the
-   * active filters themselves — marked with a distinct background (#343). */
+  /** Keys of visible rows that do not match the active filters (context
+   * classification). Independent of per-row context flags — flagging only
+   * anchors a window, it does not clear this membership (#343). */
   contextKeys?: ReadonlySet<string>;
 
   /** Center this telegram in the visible list. `id` changes on every request
    * so repeating the same telegram jumps again. The row is marked only when
    * that exact telegram is still in the filtered list. */
   gotoRequest?: ListGotoRequest | null;
+
+  /**
+   * Bumped by the parent when an outside action changes what the list shows
+   * (e.g. main filter on/off or filter edits). Each bump pins + flashes the
+   * preferred row (last selected → first selected → top).
+   */
+  viewChangeToken?: number;
+
+  /** Switches the Focus panel to Devices (`pa`) or Group Addresses (`ga`). */
+  onFocusCategorySelect?: (category: 'ga' | 'pa') => void;
+  /** Addresses flagged for the Telegram List in the Focus panel. */
+  focusListAddresses?: string[];
+  sourceFocusOnly?: boolean;
+  onSourceFocusOnlyChange?: (enabled: boolean) => void;
+  targetFocusOnly?: boolean;
+  onTargetFocusOnlyChange?: (enabled: boolean) => void;
+  /** Disables the source/target focus filter toggles (Focus panel reset). */
+  focusFilterDisabled?: boolean;
 }
 
 export interface ListGotoRequest {
@@ -131,6 +190,16 @@ const COLUMNS: ColumnDef[] = [
 
 const COLUMN_WIDTHS_PREF = 'columnWidths';
 
+// Fixed width of the left-edge icon rail, shared by quickinfo/header/quickfilter/rows.
+// Wide enough for the centred colour swatch (14px) in the middle third.
+const RAIL_WIDTH = '1.25rem';
+const RAIL_COLOR_SWATCH_SIZE = 14;
+// Mouse-selection washes: stronger for the last selected row.
+const MOUSE_LATEST_WASH = 'color-mix(in srgb, var(--accent-primary) 34%, transparent)';
+const MOUSE_SELECTED_WASH = 'color-mix(in srgb, var(--accent-primary) 16%, transparent)';
+// Soft Time-Delta-Context row wash — also the rail when a context mark is highlighted.
+const CONTEXT_WASH = 'color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent)';
+
 // Keys that scroll a list. Modifiers must not count: ctrl-click on a toolbar
 // button is not the user scrolling (#435).
 const SCROLL_KEYS = new Set(['PageUp', 'PageDown', 'Home', 'End', 'ArrowUp', 'ArrowDown', ' ']);
@@ -159,13 +228,23 @@ const getDPTLabel = (dpt_main: number | null) => {
   return 'Unknown DPT';
 };
 
-type TelegramRow = Telegram & { deltaStr: string | null; deltaMs: number | null };
+const SOURCE_NAME_TEXT_STYLE: React.CSSProperties = {
+  fontSize: '0.7rem',
+  color: 'var(--text-main)',
+  fontWeight: 500,
+  marginTop: '0.15rem',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+};
 
-const formatDeltaMs = (diffMs: number): string => {
+type TelegramRow = Telegram & { deltaStr: string | null; deltaNextStr: string | null; deltaMs: number | null };
+
+const formatDeltaMs = (diffMs: number, sign: '+' | '-'): string => {
   const mm = String(Math.floor(diffMs / 60000)).padStart(2, '0');
   const ss = String(Math.floor((diffMs % 60000) / 1000)).padStart(2, '0');
   const ms = String(diffMs % 1000).padStart(3, '0');
-  return `+ ${mm}:${ss}.${ms}`;
+  return `${sign} ${mm}:${ss}.${ms}`;
 };
 
 const cellPadding = '0.75rem 1rem'; // Unified padding for all cells
@@ -183,6 +262,11 @@ const REVEAL_MAX = 8;
 /** Visual scrollbar track width (matches header paddingRight / index.css). */
 const LIST_SB_WIDTH_PX = 8;
 const LIST_SB_MIN_THUMB_PX = 20;
+// Floating edge pills (newer / marks): inset from the live edge, then half a
+// single-line pill height so 1- and 2-line marks stay on the same center as newer.
+const EDGE_PILL_INSET = '1rem';
+const EDGE_PILL_HALF = '0.85rem';
+const EDGE_PILL_CENTER = `calc(${EDGE_PILL_INSET} + ${EDGE_PILL_HALF})`;
 
 function timeMs(timestamp: string): number {
   return new Date(timestamp).getTime();
@@ -222,19 +306,41 @@ function countNewerThan(rows: { timestamp: string }[], newestMs: number, ascendi
 
 
 export const TelegramTable: React.FC<TelegramTableProps> = ({
-  telegrams, visibleColumns, sortConfig, onSort, activeFilters, onQuickFilter, onQuickVisualize, onQuickLastSeen, canSend,
+  telegrams, forceIncludeFrom, visibleColumns, sortConfig, onSort, activeFilters, onQuickFilter, onQuickVisualize, onQuickLastSeen, canSend,
   quickFilterOpen, onQuickFilterOpenChange, quickFilterEnabled, onQuickFilterEnabledChange, quickPatterns, onQuickPatternsChange,
-  onDeltaContextChange, onDeltaContextEnabledChange,
+  onDeltaContextChange,
+  onDeltaContextEnabledChange,
   listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
   isPaused = false, isManualPause = false, pausedCount = 0, onPauseFlush, onPauseReveal, onJumpToLive,
-  markedKeys, onMarkedKeysChange, lastMarkedKey, onLastMarkedKeyChange,
+  markReasons: markReasonsProp, onMarkReasonsChange,
+  markColorIndices: markColorIndicesProp, onMarkColorIndicesChange,
+  lastMarkedKey, onLastMarkedKeyChange,
   infoBarOpen, onInfoBarOpenChange,
   flaggedKeys, onFlaggedKeysChange,
   contextForAllMatches, onContextForAllMatchesChange,
   contextKeys,
   gotoRequest,
+  viewChangeToken,
+  onFocusCategorySelect,
+  focusListAddresses,
+  sourceFocusOnly: sourceFocusOnlyProp,
+  onSourceFocusOnlyChange,
+  targetFocusOnly: targetFocusOnlyProp,
+  onTargetFocusOnlyChange,
+  focusFilterDisabled = false,
 }) => {
   const parentRef = useRef<HTMLDivElement>(null);
+  /** Inner virtualizer canvas — used for clamped-pin settle transforms. */
+  const listContentRef = useRef<HTMLDivElement>(null);
+  // Bumped by display-changing actions; layout effect restores the pending pin.
+  const [displayPinNonce, setDisplayPinNonce] = useState(0);
+  /** Viewport snapshot taken before a display change (key + offset from list top). */
+  const pendingDisplayPinRef = useRef<{ key: string; offset: number } | null>(null);
+  /** Last known viewport offset of the preferred selection (survives App-driven refilters). */
+  const lastKnownPreferredPinRef = useRef<{ key: string; offset: number } | null>(null);
+  /** Skip destructive refilter handling in the list-update layout effect once. */
+  const suppressListRefilterEffectRef = useRef(false);
+  const requestDisplayPinRef = useRef<() => void>(() => {});
 
   // ── Column widths (persisted, shared across live & history views) ──
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() => {
@@ -342,15 +448,77 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     onQuickPatternsChange?.(next);
   }, [currentPatterns, onQuickPatternsChange]);
 
+  const [quickColumnEnabled, setQuickColumnEnabled] = useState<QuickFilterColumnEnabled>(
+    () => ({ ...DEFAULT_QUICK_FILTER_COLUMN_ENABLED }),
+  );
+
   /** Updates one row (top/bottom) of a quick-filter cell, preserving the other row. */
+  const patternPinTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setQuickCell = useCallback((id: ColId, row: 'top' | 'bottom', text: string) => {
     setQuickPatterns(prev => ({ ...prev, [id]: { ...(prev[id] ?? EMPTY_CELL), [row]: text } }));
+    // Debounce pin/flash while typing so each keystroke does not thrash the list.
+    if (patternPinTimerRef.current) clearTimeout(patternPinTimerRef.current);
+    patternPinTimerRef.current = setTimeout(() => requestDisplayPinRef.current(), 250);
   }, [setQuickPatterns]);
+
+  const clearQuickColumnInputs = useCallback((id: ColId) => {
+    if (id === 'delta') {
+      onDeltaContextChange?.(0, 0);
+      return;
+    }
+    setQuickPatterns(prev => {
+      if (!(id in prev)) return prev;
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+  }, [onDeltaContextChange, setQuickPatterns]);
+
+  const clearAllQuickInputs = useCallback(() => {
+    setQuickPatterns({});
+    onDeltaContextChange?.(0, 0);
+  }, [onDeltaContextChange, setQuickPatterns]);
+
+  const isQuickColumnEnabled = useCallback(
+    (id: ColId) => quickColumnEnabled[id] !== false,
+    [quickColumnEnabled],
+  );
+
+  const toggleQuickColumnEnabled = useCallback((id: ColId) => {
+    setQuickColumnEnabled(prev => ({ ...prev, [id]: prev[id] === false }));
+  }, []);
+
+  const handleQuickColumnToggleClick = useCallback((e: React.MouseEvent, id: ColId) => {
+    if (e.ctrlKey || e.metaKey) {
+      // DELTA: ctrl toggles the Time-Delta-Context window without clearing values (#318).
+      if (id === 'delta') {
+        onDeltaContextEnabledChange?.(!activeFilters.deltaContextEnabled);
+        requestDisplayPinRef.current();
+        return;
+      }
+      clearQuickColumnInputs(id);
+      requestDisplayPinRef.current();
+      return;
+    }
+    toggleQuickColumnEnabled(id);
+    requestDisplayPinRef.current();
+  }, [clearQuickColumnInputs, toggleQuickColumnEnabled, onDeltaContextEnabledChange, activeFilters.deltaContextEnabled]);
+
+  const handleQuickEnabledToggleClick = useCallback((e: React.MouseEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+      clearAllQuickInputs();
+      requestDisplayPinRef.current();
+      return;
+    }
+    setQuickEnabled(prev => !prev);
+    requestDisplayPinRef.current();
+  }, [clearAllQuickInputs, setQuickEnabled]);
 
   const toggleQuickOpen = () => {
     const nextOpen = !quickOpen;
     setQuickOpen(nextOpen);
     setQuickEnabled(nextOpen);
+    requestDisplayPinRef.current();
   };
 
   // ── Quick info bar (#311): collapsible summary row above the header. ──────
@@ -361,40 +529,177 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     setInternalInfoBarOpen(next);
     onInfoBarOpenChange?.(next);
   }, [infoOpen, onInfoBarOpenChange]);
+  const showInfoBarToggle = !infoOpen;
+
+  // ── Focus filter toggles (header SOURCE/TARGET) ───────────────────────────
+  const [internalSourceFocusOnly, setInternalSourceFocusOnly] = useState(
+    () => getPref('telegramTable.sourceFocusOnly') === '1',
+  );
+  const [internalTargetFocusOnly, setInternalTargetFocusOnly] = useState(
+    () => getPref('telegramTable.targetFocusOnly') === '1',
+  );
+  const sourceFocusOnly = sourceFocusOnlyProp ?? internalSourceFocusOnly;
+  const targetFocusOnly = targetFocusOnlyProp ?? internalTargetFocusOnly;
+  const setSourceFocusOnly = useCallback((next: boolean) => {
+    if (onSourceFocusOnlyChange) onSourceFocusOnlyChange(next);
+    else setInternalSourceFocusOnly(next);
+  }, [onSourceFocusOnlyChange]);
+  const setTargetFocusOnly = useCallback((next: boolean) => {
+    if (onTargetFocusOnlyChange) onTargetFocusOnlyChange(next);
+    else setInternalTargetFocusOnly(next);
+  }, [onTargetFocusOnlyChange]);
+  useEffect(() => {
+    setPref('telegramTable.sourceFocusOnly', sourceFocusOnly ? '1' : '0');
+  }, [sourceFocusOnly]);
+  useEffect(() => {
+    setPref('telegramTable.targetFocusOnly', targetFocusOnly ? '1' : '0');
+  }, [targetFocusOnly]);
+
+  // ── Hide repeated values when a non-time column is sorted (alt-click) ─────
+  const [hideRepeatedOverrides, setHideRepeatedOverrides] = useState<Partial<Record<ColId, boolean>>>({});
+  const isHideRepeatedWhenSortedEnabled = useCallback((id: ColId): boolean => {
+    const override = hideRepeatedOverrides[id];
+    if (override !== undefined) return override;
+    return true;
+  }, [hideRepeatedOverrides]);
+  const toggleHideRepeatedWhenSortedForColumn = useCallback((id: ColId) => {
+    if (id === 'time' || id === 'delta') return;
+    setHideRepeatedOverrides(prev => {
+      const current = prev[id] ?? true;
+      return { ...prev, [id]: !current };
+    });
+  }, []);
 
   // ── Row marks (#310) ─────────────────────────────────────────────────────
   // Controlled when App lifts them (so marks survive navigation), otherwise a
-  // local fallback. `lastMarkedKey` may legitimately be null, so distinguish
+  // local fallback. Keys carry one or more MarkReasons (mouse / goto /
+  // context / manual). `lastMarkedKey` may legitimately be null, so distinguish
   // "not lifted" (undefined) from "lifted, nothing last" (null).
-  const [internalMarkedKeys, setInternalMarkedKeys] = useState<string[]>([]);
+  const [internalMarkReasons, setInternalMarkReasons] = useState<MarkReasonsMap>({});
   const [internalLastMarkedKey, setInternalLastMarkedKey] = useState<string | null>(null);
 
-  const markedKeysList = markedKeys ?? internalMarkedKeys;
-  const setMarkedKeysList = useCallback((val: string[]) => {
-    setInternalMarkedKeys(val);
-    onMarkedKeysChange?.(val);
-  }, [onMarkedKeysChange]);
+  const markReasons = markReasonsProp ?? internalMarkReasons;
+  const markReasonsRef = useRef(markReasons);
+  markReasonsRef.current = markReasons;
+  const setMarkReasons = useCallback((val: MarkReasonsMap | ((prev: MarkReasonsMap) => MarkReasonsMap)) => {
+    const prev = markReasonsRef.current;
+    const next = typeof val === 'function' ? val(prev) : val;
+    if (next === prev) return;
+    markReasonsRef.current = next;
+    setInternalMarkReasons(next);
+    onMarkReasonsChange?.(next);
+  }, [onMarkReasonsChange]);
+
+  const [internalMarkColorIndices, setInternalMarkColorIndices] = useState<MarkColorIndexMap>({});
+  const markColorIndices = markColorIndicesProp ?? internalMarkColorIndices;
+  const markColorIndicesRef = useRef(markColorIndices);
+  markColorIndicesRef.current = markColorIndices;
+  const setMarkColorIndices = useCallback((val: MarkColorIndexMap | ((prev: MarkColorIndexMap) => MarkColorIndexMap)) => {
+    const prev = markColorIndicesRef.current;
+    const next = typeof val === 'function' ? val(prev) : val;
+    if (next === prev) return;
+    markColorIndicesRef.current = next;
+    setInternalMarkColorIndices(next);
+    onMarkColorIndicesChange?.(next);
+  }, [onMarkColorIndicesChange]);
 
   const lastMarked = lastMarkedKey !== undefined ? lastMarkedKey : internalLastMarkedKey;
+  const lastMarkedRef = useRef(lastMarked);
+  lastMarkedRef.current = lastMarked;
   const setLastMarked = useCallback((val: string | null) => {
     setInternalLastMarkedKey(val);
     onLastMarkedKeyChange?.(val);
   }, [onLastMarkedKeyChange]);
 
+  // `auto` mark on the latest selected row; cleared when latest moves away
+  // unless the user promoted it to `manual` via the rail. Colour stays.
+  const syncAutoForLatest = useCallback((
+    map: MarkReasonsMap,
+    newLatest: string | null,
+  ): MarkReasonsMap => syncAutoMarkReason(map, newLatest), []);
+
+  const markedKeysList = useMemo(() => markedKeysFrom(markReasons), [markReasons]);
+  // Mouse-selected keys — rail colour / mark / context actions apply to this set
+  // when the clicked row is part of the selection.
+  const mouseSelectedKeys = useMemo(
+    () => Object.keys(markReasons).filter(k => hasMarkReason(markReasons, k, 'mouse')),
+    [markReasons],
+  );
+  const targetsForSelectionAction = useCallback((key: string) => {
+    if (mouseSelectedKeys.includes(key)) return new Set(mouseSelectedKeys);
+    return new Set([key]);
+  }, [mouseSelectedKeys]);
+  const actionableMarkedKeys = useMemo(
+    () => actionableMarkedKeysFrom(markReasons),
+    [markReasons],
+  );
+  const visibleMarkedKeys = useMemo(
+    () => visibleMarkedKeysFrom(markReasons),
+    [markReasons],
+  );
+  const hiddenMarkedKeys = useMemo(
+    () => hiddenKeysFrom(markReasons),
+    [markReasons],
+  );
   const markedSet = useMemo(() => new Set(markedKeysList), [markedKeysList]);
+  const actionableMarkedSet = useMemo(
+    () => new Set(actionableMarkedKeys),
+    [actionableMarkedKeys],
+  );
+  const visibleMarkedSet = useMemo(() => new Set(visibleMarkedKeys), [visibleMarkedKeys]);
+  const hiddenMarkedSet = useMemo(() => new Set(hiddenMarkedKeys), [hiddenMarkedKeys]);
+  // Two-line pill: one nav button per row; single-line keeps prev+next.
+  const twoLineMarksPill = actionableMarkedKeys.length > 0 && hiddenMarkedKeys.length > 0;
   // Row the prev/next-mark jumps continue from (#442); null after a user scroll.
   const markCursorRef = useRef<string | null>(null);
+  // Plain mousedrag is text selection: record pointer down so click can skip
+  // marking when the pointer moved (a mark re-render would wipe the selection).
+  const markPointerRef = useRef<{ x: number; y: number } | null>(null);
   // The selected row for scroll anchoring (#435): the last-clicked one, as long
   // as it is still marked. A ref, because scroll handlers read it outside render.
   const selectedKeyRef = useRef<string | null>(null);
   useLayoutEffect(() => {
-    selectedKeyRef.current = lastMarked && markedSet.has(lastMarked) ? lastMarked : null;
-  }, [lastMarked, markedSet]);
+    selectedKeyRef.current = lastMarked && visibleMarkedSet.has(lastMarked) ? lastMarked : null;
+  }, [lastMarked, visibleMarkedSet]);
 
+  // Context keys dismissed by Clear — stay unmarked until they leave the
+  // soft context window (then a later re-entry can sync again).
+  const dismissedContextKeysRef = useRef<Set<string>>(new Set());
+
+  // Clear visible marks; keep `hidden`. Soft context is dismissed until the window changes.
   const clearMarks = useCallback(() => {
-    setMarkedKeysList([]);
+    if (contextKeys) {
+      for (const k of contextKeys) dismissedContextKeysRef.current.add(k);
+    }
+    setMarkReasons(prev => clearNonHiddenReasons(prev));
+    setMarkColorIndices(clearAllMarkColorIndices);
     setLastMarked(null);
-  }, [setMarkedKeysList, setLastMarked]);
+    requestDisplayPinRef.current();
+  }, [setMarkReasons, setMarkColorIndices, setLastMarked, contextKeys]);
+
+  const clearHidden = useCallback(() => {
+    setMarkReasons(prev => clearHiddenReasons(prev));
+    requestDisplayPinRef.current();
+  }, [setMarkReasons]);
+
+  // Keep `context` reasons in sync with the soft context window (#319),
+  // skipping keys the user cleared via the marks pill.
+  useEffect(() => {
+    const dismissed = dismissedContextKeysRef.current;
+    for (const k of [...dismissed]) {
+      if (!contextKeys?.has(k)) dismissed.delete(k);
+    }
+    const syncKeys = new Set<string>();
+    if (contextKeys) {
+      for (const k of contextKeys) {
+        if (!dismissed.has(k)) syncKeys.add(k);
+      }
+    }
+    setMarkReasons(prev => {
+      const next = syncContextMarkReasons(prev, syncKeys);
+      return next === prev ? prev : next;
+    });
+  }, [contextKeys, setMarkReasons]);
 
   // ── Per-message Time-Delta-Context flags (#319) ─────────────────────────
   const [internalFlaggedKeys, setInternalFlaggedKeys] = useState<string[]>([]);
@@ -430,55 +735,86 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     [flaggedSet, contextForAll, contextKeys]
   );
 
-  // Toggles one row's flag; ctrl/cmd-click applies the new state to every
-  // currently marked row too (#310's marks, reused as a multi-select basis).
-  // Switching a row off while "all" is on leaves that state: the other rows
-  // keep their window as explicit flags.
-  const handleFlagClick = useCallback((e: React.MouseEvent, key: string) => {
-    e.stopPropagation();
-    const nextOn = !anchorsContext(key);
-    const targets = (e.ctrlKey || e.metaKey) ? new Set([...markedKeysList, key]) : new Set([key]);
-    if (nextOn) {
-      setFlaggedKeysList([...new Set([...flaggedKeysList, ...targets])]);
-      return;
-    }
-    const current = contextForAll
-      ? [...new Set([...flaggedKeysList, ...telegrams.map(anchorKey).filter(k => !contextKeys?.has(k))])]
-      : flaggedKeysList;
-    if (contextForAll) setContextForAll(false);
-    setFlaggedKeysList(current.filter(k => !targets.has(k)));
-  }, [anchorsContext, flaggedKeysList, markedKeysList, setFlaggedKeysList, contextForAll, setContextForAll, telegrams, contextKeys]);
+  const { before: deltaBeforeMs, after: deltaAfterMs } = effectiveDeltaContext(activeFilters);
+
+  // Focus filter runs before quick-filter once the parent supplies a focus list.
+  // Without `focusListAddresses` the header toggles stay visual-only (no Focus
+  // panel wired yet). An empty list means no matches.
+  const focusFilteringActive =
+    (sourceFocusOnly || targetFocusOnly) && !focusFilterDisabled && focusListAddresses != null;
+  const focusFilteredRows = useMemo(() => {
+    if (!focusFilteringActive) return telegrams;
+    const focusListSet = new Set(focusListAddresses);
+    return telegrams.filter(t =>
+      (!sourceFocusOnly || focusListSet.has(t.source_address)) &&
+      (!targetFocusOnly || focusListSet.has(t.target_address)),
+    );
+  }, [telegrams, focusFilteringActive, focusListAddresses, sourceFocusOnly, targetFocusOnly]);
 
   // Context rows and flagged anchors are already the result of the
   // Time-Delta-Context expansion, which the parent runs on quick-filter
   // matches too. Filtering them here again would drop the context (#520).
+  // Visible marks (≠ hidden) are always kept; `hidden` marks are always dropped.
+  // Prefer `forceIncludeFrom` (full buffer) so marks survive even when the parent
+  // already dropped them from `telegrams`.
   const quickFiltered = useMemo(() => {
-    if (!quickOpen || !quickEnabled) return telegrams;
-    const matches = compileQuickFilters(currentPatterns);
-    const flagsActive = activeFilters.deltaContextEnabled;
-    return telegrams.filter(t => {
-      if (matches(t)) return true;
-      const key = anchorKey(t);
-      return !!contextKeys?.has(key) || (flagsActive && flaggedSet.has(key));
-    });
-  }, [telegrams, quickOpen, quickEnabled, currentPatterns, contextKeys, flaggedSet, activeFilters.deltaContextEnabled]);
+    let list = focusFilteredRows;
+    if (quickOpen && quickEnabled) {
+      const matches = compileQuickFilters(currentPatterns, quickColumnEnabled);
+      const flagsActive = activeFilters.deltaContextEnabled;
+      list = focusFilteredRows.filter(t => {
+        if (matches(t)) return true;
+        const key = anchorKey(t);
+        return !!contextKeys?.has(key) || (flagsActive && flaggedSet.has(key));
+      });
+    }
+    list = list.filter(t => !hiddenMarkedSet.has(anchorKey(t)));
+    const pool = forceIncludeFrom ?? telegrams;
+    return forceIncludeKeys(pool, list, anchorKey, visibleMarkedSet)
+      .filter(t => !hiddenMarkedSet.has(anchorKey(t)));
+  }, [telegrams, forceIncludeFrom, focusFilteredRows, quickOpen, quickEnabled, currentPatterns, quickColumnEnabled, contextKeys, flaggedSet, activeFilters.deltaContextEnabled, hiddenMarkedSet, visibleMarkedSet]);
+
+  const timeSortDirection: 'asc' | 'desc' | null =
+    sortConfig[0]?.key === 'timestamp' ? sortConfig[0].direction : null;
 
   // Time deltas between consecutive rows, by visual (sorted) order — always
   // computed regardless of sort column, respecting whatever hierarchy is
-  // active (#311).
+  // active (#311). Top row = gap to previous, bottom = gap to next.
   const naturalTelegramRows = useMemo<TelegramRow[]>(() => {
+    if (quickFiltered.length === 0) return [];
+    const timestamps = quickFiltered.map(t => new Date(t.timestamp).getTime());
+    const minTs = Math.min(...timestamps);
+    const maxTs = Math.max(...timestamps);
+
     return quickFiltered.map((t, idx) => {
       let deltaStr: string | null = null;
+      let deltaNextStr: string | null = null;
       let deltaMs: number | null = null;
+      const currTs = timestamps[idx];
+      const hasOlderInList = currTs > minTs;
+      const hasYoungerInList = currTs < maxTs;
       if (idx > 0) {
-        const curr = new Date(t.timestamp).getTime();
-        const prev = new Date(quickFiltered[idx - 1].timestamp).getTime();
-        deltaMs = Math.abs(curr - prev);
-        deltaStr = formatDeltaMs(deltaMs);
+        const prev = timestamps[idx - 1];
+        const rawDiff = currTs - prev;
+        deltaMs = Math.abs(rawDiff);
+        const sign: '+' | '-' = timeSortDirection
+          ? (timeSortDirection === 'asc' ? '+' : '-')
+          : (rawDiff >= 0 ? '+' : '-');
+        const hasRequiredNeighbor = sign === '+' ? hasOlderInList : hasYoungerInList;
+        deltaStr = hasRequiredNeighbor ? formatDeltaMs(deltaMs, sign) : null;
       }
-      return { ...t, deltaStr, deltaMs };
+      if (idx < quickFiltered.length - 1) {
+        const next = timestamps[idx + 1];
+        const rawDiffToNext = next - currTs;
+        const nextSign: '+' | '-' = timeSortDirection
+          ? (timeSortDirection === 'asc' ? '-' : '+')
+          : (rawDiffToNext >= 0 ? '-' : '+');
+        const hasRequiredNeighbor = nextSign === '+' ? hasOlderInList : hasYoungerInList;
+        deltaNextStr = hasRequiredNeighbor ? formatDeltaMs(Math.abs(rawDiffToNext), nextSign) : null;
+      }
+      return { ...t, deltaStr, deltaNextStr, deltaMs };
     });
-  }, [quickFiltered]);
+  }, [quickFiltered, timeSortDirection]);
 
   // ── Delta-sort exclusive mode (#311) ────────────────────────────────────────
   // Sorting by the Δt column is a self-referential operation (deltas are
@@ -513,6 +849,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       setDeltaSortDirection(nextDir);
       setDeltaFrozenRows(prev => (prev ? sortByDelta(prev, nextDir) : prev));
     }
+    requestDisplayPinRef.current();
   }, [deltaSortActive, deltaSortDirection, naturalTelegramRows, sortByDelta, listFollow, onListFollowChange]);
 
   const exitDeltaSort = useCallback(() => {
@@ -526,6 +863,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   }, [deltaSortActive, onListFollowChange]);
 
   // A real column header click always exits delta-sort before applying its own sort.
+  // The sortConfig effect pins + flashes once the new order is committed.
   const handleColumnSort = useCallback((key: SortKey, opts?: { additive?: boolean }) => {
     exitDeltaSort();
     onSort(key, opts);
@@ -533,12 +871,24 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   const telegramRows = deltaSortActive && deltaFrozenRows ? deltaFrozenRows : naturalTelegramRows;
 
+  // Timestamps of rows that currently anchor a context window (active context
+  // button / all-matches). Used for ∧/∨ rail signs on context-only rows.
+  const contextAnchorTimestamps = useMemo(() => {
+    if (!contextKeys?.size || (deltaBeforeMs <= 0 && deltaAfterMs <= 0)) return [] as number[];
+    const out: number[] = [];
+    for (const t of telegramRows) {
+      if (anchorsContext(anchorKey(t))) out.push(new Date(t.timestamp).getTime());
+    }
+    return out;
+  }, [telegramRows, contextKeys, anchorsContext, deltaBeforeMs, deltaAfterMs]);
+
   // ── Global Time-Delta-Context tristate (#318, #319) ─────────────────────────
   // "all": every filter match anchors a window, including telegrams still to
   // arrive. Otherwise it reflects the per-message flags among the visible
   // rows: "some" or "none". Plain click switches none -> all and some/all ->
-  // none, overriding the per-message flags; ctrl/cmd-click instead toggles the
-  // window fully on/off (#318), preserving flags and values.
+  // none, overriding the per-message flags. Ctrl/cmd-click on mixed ("some")
+  // promotes to all; on "all" with unflagged visible context rows, flags those
+  // context rows so their buttons are set too. Never toggles the window on/off.
   const deltaFlagState: 'none' | 'some' | 'all' = useMemo(() => {
     if (contextForAll) return 'all';
     if (flaggedSet.size === 0) return 'none';
@@ -547,12 +897,35 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   const handleDeltaToggleClick = useCallback((e: React.MouseEvent) => {
     if (e.ctrlKey || e.metaKey) {
-      onDeltaContextEnabledChange?.(!activeFilters.deltaContextEnabled);
+      if (deltaFlagState === 'some') {
+        setContextForAll(true);
+        setFlaggedKeysList([]);
+        requestDisplayPinRef.current();
+        return;
+      }
+      if (deltaFlagState === 'all' && contextKeys?.size) {
+        const unflaggedContext = telegramRows
+          .map(t => anchorKey(t))
+          .filter(k => contextKeys.has(k) && !flaggedSet.has(k));
+        if (unflaggedContext.length > 0) {
+          setFlaggedKeysList([...new Set([...flaggedKeysList, ...unflaggedContext])]);
+          requestDisplayPinRef.current();
+        }
+      }
       return;
     }
     setContextForAll(deltaFlagState === 'none');
     setFlaggedKeysList([]);
-  }, [deltaFlagState, activeFilters.deltaContextEnabled, onDeltaContextEnabledChange, setFlaggedKeysList, setContextForAll]);
+    requestDisplayPinRef.current();
+  }, [
+    deltaFlagState,
+    setFlaggedKeysList,
+    setContextForAll,
+    contextKeys,
+    telegramRows,
+    flaggedSet,
+    flaggedKeysList,
+  ]);
 
   // ── Quick info bar metrics (#311) ───────────────────────────────────────────
   // Summarizes the currently visible (sorted + filtered) rows; oldest/newest
@@ -667,7 +1040,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     paddingEnd: liveEdge === 'bottom' ? fillRubberPx : 0,
     getItemKey: (index) => {
       const t = telegramRows[index];
-      return `${t.timestamp}-${t.source_address}-${t.target_address}-${t.raw_hex || index}`;
+      // Match `anchorKey` — falsy `raw_hex` must not fall back to index or
+      // filter/reorders recycle the wrong virtual row identity.
+      return anchorKey(t);
     },
   });
 
@@ -789,6 +1164,24 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // Set while pinAnchor is bringing back an anchor that left the virtualized
   // window; the scrolls that causes are ours, not the user's.
   const refindingAnchorRef = useRef(false);
+  // After an action pins a row: keep it still via instant scroll when possible.
+  // Only if the scroll edge clamps (row must move) do we ease that visual shift.
+  const animateNextPinRef = useRef(false);
+  const pinAnimRafRef = useRef(0);
+  useEffect(() => () => {
+    if (pinAnimRafRef.current) cancelAnimationFrame(pinAnimRafRef.current);
+    if (listContentRef.current) listContentRef.current.style.transform = '';
+  }, []);
+
+  // Temporary inner-border flash on a row (scheme-aware via --row-flash-border).
+  // Clearing first then re-setting restarts the CSS animation for the same key.
+  const [rowFlash, setRowFlash] = useState<{ key: string; gen: number } | null>(null);
+  const flashRow = useCallback((key: string) => {
+    setRowFlash(null);
+    requestAnimationFrame(() => {
+      setRowFlash(prev => ({ key, gen: (prev?.gen ?? 0) + 1 }));
+    });
+  }, []);
   // Zebra stripes must stay with a telegram, not with a row index (#266):
   // prepends at the live edge shift every index by the number of new rows, so
   // this offset accumulates those shifts and is added back to the index parity.
@@ -1442,6 +1835,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     } else {
       unlockScrollGeometryIfSettled();
     }
+    // Keep a viewport snapshot of the preferred selection for App-driven refilters.
+    const pref = lastMarkedRef.current;
+    if (pref) {
+      const o = rowOffset(pref);
+      if (o != null) lastKnownPreferredPinRef.current = { key: pref, offset: o };
+    }
     if (inFillRubberBand() || inOppositeRubberZone()) scheduleRubberBand();
     if (inFillRubberZone() && backlogFeedActive()) {
       // The empty fill slot is on screen with a backlog waiting: fill it.
@@ -1477,54 +1876,325 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     captureAnchor();
   };
 
-  // Clicking a row (a) marks it (#310) and (b) pauses live-following just like
-  // scrolling away (#266) — the row being read must not move. The jump-to-live
-  // pill is the way back.
-  const handleRowClick = (e: React.MouseEvent, key: string, index: number) => {
-    // ── Marks (#310) ──
+  // Pin a row for a user action. Prefer keeping it visually still (instant
+  // scroll correction). Only animate when the scroll edge clamps and the row
+  // must move (e.g. context collapse while already scrolled to the top).
+  const pinForAction = (key: string) => {
+    if (atEdgeRef.current) {
+      atEdgeRef.current = false;
+      detachedFromEdgeRef.current = true;
+      setFollowingLive(false);
+      onListFollowChange?.(false);
+    }
+    captureAnchor(key);
+    animateNextPinRef.current = true;
+  };
+
+  // Preferred pin target after a display-changing action: last selected →
+  // first selected (list order) → topmost visible row.
+  const preferredPinKey = (rows: typeof telegramRowsRef.current = telegramRowsRef.current): string | null => {
+    if (rows.length === 0) return null;
+    const present = new Set(rows.map(anchorKey));
+    const latest = lastMarkedRef.current;
+    if (latest && present.has(latest)) return latest;
+    for (const r of rows) {
+      const key = anchorKey(r);
+      if (hasMarkReason(markReasonsRef.current, key, 'mouse')) return key;
+    }
+    return anchorKey(rows[0]);
+  };
+
+  // Snapshot the preferred row's viewport offset from the CURRENT DOM, then
+  // schedule a restore after the upcoming display update. Call this in the
+  // same event turn as setState, before React commits the new list.
+  const requestDisplayPin = () => {
+    // Prefer lastMarked / mouse selection even if the current rows snapshot is
+    // about to be replaced — the key must survive via force-include.
+    const rows = telegramRowsRef.current;
+    const latest = lastMarkedRef.current;
+    let key: string | null = null;
+    if (latest) key = latest;
+    else {
+      for (const r of rows) {
+        const k = anchorKey(r);
+        if (hasMarkReason(markReasonsRef.current, k, 'mouse')) { key = k; break; }
+      }
+    }
+    if (!key) key = preferredPinKey(rows);
+    if (key) {
+      const live = rowOffset(key);
+      const known = lastKnownPreferredPinRef.current;
+      const offset = live ?? (known?.key === key ? known.offset : 0);
+      pendingDisplayPinRef.current = { key, offset };
+      lastKnownPreferredPinRef.current = { key, offset };
+    } else {
+      pendingDisplayPinRef.current = null;
+    }
+    if (atEdgeRef.current) {
+      atEdgeRef.current = false;
+      setFollowingLive(false);
+      onListFollowChange?.(false);
+    }
+    // Drop any in-flight seek/settle so the layout-effect pin is not skipped
+    // by `refindingAnchorRef` / `pinAnimRafRef` guards.
+    refindingAnchorRef.current = false;
+    if (pinAnimRafRef.current) {
+      cancelAnimationFrame(pinAnimRafRef.current);
+      pinAnimRafRef.current = 0;
+    }
+    if (listContentRef.current) listContentRef.current.style.transform = '';
+    suppressListRefilterEffectRef.current = true;
+    setDisplayPinNonce(n => n + 1);
+  };
+  requestDisplayPinRef.current = requestDisplayPin;
+
+  // Restore the pre-change viewport offset once the new list has painted.
+  useLayoutEffect(() => {
+    if (displayPinNonce === 0) return;
+    const pending = pendingDisplayPinRef.current;
+    pendingDisplayPinRef.current = null;
+    const rows = telegramRowsRef.current;
+    if (rows.length === 0) return;
+
+    let key = pending?.key ?? null;
+    if (!key || !rows.some(r => anchorKey(r) === key)) {
+      key = preferredPinKey(rows);
+    }
+    if (!key) return;
+
+    const offset = pending && pending.key === key ? pending.offset : 0;
+    if (atEdgeRef.current) {
+      atEdgeRef.current = false;
+      setFollowingLive(false);
+      onListFollowChange?.(false);
+    }
+    anchorRef.current = { key, offset };
+    // Keep anchorRowsRef on the *previous* list identity. pinAnchor only
+    // scrollToIndex's a missing row when it sees a list change; assigning the
+    // new rows here made QF/filter pins no-op and left the row off-screen.
+    onListAnchorKeyChange?.(key);
+    animateNextPinRef.current = true;
+    pinAnchor();
+    flashRow(key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayPinNonce]);
+
+  // Parent-driven view changes (main filter toggle / edits). Snapshot from
+  // lastKnown — the DOM may already reflect the new filtered list.
+  const viewChangeSeenRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (viewChangeToken == null) return;
+    if (viewChangeSeenRef.current === undefined) {
+      viewChangeSeenRef.current = viewChangeToken;
+      return;
+    }
+    if (viewChangeSeenRef.current === viewChangeToken) return;
+    viewChangeSeenRef.current = viewChangeToken;
+    const known = lastKnownPreferredPinRef.current;
+    const key = lastMarkedRef.current ?? known?.key ?? preferredPinKey();
+    if (key) {
+      const offset = known?.key === key ? known.offset : 0;
+      pendingDisplayPinRef.current = { key, offset };
+    }
+    if (atEdgeRef.current) {
+      atEdgeRef.current = false;
+      setFollowingLive(false);
+      onListFollowChange?.(false);
+    }
+    suppressListRefilterEffectRef.current = true;
+    setDisplayPinNonce(n => n + 1);
+  }, [viewChangeToken]);
+
+  // Toggles context flags for the clicked row, or every mouse-selected row
+  // when the click is inside the selection. Context-only rows use the same
+  // control to get (or drop) their own window without tearing down global
+  // "all". Switching an "all"-mode match off still materializes the others
+  // as explicit flags. Pin the preferred selection so context churn doesn't
+  // slide the working row away.
+  const handleFlagClick = useCallback((e: React.MouseEvent, key: string) => {
+    e.stopPropagation();
+    requestDisplayPinRef.current();
+
+    const nextOn = !anchorsContext(key);
+    const targets = targetsForSelectionAction(key);
+    if (nextOn) {
+      // Context rows and matches alike: personal flag → own context window.
+      setFlaggedKeysList([...new Set([...flaggedKeysList, ...targets])]);
+      return;
+    }
+
+    // Turning off. Personal flags (incl. a context row that was given its own
+    // window) drop quietly and leave "all" intact. Only an "all"-mode match
+    // anchor (not personally flagged) materializes the rest and exits "all".
+    const turningOffAllModeAnchor = contextForAll && [...targets].some(
+      k => !flaggedSet.has(k) && !contextKeys?.has(k),
+    );
+    if (turningOffAllModeAnchor) {
+      const current = [...new Set([
+        ...flaggedKeysList,
+        ...telegrams.map(anchorKey).filter(k => !contextKeys?.has(k)),
+      ])];
+      setContextForAll(false);
+      setFlaggedKeysList(current.filter(k => !targets.has(k)));
+      return;
+    }
+    setFlaggedKeysList(flaggedKeysList.filter(k => !targets.has(k)));
+  }, [anchorsContext, flaggedKeysList, targetsForSelectionAction, setFlaggedKeysList, contextForAll, setContextForAll, telegrams, contextKeys, flaggedSet]);
+
+  // Stop browser text selection before it starts on shift/ctrl range marks
+  // (selection begins on mousedown, not click). Always record the pointer so
+  // a later plain click can tell click-to-mark from drag-to-select-text.
+  const MARK_DRAG_THRESHOLD_PX = 4;
+  const handleMarkMouseDown = (e: React.MouseEvent) => {
+    markPointerRef.current = { x: e.clientX, y: e.clientY };
+    if (!(e.shiftKey || e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    window.getSelection()?.removeAllRanges();
+  };
+
+  // Mouse selection updates the `mouse` reason (#310): plain click makes this
+  // the sole mouse-marked row; ctrl/cmd toggles `mouse` on the row; shift
+  // ranges. Same handler for row body and the rail hit-target.
+  const handleMarkClick = (e: React.MouseEvent, key: string, index: number) => {
+    const origin = markPointerRef.current;
+    markPointerRef.current = null;
     const additive = e.ctrlKey || e.metaKey;
     const range = e.shiftKey;
+    // Drag without modifiers = text selection; leave the row unmarked so the
+    // selection isn't destroyed by a mark-state re-render.
+    if (!additive && !range && origin) {
+      const dx = e.clientX - origin.x;
+      const dy = e.clientY - origin.y;
+      if (dx * dx + dy * dy > MARK_DRAG_THRESHOLD_PX * MARK_DRAG_THRESHOLD_PX) {
+        return;
+      }
+    }
     if (additive || range) {
-      // A modified click must not also start a native text selection.
       e.preventDefault();
       window.getSelection()?.removeAllRanges();
     }
 
-    let nextKeys: string[];
+    let next = markReasons;
     if (range) {
-      // Range over the current visible order, from the last-clicked row to here.
       const anchorIdx = lastMarked ? telegramRows.findIndex(r => anchorKey(r) === lastMarked) : -1;
       let rangeKeys: string[];
       if (anchorIdx === -1) {
-        rangeKeys = [key]; // no usable anchor → just this row
+        rangeKeys = [key];
       } else {
         const lo = Math.min(anchorIdx, index);
         const hi = Math.max(anchorIdx, index);
         rangeKeys = telegramRows.slice(lo, hi + 1).map(r => anchorKey(r));
       }
-      nextKeys = additive ? [...new Set([...markedKeysList, ...rangeKeys])] : rangeKeys;
+      if (additive) {
+        for (const k of rangeKeys) next = addMarkReason(next, k, 'mouse');
+      } else {
+        next = setSoleMarkReason(next, 'mouse', rangeKeys);
+      }
     } else if (additive) {
-      // Toggle this row, keeping the rest.
-      nextKeys = markedSet.has(key) ? markedKeysList.filter(k => k !== key) : [...markedKeysList, key];
+      next = toggleMarkReason(next, key, 'mouse');
     } else {
-      // Plain click replaces the whole set.
-      nextKeys = [key];
+      next = setSoleMarkReason(next, 'mouse', [key]);
     }
-    setMarkedKeysList(nextKeys);
+    // Latest selected row gets `auto` (unless already `manual`); previous `auto` drops.
+    next = syncAutoForLatest(next, key);
+    setMarkReasons(next);
     setLastMarked(key);
     markCursorRef.current = key;
-    // Not yet in selectedKeyRef — that follows the state update above.
-    const selectedKey = nextKeys.includes(key) ? key : null;
+    // Scroll-anchor follows mouse selection, not the auto rail mark.
+    const selectedKey = hasMarkReason(next, key, 'mouse') ? key : null;
 
-    // ── Pause live-following on an edge click (#266), unchanged ──
     if (isTimeSort && atEdgeRef.current) {
       atEdgeRef.current = false;
       detachedFromEdgeRef.current = true;
       setFollowingLive(false);
       onListFollowChange?.(false);
     }
-    // Hold the clicked row still from here on (#435).
     if (!atEdgeRef.current) captureAnchor(selectedKey);
+    if (selectedKey) {
+      const o = rowOffset(selectedKey);
+      if (o != null) lastKnownPreferredPinRef.current = { key: selectedKey, offset: o };
+    }
+  };
+
+  // Rail: `auto` ⇄ `manual` on the latest row; elsewhere toggle `manual`.
+  // When the clicked row is mouse-selected, the same action applies to the
+  // whole selection. User `manual` survives when latest moves away.
+  const handleRailMarkClick = (e: React.MouseEvent, key: string) => {
+    e.stopPropagation();
+    const targets = targetsForSelectionAction(key);
+    const hasAuto = hasMarkReason(markReasons, key, 'auto');
+    const hasManual = hasMarkReason(markReasons, key, 'manual');
+
+    if (!hasAuto && !hasManual) {
+      let next = markReasons;
+      for (const k of targets) {
+        next = removeMarkReason(next, k, 'auto');
+        next = addMarkReason(next, k, 'manual');
+      }
+      setMarkReasons(next);
+      markCursorRef.current = key;
+      return;
+    }
+
+    if (hasAuto) {
+      // Promote auto → manual for the whole target set.
+      let next = markReasons;
+      for (const k of targets) {
+        next = removeMarkReason(next, k, 'auto');
+        next = addMarkReason(next, k, 'manual');
+      }
+      setMarkReasons(next);
+      markCursorRef.current = key;
+      return;
+    }
+
+    // has manual
+    if (targets.size === 1 && key === lastMarkedRef.current) {
+      // Demote manual → auto on the latest row only.
+      let next = removeMarkReason(markReasons, key, 'manual');
+      next = addMarkReason(next, key, 'auto');
+      setMarkReasons(next);
+      markCursorRef.current = key;
+      return;
+    }
+
+    let next = markReasons;
+    for (const k of targets) {
+      next = removeMarkReason(next, k, 'manual');
+      next = removeMarkReason(next, k, 'auto');
+    }
+    setMarkReasons(next);
+  };
+
+  // Colour swatch: cycle colour only (does not mark); applies to the mouse
+  // selection when the clicked row is selected. Ctrl/Cmd clears; Alt toggles `hidden`.
+  const handleRailColorClick = (e: React.MouseEvent, key: string) => {
+    e.stopPropagation();
+    const targets = targetsForSelectionAction(key);
+    if (e.altKey) {
+      const turnOn = !hasMarkReason(markReasons, key, 'hidden');
+      let next = markReasons;
+      for (const k of targets) {
+        next = turnOn ? addMarkReason(next, k, 'hidden') : removeMarkReason(next, k, 'hidden');
+      }
+      setMarkReasons(next);
+      requestDisplayPinRef.current();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      setMarkColorIndices(prev => {
+        let colors = prev;
+        for (const k of targets) colors = setMarkColorIndex(colors, k, null);
+        return colors;
+      });
+      return;
+    }
+    setMarkColorIndices(prev => {
+      const index = nextMarkColorIndex(prev, key);
+      let colors = prev;
+      for (const k of targets) colors = setMarkColorIndex(colors, k, index);
+      return colors;
+    });
   };
 
   const scrollToEdge = () => {
@@ -1575,12 +2245,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // Jump between marked rows (#442), in display order and wrapping around. The
   // starting point is the mark last jumped to or clicked; once the user scrolls
   // away it is whatever row sits in the middle of the viewport instead.
+  // Prev/next jump every actionable mark (including context).
   const markedIndices = useMemo(() => {
-    if (markedSet.size === 0) return [];
+    if (actionableMarkedSet.size === 0) return [];
     const out: number[] = [];
-    telegramRows.forEach((r, i) => { if (markedSet.has(anchorKey(r))) out.push(i); });
+    telegramRows.forEach((r, i) => {
+      if (actionableMarkedSet.has(anchorKey(r))) out.push(i);
+    });
     return out;
-  }, [telegramRows, markedSet]);
+  }, [telegramRows, actionableMarkedSet]);
 
   const viewportCenterIndex = () => {
     const el = parentRef.current;
@@ -1590,22 +2263,32 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     return item ? item.index : 0;
   };
 
-  const jumpToMark = (dir: 1 | -1) => {
-    if (markedIndices.length === 0) return;
+  const markNavFromIndex = () => {
     const cursor = markCursorRef.current;
     const cursorIdx = cursor ? telegramRows.findIndex(r => anchorKey(r) === cursor) : -1;
-    const from = cursorIdx !== -1 ? cursorIdx : viewportCenterIndex();
-    const target = adjacentMark(markedIndices, from, dir);
-    markCursorRef.current = anchorKey(telegramRows[target]);
-    gotoIndex(target);
+    return cursorIdx !== -1 ? cursorIdx : viewportCenterIndex();
   };
+
+  const jumpToMark = (dir: 1 | -1) => {
+    if (markedIndices.length === 0) return;
+    const target = adjacentMark(markedIndices, markNavFromIndex(), dir);
+    if (target == null) return;
+    const key = anchorKey(telegramRows[target]);
+    markCursorRef.current = key;
+    gotoIndex(target);
+    flashRow(key);
+  };
+
+  const markNavFrom = markNavFromIndex();
+  const canJumpMarkPrev = adjacentMark(markedIndices, markNavFrom, -1) != null;
+  const canJumpMarkNext = adjacentMark(markedIndices, markNavFrom, 1) != null;
 
   // "Quick goto time" (#282): jump to the telegram nearest a given time. Only
   // meaningful for the timestamp sort, where rows are ordered by time — the
   // info bar's jumps use gotoIndex directly since they already know the index.
-  const gotoTime = (targetMs: number) => {
+  const gotoTime = (targetMs: number): number | null => {
     const rows = telegramRows;
-    if (!isTimeSort || rows.length === 0) return;
+    if (rows.length === 0) return null;
     let bestIdx = 0;
     let bestDiff = Infinity;
     for (let i = 0; i < rows.length; i++) {
@@ -1613,85 +2296,242 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
     }
     gotoIndex(bestIdx);
+    return bestIdx;
   };
+
+  // Hidden rows are absent from telegramRows; jump to the nearest visible time.
+  const hiddenCursorRef = useRef<string | null>(null);
+  const hiddenTelegramIndices = useMemo(() => {
+    if (hiddenMarkedSet.size === 0) return [] as number[];
+    const out: number[] = [];
+    telegrams.forEach((t, i) => {
+      if (hiddenMarkedSet.has(anchorKey(t))) out.push(i);
+    });
+    return out;
+  }, [telegrams, hiddenMarkedSet]);
+
+  const hiddenNavFromIndex = () => {
+    const cursor = hiddenCursorRef.current;
+    const cursorIdx = cursor ? telegrams.findIndex(r => anchorKey(r) === cursor) : -1;
+    return cursorIdx !== -1 ? cursorIdx : 0;
+  };
+
+  const jumpToHidden = (dir: 1 | -1) => {
+    if (hiddenTelegramIndices.length === 0) return;
+    const target = adjacentMark(hiddenTelegramIndices, hiddenNavFromIndex(), dir);
+    if (target == null) return;
+    const tg = telegrams[target];
+    if (!tg) return;
+    hiddenCursorRef.current = anchorKey(tg);
+    const ms = new Date(tg.timestamp).getTime();
+    if (Number.isNaN(ms)) return;
+    const landed = gotoTime(ms);
+    if (landed != null) flashRow(anchorKey(telegramRows[landed]));
+  };
+
+  const hiddenNavFrom = hiddenNavFromIndex();
+  const canJumpHiddenPrev = adjacentMark(hiddenTelegramIndices, hiddenNavFrom, -1) != null;
+  const canJumpHiddenNext = adjacentMark(hiddenTelegramIndices, hiddenNavFrom, 1) != null;
 
   // Newest telegram time, used to seed the goto-time input.
   const newestMs = telegramRows.length > 0
     ? new Date(telegramRows[liveEdge === 'top' ? 0 : telegramRows.length - 1].timestamp).getTime()
     : null;
 
+  const cancelPinAnim = () => {
+    if (pinAnimRafRef.current) {
+      cancelAnimationFrame(pinAnimRafRef.current);
+      pinAnimRafRef.current = 0;
+    }
+    if (listContentRef.current) listContentRef.current.style.transform = '';
+  };
+
+  // Slow cubic ease-out, no overshoot — only for clamped (unavoidable) pin moves.
+  const pinSettleEase = (t: number) => 1 - (1 - t) ** 3;
+
+  /** Ease a visual remainder the scroll edge could not absorb (transform settle). */
+  const animatePinVisualError = (visualError: number, flashKey?: string) => {
+    const content = listContentRef.current;
+    if (!content) {
+      animateNextPinRef.current = false;
+      return;
+    }
+    cancelPinAnim();
+    animateNextPinRef.current = false;
+    if (flashKey) flashRow(flashKey);
+    // Row is `visualError` px away from the pin; shift content so it looks pinned,
+    // then ease that fake offset away.
+    const startY = -visualError;
+    content.style.transform = `translateY(${startY}px)`;
+    const durationMs = 700;
+    const t0 = performance.now();
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - t0) / durationMs);
+      const y = startY * (1 - pinSettleEase(t));
+      programmaticScrollRef.current = true;
+      content.style.transform = Math.abs(y) < 0.5 ? '' : `translateY(${y}px)`;
+      if (t < 1) {
+        pinAnimRafRef.current = requestAnimationFrame(tick);
+        return;
+      }
+      pinAnimRafRef.current = 0;
+      content.style.transform = '';
+      anchorRowsRef.current = telegramRowsRef.current;
+      const anchor = anchorRef.current;
+      if (anchor) {
+        const o = rowOffset(anchor.key);
+        if (o != null) anchor.offset = o;
+      }
+      requestAnimationFrame(() => { programmaticScrollRef.current = false; });
+    };
+    pinAnimRafRef.current = requestAnimationFrame(tick);
+  };
+
+  /**
+   * Keep the pinned row still via scrollTop when possible. If an action-pin
+   * cannot be restored because the scroll edge clamps, ease the remaining
+   * visual jump; never animate a correctable (still-holding) pin.
+   */
+  const applyPinDelta = (el: HTMLElement, delta: number) => {
+    if (Math.abs(delta) <= 0.5) {
+      // Layout may still be settling after an action — keep the flag briefly.
+      if (animateNextPinRef.current) {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (animateNextPinRef.current && !pinAnimRafRef.current) {
+              animateNextPinRef.current = false;
+            }
+          });
+        });
+      }
+      return;
+    }
+
+    const wantClampAnim = animateNextPinRef.current;
+    const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+    const clamped = Math.min(maxScroll, Math.max(0, el.scrollTop + delta));
+    markProgrammatic();
+    el.scrollTop = clamped;
+
+    if (!wantClampAnim) return;
+
+    const anchor = anchorRef.current;
+    const after = anchor ? rowOffset(anchor.key) : null;
+    if (!anchor || after == null) {
+      animateNextPinRef.current = false;
+      return;
+    }
+    const visualError = after - anchor.offset;
+    if (Math.abs(visualError) > 0.5) {
+      animatePinVisualError(visualError, anchor.key);
+    } else {
+      animateNextPinRef.current = false;
+    }
+  };
+
+  /**
+   * Jump the virtualizer so `anchor` lands at its saved viewport offset.
+   * Used after list identity changes (QF/filter): set scrollTop from measured
+   * item offsets in this layout turn so the row is not missing for a frame.
+   */
+  const seekPinnedRow = (el: HTMLElement, anchor: { key: string; offset: number }, idx: number) => {
+    cancelPinAnim();
+    refindingAnchorRef.current = true;
+    // Ensure measurement cache is warm before reading offsets.
+    void virtualizer.getTotalSize();
+    const startInfo = virtualizer.getOffsetForIndex(idx, 'start');
+    const itemStart = startInfo?.[0] ?? idx * ROW_ESTIMATE;
+    const maxScroll = Math.max(0, virtualizer.getTotalSize() - el.clientHeight);
+    const target = Math.min(maxScroll, Math.max(0, itemStart - anchor.offset));
+    markProgrammatic();
+    virtualizer.scrollToOffset(target);
+
+    const finish = (found: number | null) => {
+      if (found != null && anchorRef.current === anchor) {
+        applyPinDelta(el, found - anchor.offset);
+        if (!pinAnimRafRef.current) anchorRowsRef.current = telegramRowsRef.current;
+      } else {
+        animateNextPinRef.current = false;
+      }
+      requestAnimationFrame(() => {
+        refindingAnchorRef.current = false;
+        if (found == null) captureAnchor();
+        else if (!pinAnimRafRef.current) pinAnchor();
+      });
+    };
+
+    // Scroll notify often mounts the row before paint; fine-tune immediately.
+    const immediate = rowOffset(anchor.key);
+    if (immediate != null) {
+      finish(immediate);
+      return;
+    }
+    // Otherwise wait for the virtualizer to paint the new window.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      finish(rowOffset(anchor.key));
+    }));
+  };
+
   // Correct scrollTop so the anchored row keeps its recorded viewport offset.
   const pinAnchor = () => {
     const el = parentRef.current;
     const anchor = anchorRef.current;
     if (!el || !anchor || atEdgeRef.current) return;
+    const listChanged = anchorRowsRef.current !== telegramRows;
+    // Action pins cancel an in-flight clamp settle so QF/filter is not dropped.
+    if (pinAnimRafRef.current) {
+      if (!animateNextPinRef.current) return;
+      cancelPinAnim();
+    }
     const now = rowOffset(anchor.key);
-    if (now == null) {
-      // Not rendered. Either the user jumped far away (scrollbar drag) and
-      // the scroll handler has not caught up — then the anchor is stale and
-      // whatever is on screen now takes over. Or so many rows arrived that the
-      // anchor left the virtualized window: it is still in the list, so have
-      // the virtualizer bring it back (it copes with unmeasured rows) and then
-      // restore its offset.
+    // After a list change, even a non-null offset can be a stale virtual cell —
+    // always re-seek so the preferred row keeps its place on the first paint.
+    const needsSeek = now == null || (animateNextPinRef.current && listChanged);
+    if (needsSeek) {
       if (refindingAnchorRef.current) return;
       // A changed row list means rows were inserted, even while the user's
       // gesture that triggered the flush still counts as scrolling. Only an
       // unchanged list with a missing anchor is the user having jumped away.
-      const rowsChanged = anchorRowsRef.current !== telegramRows;
-      const inserted = rowsChanged || !userScrolling();
+      const inserted = listChanged || !userScrolling();
       const idx = inserted ? telegramRows.findIndex(r => anchorKey(r) === anchor.key) : -1;
       if (idx === -1) {
+        animateNextPinRef.current = false;
         captureAnchor();
         return;
       }
-      // Place the anchor from the virtualizer's layout right now, before paint:
-      // an async scrollToIndex would flash the live edge first. Estimates for
-      // unmeasured rows are corrected by the virtualizer's own first-measure
-      // adjustment and the totalSize pin that follows.
-      const start = virtualizer.measurementsCache[idx]?.start
-        ?? virtualizer.getOffsetForIndex(idx, 'start')?.[0];
-      if (start != null) {
-        const max = Math.max(0, el.scrollHeight - el.clientHeight);
-        markProgrammatic();
-        el.scrollTop = Math.min(max, Math.max(0, start - anchor.offset));
-        anchorRowsRef.current = telegramRows;
-        refindingAnchorRef.current = true;
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          refindingAnchorRef.current = false;
-          if (anchorRef.current !== anchor) return;
-          const found = rowOffset(anchor.key);
-          if (found == null) captureAnchor();
-          else if (Math.abs(found - anchor.offset) > 0.5) {
-            markProgrammatic();
-            el.scrollTop += found - anchor.offset;
-          }
-        }));
-        return;
-      }
-      refindingAnchorRef.current = true;
-      virtualizer.scrollToIndex(idx, { align: 'start' });
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        const found = rowOffset(anchor.key);
-        if (found != null && anchorRef.current === anchor) {
-          el.scrollTop += found - anchor.offset;
-          anchorRowsRef.current = telegramRowsRef.current;
+      // Metered flush: pin from the virtualizer layout before paint — an async
+      // scrollToIndex would flash the live edge. Display pins keep seekPinnedRow
+      // (optional clamp animation).
+      if (flushPinRef.current) {
+        const start = virtualizer.measurementsCache[idx]?.start
+          ?? virtualizer.getOffsetForIndex(idx, 'start')?.[0];
+        if (start != null) {
+          const max = Math.max(0, el.scrollHeight - el.clientHeight);
+          markProgrammatic();
+          el.scrollTop = Math.min(max, Math.max(0, start - anchor.offset));
+          anchorRowsRef.current = telegramRows;
+          refindingAnchorRef.current = true;
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            refindingAnchorRef.current = false;
+            if (anchorRef.current !== anchor) return;
+            const found = rowOffset(anchor.key);
+            if (found == null) captureAnchor();
+            else if (Math.abs(found - anchor.offset) > 0.5) {
+              markProgrammatic();
+              el.scrollTop += found - anchor.offset;
+            }
+          }));
+          return;
         }
-        // One more frame for the scroll event to pass before tracking resumes.
-        requestAnimationFrame(() => {
-          refindingAnchorRef.current = false;
-          if (found == null) captureAnchor();
-          else pinAnchor();
-        });
-      }));
+      }
+      if (!listChanged && userScrolling()) return;
+      seekPinnedRow(el, anchor, idx);
       return;
     }
     if (refindingAnchorRef.current) return;
     const delta = now - anchor.offset;
-    if (Math.abs(delta) > 0.5) {
-      markProgrammatic();
-      el.scrollTop += delta;
-    }
-    anchorRowsRef.current = telegramRows;
+    applyPinDelta(el, delta);
+    if (!pinAnimRafRef.current) anchorRowsRef.current = telegramRows;
   };
 
   // Changing sort moves (or removes) the live edge — drop the anchor state.
@@ -1710,14 +2550,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       return () => { sortEffectMounted.current = false; };
     }
     setStripeOffset(0);
-    anchorRef.current = null;
-    onListAnchorKeyChange?.(null);
-    const atEdge = checkAtEdge();
-    if (atEdge !== atEdgeRef.current) {
-      atEdgeRef.current = atEdge;
-      setFollowingLive(atEdge);
-      onListFollowChange?.(atEdge);
-    }
+    // Sort reorders the list — pin + flash the preferred working row.
+    requestDisplayPinRef.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortConfig]);
 
@@ -1762,7 +2596,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     const idx = telegramRows.findIndex(t => anchorKey(t) === key);
     if (idx !== -1) {
       gotoIndex(idx);
-      setMarkedKeysList([key]);
+      setMarkReasons(prev => syncAutoForLatest(setSoleMarkReason(prev, 'goto', [key]), key));
       setLastMarked(key);
       markCursorRef.current = key;
       return;
@@ -1873,6 +2707,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         setStripeOffset(0);
         scrollToEdge();
       }
+      return;
+    }
+    // A display-pin (QF/filter toggle) already restored the preferred row —
+    // do not clear that anchor because the live-edge key changed under us.
+    if (suppressListRefilterEffectRef.current) {
+      suppressListRefilterEffectRef.current = false;
       return;
     }
     if (!isTimeSort || prev.len === 0 || rows.length === 0) return;
@@ -2075,8 +2915,37 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     );
   };
 
+  const isSameSortKeyValue = useCallback((a: TelegramRow, b: TelegramRow, key: SortKey): boolean => {
+    const av = a[key];
+    const bv = b[key];
+    if (key === 'timestamp') {
+      return new Date(av as string).getTime() === new Date(bv as string).getTime();
+    }
+    return av === bv;
+  }, []);
+
+  const shouldHideRepeatedOnSortLevel = useCallback((id: ColId, rowIndex: number, forceShow = false): boolean => {
+    if (forceShow || rowIndex <= 0) return false;
+    if (id === 'time' || id === 'delta') return false;
+    if (!isHideRepeatedWhenSortedEnabled(id)) return false;
+    const sortKey = COLUMNS.find(c => c.id === id)?.sortKey;
+    if (!sortKey || sortKey === 'timestamp') return false;
+    const levelIdx = sortConfig.findIndex(level => level.key === sortKey);
+    if (levelIdx === -1) return false;
+    const prev = telegramRows[rowIndex - 1];
+    const curr = telegramRows[rowIndex];
+    if (!prev || !curr) return false;
+    for (let i = 0; i <= levelIdx; i++) {
+      if (!isSameSortKeyValue(prev, curr, sortConfig[i].key)) return false;
+    }
+    return true;
+  }, [isHideRepeatedWhenSortedEnabled, sortConfig, telegramRows, isSameSortKeyValue]);
+
   // ── Per-cell body content (keyed switch keeps body aligned with header order) ──
-  const renderCell = (id: ColId, t: TelegramRow): React.ReactNode => {
+  const renderCell = (id: ColId, t: TelegramRow, rowIndex: number, forceShow = false): React.ReactNode => {
+    if (shouldHideRepeatedOnSortLevel(id, rowIndex, forceShow)) {
+      return <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }} className="filterable-cell" />;
+    }
     switch (id) {
       case 'time':
         return (
@@ -2091,29 +2960,80 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         );
 
       case 'delta': {
-        const key = anchorKey(t);
-        const flagged = anchorsContext(key);
+        // The "+" side (sort-dependent) hosts the per-row context flag instead
+        // of a plus sign — only while QF is enabled and a context window is set.
+        // Otherwise the plus glyph is shown, matching the minus side.
+        const topSign = (t.deltaStr ?? '')[0];
+        const bottomSign = (t.deltaNextStr ?? '')[0];
+        let plusOnTop = timeSortDirection === 'asc';
+        if (timeSortDirection === 'desc') plusOnTop = false;
+        else if (timeSortDirection == null) {
+          if (topSign === '+') plusOnTop = true;
+          else if (bottomSign === '+') plusOnTop = false;
+          else plusOnTop = false;
+        }
+        // Hide while QF is off, the ΔT column filter is disabled, delta-t is
+        // toggled off, or both before/after are empty.
+        const showContextControls = quickEnabled
+          && isQuickColumnEnabled('delta')
+          && activeFilters.deltaContextEnabled
+          && (activeFilters.deltaBeforeMs > 0 || activeFilters.deltaAfterMs > 0);
+        const rowKey = anchorKey(t);
+        const flagged = anchorsContext(rowKey);
+        const isContextRow = !!contextKeys?.has(rowKey);
+        // Personal flag on a (former) context row — owns its own window even
+        // while global "all" still covers filter matches.
+        const personallyFlagged = flaggedSet.has(rowKey);
+        const contextBtn = (
+          <button
+            style={{
+              background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              // Active: blue circle+plus; inactive: same glyph in the minus colour.
+              color: flagged ? 'var(--accent-primary)' : 'var(--text-dim)',
+            }}
+            title={
+              isContextRow && !personallyFlagged
+                ? 'Show context around this message — give this context row its own window (applies to all selected rows)'
+                : flagged
+                  ? 'Context is shown around this message — click to switch it off (applies to all selected rows)'
+                  : 'Show context around this message, regardless of the active filters (applies to all selected rows)'
+            }
+            onClick={e => handleFlagClick(e, rowKey)}
+          >
+            <PlusCircle size={12} />
+          </button>
+        );
+        const lineParts = (text: string) => ({
+          sign: text ? text[0] : '',
+          value: text.length > 2 ? text.slice(2) : '',
+        });
+        const top = lineParts(t.deltaStr ?? '');
+        const bottom = lineParts(t.deltaNextStr ?? '');
+        const leading = (isPlusSlot: boolean, sign: string) => {
+          if (isPlusSlot && showContextControls) return contextBtn;
+          const glyph = isPlusSlot ? '+' : (sign === '-' ? '-' : '');
+          return <span style={{ justifySelf: 'center' }}>{glyph}</span>;
+        };
         return (
-          <div style={{ padding: cellPadding, display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
-            <button
-              style={{
-                background: 'transparent', border: 'none', cursor: 'pointer', padding: '0.15rem',
-                borderRadius: '4px', display: 'flex', alignItems: 'center', flexShrink: 0,
-                color: flagged ? 'var(--accent-primary)' : 'var(--text-dim)',
-                opacity: activeFilters.deltaContextEnabled ? (flagged ? 1 : 0.35) : 0.25,
-              }}
-              title={flagged
-                ? 'Context is shown around this message — click to switch it off for this message (ctrl/cmd-click to apply to all marked rows)'
-                : 'Show context around this message, regardless of the active filters (ctrl/cmd-click to apply to all marked rows)'}
-              onClick={e => handleFlagClick(e, key)}
-            >
-              {flagged ? <CircleDot size={12} /> : <Circle size={12} />}
-            </button>
-            {t.deltaStr && (
-              <div className="mono-addr" style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontVariantNumeric: 'tabular-nums' }}>
-                {t.deltaStr}
-              </div>
-            )}
+          <div
+            className="mono-addr"
+            style={{
+              padding: cellPadding,
+              display: 'grid',
+              gridTemplateColumns: '12px 1fr',
+              columnGap: '0.35rem',
+              rowGap: '0.18rem',
+              alignItems: 'center',
+              fontSize: '0.65rem',
+              color: 'var(--text-dim)',
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            {leading(plusOnTop, top.sign)}
+            <span>{top.value}</span>
+            {leading(!plusOnTop, bottom.sign)}
+            <span>{bottom.value}</span>
           </div>
         );
       }
@@ -2128,23 +3048,30 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               <button
                 className={`quick-filter-btn ${activeFilters.sources.includes(t.source_address) ? 'active' : ''}`}
                 onClick={(e) => { e.stopPropagation(); onQuickFilter('sources', t.source_address); }}
-                title="Toggle source filter"
+                title="focus device"
               >
-                <Filter className="filter-icon" size={12} />
+                <Search className="filter-icon" size={12} />
                 <X className="cancel-icon" size={12} />
+              </button>
+              <button
+                className="quick-visualize-btn"
+                onClick={(e) => { e.stopPropagation(); onQuickVisualize(t.source_address); }}
+                title="visualize this device"
+              >
+                <LineChart size={14} />
               </button>
               {onQuickLastSeen && (
                 <button
                   className="quick-last-seen-btn"
                   onClick={(e) => { e.stopPropagation(); onQuickLastSeen(t.source_address, 'pa'); }}
-                  title="Show last seen values for this device"
+                  title="show last seen values for this device"
                 >
                   <Clock size={12} />
                 </button>
               )}
             </div>
             {visibleColumns.sourceName && (
-              <div className="subtitle-name" title={t.source_name || undefined} style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginTop: '0.15rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <div className="subtitle-name" title={t.source_name || undefined} style={SOURCE_NAME_TEXT_STYLE}>
                 {t.source_name || '-'}
               </div>
             )}
@@ -2161,16 +3088,23 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               <button
                 className={`quick-filter-btn ${activeFilters.targets.includes(t.target_address) ? 'active' : ''}`}
                 onClick={(e) => { e.stopPropagation(); onQuickFilter('targets', t.target_address); }}
-                title="Toggle target filter"
+                title="focus GA"
               >
-                <Filter className="filter-icon" size={12} />
+                <Search className="filter-icon" size={12} />
                 <X className="cancel-icon" size={12} />
+              </button>
+              <button
+                className="quick-visualize-btn"
+                onClick={(e) => { e.stopPropagation(); onQuickVisualize(t.target_address); }}
+                title="visualize this GA"
+              >
+                <LineChart size={14} />
               </button>
               {onQuickLastSeen && (
                 <button
                   className="quick-last-seen-btn"
                   onClick={(e) => { e.stopPropagation(); onQuickLastSeen(t.target_address, 'ga'); }}
-                  title="Show last seen values for this GA"
+                  title="show last seen values for this GA"
                 >
                   <Clock size={12} />
                 </button>
@@ -2186,7 +3120,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               )}
             </div>
             {visibleColumns.targetName && (
-              <div className="subtitle-name" title={t.target_name || undefined} style={{ fontSize: '0.7rem', color: 'var(--text-main)', fontWeight: 500, marginTop: '0.15rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <div className="subtitle-name" title={t.target_name || undefined} style={SOURCE_NAME_TEXT_STYLE}>
                 {t.target_name || '-'}
               </div>
             )}
@@ -2200,34 +3134,35 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               <div style={{ color: getTypeColor(t.simplified_type), fontWeight: 600, fontSize: '0.75rem', textTransform: 'uppercase' }}>
                 {t.simplified_type || t.telegram_type}
               </div>
-              <button
-                className={`quick-filter-btn ${activeFilters.types.includes(t.simplified_type || t.telegram_type) ? 'active' : ''}`}
-                onClick={(e) => { e.stopPropagation(); onQuickFilter('types', t.simplified_type || t.telegram_type); }}
-                title="Toggle type filter"
-              >
-                <Filter className="filter-icon" size={12} />
-                <X className="cancel-icon" size={12} />
-              </button>
             </div>
-            <div style={{ fontSize: '0.65rem', color: t.direction === 'Outgoing' ? 'var(--warning-text)' : 'var(--success)', marginTop: '0.1rem' }}>{t.direction === 'Outgoing' ? 'Outgoing' : 'Incoming'}</div>
+            <div style={{ fontSize: '0.65rem', color: t.direction === 'Outgoing' ? 'var(--warning-text)' : 'var(--success)', marginTop: '0.1rem', opacity: 0.8 }}>
+              {t.direction === 'Outgoing' ? 'Outgoing' : 'Incoming'}
+            </div>
           </div>
         );
 
       case 'dpt':
         return (
           <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }} className="filterable-cell">
-            {t.dpt_name && t.dpt_main != null ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', minWidth: 0 }}>
-                <div title={getDPTLabel(t.dpt_main)} style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: getDPTColor(t.dpt_main), flexShrink: 0 }} />
-                <span title={t.dpt_name ?? undefined} style={{ fontSize: '0.75rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{t.dpt_name}</span>
-                <button
-                  className={`quick-filter-btn ${activeFilters.dpts.includes(dptKey(t.dpt_main, t.dpt_sub)) ? 'active' : ''}`}
-                  onClick={(e) => { e.stopPropagation(); if (t.dpt_main != null) onQuickFilter('dpts', dptKey(t.dpt_main, t.dpt_sub)); }}
-                  title="Toggle DPT filter"
-                >
-                  <Filter className="filter-icon" size={12} />
-                  <X className="cancel-icon" size={12} />
-                </button>
+            {t.dpt_main != null ? (
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', minWidth: 0 }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
+                    <div title={getDPTLabel(t.dpt_main)} style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: getDPTColor(t.dpt_main), flexShrink: 0 }} />
+                    <div
+                      title={dptKeyLabel(t.dpt_main, t.dpt_sub) ?? undefined}
+                      style={{ fontSize: '0.75rem', color: 'var(--text-main)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}
+                    >
+                      {dptKeyLabel(t.dpt_main, t.dpt_sub) ?? '-'}
+                    </div>
+                  </div>
+                  <div
+                    title={dptDescriptionLabel(t.dpt_name, t.unit) ?? undefined}
+                    style={{ fontSize: '0.68rem', color: 'var(--text-dim)', marginTop: '0.12rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  >
+                    {dptDescriptionLabel(t.dpt_name, t.unit) ?? '-'}
+                  </div>
+                </div>
               </div>
             ) : '-'}
           </div>
@@ -2241,17 +3176,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 {t.value_formatted || (t.value_numeric !== null ? String(t.value_numeric) : '-')}
               </span>
               {t.unit && <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', fontWeight: 500 }}>{t.unit}</span>}
-
-              <button
-                className="quick-visualize-btn"
-                onClick={(e) => { e.stopPropagation(); onQuickVisualize(t.target_address); }}
-                title="Visualize this target"
-              >
-                <LineChart size={14} />
-              </button>
             </div>
             {visibleColumns.data && t.raw_hex && (
-              <div className="raw-badge" style={{ marginTop: '0.4rem', background: 'var(--bg-tag)', padding: '0.1rem 0.3rem', borderRadius: '3px', fontSize: '0.65rem', color: 'var(--text-dim)', display: 'inline-block', fontFamily: 'var(--font-mono)' }}>
+              <div style={{ marginTop: '0.18rem', fontSize: '0.65rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
                 {t.raw_hex}
               </div>
             )}
@@ -2316,21 +3243,72 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     ? rawNewerCount
     : (telegramRows.length > 0 && (!rangeMeasured || justUnpaused) ? stickyNewerCountRef.current : 0);
 
+  // Escape clears the mouse selection and drops OS focus (e.g. colour-swatch ring)
+  // while focus is inside the table (not in an input).
+  const tableRootRef = useRef<HTMLDivElement>(null);
+  const handleTableKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== 'Escape') return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+
+    const hadSelection = mouseSelectedKeys.length > 0
+      || Object.keys(markReasons).some(k => hasMarkReason(markReasons, k, 'auto'));
+    const ae = document.activeElement as HTMLElement | null;
+    const focusInside = !!(ae && tableRootRef.current?.contains(ae));
+    if (!hadSelection && !focusInside) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    if (hadSelection) {
+      setMarkReasons(prev => syncAutoForLatest(setSoleMarkReason(prev, 'mouse', []), null));
+      setLastMarked(null);
+    }
+    // Park focus on the outline-less table root so the OS focus ring disappears
+    // but Escape stays available for further clears.
+    if (focusInside && ae !== tableRootRef.current) {
+      ae.blur();
+      tableRootRef.current?.focus({ preventScroll: true });
+    }
+  };
+
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div
+      ref={tableRootRef}
+      tabIndex={-1}
+      onKeyDown={handleTableKeyDown}
+      onPointerDown={e => {
+        // Keep the table keyboard-focusable for Escape without stealing focus from form controls.
+        const t = e.target as HTMLElement | null;
+        if (t?.closest('input, textarea, select, button, [contenteditable="true"]')) return;
+        tableRootRef.current?.focus({ preventScroll: true });
+      }}
+      style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', outline: 'none' }}
+    >
       {/* Quick info bar (#311): same column grid as the quick filter — two rows
           per column (oldest/newest, min/max Δt, counts, …). */}
       {infoOpen && infoMetrics && (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: gridTemplate,
-            background: 'var(--bg-subtle)',
-            borderBottom: '1px solid var(--border-color)',
-            flexShrink: 0,
-            paddingRight: '8px', // align with the header's scrollbar compensation
-          }}
-        >
+        <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', background: 'var(--bg-panel)', flexShrink: 0 }}>
+          <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }}>
+              <button
+                className="quick-filter-bar-toggle open"
+                onClick={toggleInfoOpen}
+                title="Hide info bar"
+              >
+                <ChevronDown size={13} />
+              </button>
+            </div>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }} />
+          </div>
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+              display: 'grid',
+              gridTemplateColumns: gridTemplate,
+              paddingRight: '8px',
+            }}
+          >
           {visibleCols.map(c => {
             if (c.id === 'time') {
               if (infoMetrics.count === 0) {
@@ -2423,7 +3401,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 </div>
               );
             }
-            // value: telegram count (+ context) / max-rate + CSV
             return (
               <div key={c.id} style={infoColStyle}>
                 <span
@@ -2460,33 +3437,80 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               </div>
             );
           })}
+          </div>
         </div>
       )}
 
       {/* Header */}
       <div
         style={{
-          display: 'grid',
-          gridTemplateColumns: gridTemplate,
-          background: 'var(--bg-panel)',
+          display: 'flex',
+          background: 'var(--bg-tag)',
           zIndex: 10,
-          backdropFilter: 'blur(12px)',
+          backdropFilter: 'var(--glass-blur)',
           borderBottom: '1px solid var(--border-color)',
           flexShrink: 0,
-          color: 'var(--text-dim)',
-          fontSize: '0.65rem',
-          textTransform: 'uppercase',
-          letterSpacing: '0.05em',
-          fontWeight: 700,
-          // Account for scrollbar width to keep columns aligned with body
-          paddingRight: '8px'
         }}
       >
+        {/* Left icon rail: show info / GotoTime / quick filter */}
+        <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', gap: '0.15rem' }}>
+            {showInfoBarToggle && (
+              <button
+                className="quick-filter-bar-toggle"
+                onClick={toggleInfoOpen}
+                title="Show info bar"
+              >
+                <ChevronUp size={13} />
+              </button>
+            )}
+          </div>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            {isTimeSort && (
+              <GotoTimeControl seedMs={newestMs} onGoto={gotoTime} />
+            )}
+          </div>
+          <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+            {quickOpen ? (
+              <button
+                className={`quick-filter-bar-toggle ${quickEnabled ? 'open' : ''}`}
+                onClick={handleQuickEnabledToggleClick}
+                title={quickEnabled
+                  ? 'Disable quick filter (keeps patterns) · ctrl/cmd-click clears all quick-filter cells'
+                  : 'Enable quick filter · ctrl/cmd-click clears all quick-filter cells'}
+              >
+                <Filter size={13} />
+              </button>
+            ) : (
+              <button
+                className="quick-filter-bar-toggle"
+                onClick={toggleQuickOpen}
+                title="Show quick filter bar"
+              >
+                <ChevronDown size={13} />
+              </button>
+            )}
+          </div>
+        </div>
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: 'grid',
+            gridTemplateColumns: gridTemplate,
+            color: 'var(--text-main)',
+            fontSize: '0.65rem',
+            textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+            fontWeight: 700,
+            paddingRight: '8px',
+          }}
+        >
         {visibleCols.map((c, i) => (
           <div
             key={c.id}
             className={`header-col${draggingColumn === c.id ? ' drag-source' : ''}${dropTarget?.id === c.id ? ` drop-${dropTarget.side}` : ''}`}
-            style={{ padding: cellPadding, position: 'relative', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
+            style={{ position: 'relative', display: 'flex', flexDirection: 'column', minWidth: 0 }}
             draggable
             onMouseDownCapture={e => { dragOriginRef.current = e.target; }}
             onDragStart={e => {
@@ -2513,48 +3537,126 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             }}
             onDragEnd={endColumnDrag}
           >
-            {c.id === 'time' && (
-              <button
-                className={`quick-filter-bar-toggle ${quickOpen ? 'open' : ''}`}
-                onClick={toggleQuickOpen}
-                title={quickOpen ? 'Hide quick filter bar' : 'Show quick filter bar'}
-              >
-                <ListFilter size={13} />
-              </button>
-            )}
-            {c.id === 'time' && (
-              <button
-                className={`quick-filter-bar-toggle ${infoOpen ? 'open' : ''}`}
-                onClick={toggleInfoOpen}
-                title={infoOpen ? 'Hide info bar' : 'Show info bar'}
-              >
-                <Info size={13} />
-              </button>
-            )}
-            {c.id === 'time' && isTimeSort && (
-              <GotoTimeControl seedMs={newestMs} onGoto={gotoTime} />
-            )}
-            {c.id === 'delta' ? (
-              <button
-                className="sort-header"
-                onClick={handleDeltaHeaderClick}
-                title={deltaSortActive
-                  ? 'Sorted by time delta — click to flip direction; click any other column to return to live order'
-                  : 'Sort by time delta (exclusive — pauses live scrolling and freezes the current order)'}
-              >
-                {c.label} {deltaSortActive && (deltaSortDirection === 'asc' ? <ChevronUp size={14} /> : <ChevronDown size={14} />)}
-              </button>
-            ) : c.sortKey ? (
-              <button
-                className="sort-header"
-                onClick={(e) => handleColumnSort(c.sortKey!, { additive: e.ctrlKey || e.metaKey })}
-                title="Click to sort · ctrl/cmd-click to add as a further sort level (TIME is always the deepest tiebreaker)"
-              >
-                {c.label} {renderSortArrow(c.sortKey)}
-              </button>
-            ) : (
-              <span>{c.label}</span>
-            )}
+            <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '0.4rem' }}>
+              {c.id === 'delta' && quickEnabled
+                && isQuickColumnEnabled('delta')
+                && activeFilters.deltaContextEnabled
+                && (activeFilters.deltaBeforeMs > 0 || activeFilters.deltaAfterMs > 0) && (
+                <span
+                  onClick={e => {
+                    e.stopPropagation();
+                    handleDeltaToggleClick(e);
+                  }}
+                  title={
+                    deltaFlagState === 'all'
+                      ? 'Time-Delta-Context: around all messages. Click to switch it off for all of them. Ctrl/cmd-click to also set the button on visible context rows.'
+                      : deltaFlagState === 'some'
+                        ? 'Time-Delta-Context: around the flagged messages only. Click to clear the flags. Ctrl/cmd-click to show it around all messages.'
+                        : 'Time-Delta-Context: around no message. Click to show it around all messages.'
+                  }
+                  style={{
+                    display: 'flex', alignItems: 'center', userSelect: 'none',
+                    cursor: 'pointer',
+                    // all: blue +circle; none/some: empty circle (grey / blue)
+                    color: deltaFlagState === 'none' ? 'var(--text-dim)' : 'var(--accent-primary)',
+                  }}
+                >
+                  {deltaFlagState === 'all'
+                    ? <PlusCircle size={12} />
+                    : <Circle size={12} />}
+                </span>
+              )}
+              {(c.id === 'source' || c.id === 'target') && (() => {
+                const focusChecked = c.id === 'source' ? sourceFocusOnly : targetFocusOnly;
+                const focusCategory = c.id === 'source' ? 'pa' : 'ga';
+                return (
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', opacity: focusFilterDisabled ? 0.4 : 1 }}>
+                    <span
+                      onClick={e => {
+                        e.stopPropagation();
+                        if (focusFilterDisabled) return;
+                        if (c.id === 'source') setSourceFocusOnly(!sourceFocusOnly);
+                        else setTargetFocusOnly(!targetFocusOnly);
+                        requestDisplayPinRef.current();
+                      }}
+                      title={c.id === 'source'
+                        ? 'Show only telegrams whose source is flagged for the Telegram List in the Focus panel'
+                        : 'Show only telegrams whose target is flagged for the Telegram List in the Focus panel'}
+                      style={{
+                        display: 'flex', alignItems: 'center', userSelect: 'none',
+                        cursor: focusFilterDisabled ? 'default' : 'pointer',
+                        color: focusChecked ? 'var(--accent-primary)' : 'var(--text-dim)',
+                      }}
+                    >
+                      <List size={12} />
+                    </span>
+                    <span
+                      onClick={e => {
+                        e.stopPropagation();
+                        onFocusCategorySelect?.(focusCategory);
+                      }}
+                      title={c.id === 'source'
+                        ? 'Switch the Focus panel to Devices'
+                        : 'Switch the Focus panel to Group Addresses'}
+                      style={{
+                        fontWeight: 400, fontSize: '0.68rem', color: 'var(--text-dim)',
+                        textTransform: 'none', letterSpacing: 'normal', userSelect: 'none',
+                        cursor: onFocusCategorySelect ? 'pointer' : 'default',
+                      }}
+                    >
+                      focus
+                    </span>
+                  </span>
+                );
+              })()}
+            </div>
+            <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+              {c.id === 'delta' ? (
+                <button
+                  className="sort-header"
+                  onClick={handleDeltaHeaderClick}
+                  title={deltaSortActive
+                    ? 'Sorted by time delta — click to flip direction; click any other column to return to live order'
+                    : 'Sort by time delta (exclusive — pauses live scrolling and freezes the current order)'}
+                >
+                  {c.label} {deltaSortActive && (deltaSortDirection === 'asc' ? <ChevronUp size={14} /> : <ChevronDown size={14} />)}
+                </button>
+              ) : c.sortKey ? (
+                <button
+                  className="sort-header"
+                  onClick={(e) => {
+                    if (e.altKey && c.id !== 'time' && c.id !== 'delta') {
+                      e.preventDefault();
+                      toggleHideRepeatedWhenSortedForColumn(c.id);
+                      return;
+                    }
+                    handleColumnSort(c.sortKey!, { additive: e.ctrlKey || e.metaKey });
+                  }}
+                  title="Click to sort · ctrl/cmd-click to add as a further sort level (TIME is always the deepest tiebreaker) · alt-click toggles repeated-value hiding"
+                >
+                  {c.label} {renderSortArrow(c.sortKey)}
+                </button>
+              ) : (
+                <span>{c.label}</span>
+              )}
+            </div>
+            <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-start', gap: '0.4rem' }}>
+              {quickOpen && quickEnabled && (
+                <button
+                  className={`quick-filter-bar-toggle ${isQuickColumnEnabled(c.id) ? 'open' : ''}`}
+                  onClick={(e) => handleQuickColumnToggleClick(e, c.id)}
+                  title={c.id === 'delta'
+                    ? (activeFilters.deltaContextEnabled
+                      ? 'Time-Delta-Context: on · ctrl/cmd-click disables the window (keeps values)'
+                      : 'Time-Delta-Context: off · ctrl/cmd-click enables the window')
+                    : isQuickColumnEnabled(c.id)
+                      ? `Disable quick filter for ${c.label} · ctrl/cmd-click clears this column's quick-filter cells`
+                      : `Enable quick filter for ${c.label} · ctrl/cmd-click clears this column's quick-filter cells`}
+                >
+                  <Filter size={12} />
+                </button>
+              )}
+            </div>
             {i < visibleCols.length - 1 && (
               <div
                 className="col-resize-handle"
@@ -2565,58 +3667,45 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             )}
           </div>
         ))}
+        </div>
       </div>
 
-      {/* Quick filter bar (#271, #309) — two rows per column: a pattern/from row
-          and a text/to row, except TYPE (one row) and DELTA (Time-Delta-Context
-          before/after, #371) which don't go through the pattern pipeline. */}
+      {/* Quick filter bar (#271, #309) — two rows per column.
+          Disabled opacity applies to inputs/delta only; the hide toggle stays
+          full-strength like the info-bar hide control. */}
       {quickOpen && (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: gridTemplate,
-            background: 'var(--bg-subtle)',
-            borderBottom: '1px solid var(--border-color)',
-            flexShrink: 0,
-            paddingRight: '8px', // align with the header's scrollbar compensation
-            opacity: quickEnabled ? 1 : 0.5,
-          }}
-        >
+        <div style={{ display: 'flex', background: 'var(--bg-panel)', borderBottom: '1px solid var(--border-color)', flexShrink: 0 }}>
+          <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }} />
+            <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
+              <button
+                className="quick-filter-bar-toggle open"
+                onClick={toggleQuickOpen}
+                title="Hide quick filter bar"
+              >
+                <ChevronUp size={13} />
+              </button>
+            </div>
+          </div>
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+              display: 'grid',
+              gridTemplateColumns: gridTemplate,
+              paddingRight: '8px',
+              opacity: quickEnabled ? 1 : 0.5,
+            }}
+          >
           {visibleCols.map(c => (
-            <div key={c.id} style={{ padding: '0.35rem 0.5rem', display: 'flex', alignItems: 'flex-start', gap: '0.35rem', minWidth: 0 }}>
-              {c.id === 'time' && (
-                <button
-                  className={`quick-filter-bar-toggle ${quickEnabled ? 'open' : ''}`}
-                  onClick={() => setQuickEnabled(e => !e)}
-                  title={quickEnabled ? 'Disable quick filter (keeps patterns)' : 'Enable quick filter'}
-                  style={{ marginTop: '0.2rem' }}
-                >
-                  <Filter size={12} />
-                </button>
-              )}
-              {c.id === 'delta' && (
-                <button
-                  className={`quick-filter-bar-toggle ${deltaFlagState !== 'none' ? 'open' : ''}`}
-                  onClick={handleDeltaToggleClick}
-                  title={[
-                    deltaFlagState === 'all'
-                      ? 'Time-Delta-Context: around all messages. Click to switch it off for all of them.'
-                      : deltaFlagState === 'some'
-                        ? 'Time-Delta-Context: around the flagged messages only. Click to clear the flags.'
-                        : 'Time-Delta-Context: around no message. Click to show it around all messages.',
-                    activeFilters.deltaContextEnabled
-                      ? 'Ctrl/cmd-click to disable the window (keeps flags and values).'
-                      : 'Ctrl/cmd-click to re-enable the window.',
-                  ].join(' ')}
-                  style={{
-                    marginTop: '0.2rem',
-                    opacity: activeFilters.deltaContextEnabled ? 1 : 0.5,
-                    color: deltaFlagState === 'all' ? 'var(--accent-primary)' : undefined,
-                  }}
-                >
-                  <Power size={12} />
-                </button>
-              )}
+            <div key={c.id} style={{
+              padding: '0.35rem 0.5rem',
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: '0.35rem',
+              minWidth: 0,
+              opacity: isQuickColumnEnabled(c.id) ? 1 : 0.45,
+            }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', minWidth: 0, flex: 1 }}>
                 {c.id === 'delta' ? (
                   <>
@@ -2626,7 +3715,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       value={activeFilters.deltaBeforeMs || ''}
                       placeholder="before ms"
                       aria-label="Time-Delta-Context before (ms)"
-                      style={{ opacity: activeFilters.deltaContextEnabled ? 1 : 0.5 }}
+                      disabled={!isQuickColumnEnabled(c.id)}
+                      style={{ opacity: isQuickColumnEnabled(c.id) ? (activeFilters.deltaContextEnabled ? 1 : 0.5) : 0.45 }}
                       onChange={e => onDeltaContextChange?.(Math.max(0, Number(e.target.value) || 0), activeFilters.deltaAfterMs)}
                     />
                     <input
@@ -2635,19 +3725,32 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       value={activeFilters.deltaAfterMs || ''}
                       placeholder="after ms"
                       aria-label="Time-Delta-Context after (ms)"
-                      style={{ opacity: activeFilters.deltaContextEnabled ? 1 : 0.5 }}
+                      disabled={!isQuickColumnEnabled(c.id)}
+                      style={{ opacity: isQuickColumnEnabled(c.id) ? (activeFilters.deltaContextEnabled ? 1 : 0.5) : 0.45 }}
                       onChange={e => onDeltaContextChange?.(activeFilters.deltaBeforeMs, Math.max(0, Number(e.target.value) || 0))}
                     />
                   </>
                 ) : c.id === 'type' ? (
-                  <input
-                    className="quick-filter-bar-input"
-                    type="text"
-                    value={currentPatterns.type?.top ?? ''}
-                    placeholder="WRITE, RESPONSE, Incoming…"
-                    aria-label="Quick filter TYPE"
-                    onChange={e => setQuickCell('type', 'top', e.target.value)}
-                  />
+                  <>
+                    <input
+                      className="quick-filter-bar-input"
+                      type="text"
+                      value={currentPatterns.type?.top ?? ''}
+                      placeholder="type regex…"
+                      aria-label="Quick filter TYPE"
+                      disabled={!isQuickColumnEnabled(c.id)}
+                      onChange={e => setQuickCell('type', 'top', e.target.value)}
+                    />
+                    <input
+                      className="quick-filter-bar-input"
+                      type="text"
+                      value={currentPatterns.type?.bottom ?? ''}
+                      placeholder="direction regex…"
+                      aria-label="Quick filter TYPE direction"
+                      disabled={!isQuickColumnEnabled(c.id)}
+                      onChange={e => setQuickCell('type', 'bottom', e.target.value)}
+                    />
+                  </>
                 ) : c.id === 'time' ? (
                   <>
                     <input
@@ -2655,6 +3758,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       type="datetime-local" step="1"
                       value={currentPatterns.time?.top ?? ''}
                       aria-label="Quick filter TIME from"
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell('time', 'top', e.target.value)}
                     />
                     <input
@@ -2662,6 +3766,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       type="datetime-local" step="1"
                       value={currentPatterns.time?.bottom ?? ''}
                       aria-label="Quick filter TIME to"
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell('time', 'bottom', e.target.value)}
                     />
                   </>
@@ -2671,8 +3776,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       className="quick-filter-bar-input"
                       type="text"
                       value={currentPatterns.value?.top ?? ''}
-                      placeholder="from / 0x.. / 0b.. / &quot;regex&quot;"
+                      placeholder={'from / 0x.. / 0b.. / "regex"'}
                       aria-label="Quick filter VALUE from"
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell('value', 'top', e.target.value)}
                     />
                     <input
@@ -2681,11 +3787,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       value={currentPatterns.value?.bottom ?? ''}
                       placeholder="to / pattern…"
                       aria-label="Quick filter VALUE to"
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell('value', 'bottom', e.target.value)}
                     />
                   </>
                 ) : (
-                  // source / target / dpt: top = address/DPT-key pattern, bottom = name/description regex
                   <>
                     <input
                       className="quick-filter-bar-input"
@@ -2693,6 +3799,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       value={currentPatterns[c.id]?.top ?? ''}
                       placeholder={c.id === 'dpt' ? '1.008-1.011, 16.*' : c.id === 'source' ? '*.1.*, 1.2.12-1.2.91' : '1/5/*, 3/1/1-3/1/127'}
                       aria-label={`Quick filter ${c.label} pattern`}
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell(c.id, 'top', e.target.value)}
                     />
                     <input
@@ -2701,6 +3808,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       value={currentPatterns[c.id]?.bottom ?? ''}
                       placeholder={c.id === 'dpt' ? 'description regex…' : 'name regex…'}
                       aria-label={`Quick filter ${c.label} name`}
+                      disabled={!isQuickColumnEnabled(c.id)}
                       onChange={e => setQuickCell(c.id, 'bottom', e.target.value)}
                     />
                   </>
@@ -2708,6 +3816,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               </div>
             </div>
           ))}
+          </div>
         </div>
       )}
 
@@ -2721,9 +3830,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         <button
           onClick={jumpToLive}
           className="jump-to-live-pill"
+          data-edge={liveEdge}
           style={{
-            position: 'absolute', left: '50%', transform: 'translateX(-50%)',
-            [liveEdge]: '1rem', zIndex: 20,
+            position: 'absolute', left: '50%', zIndex: 20,
+            ...(liveEdge === 'top'
+              ? { top: EDGE_PILL_CENTER, transform: 'translate(-50%, -50%)' }
+              : { bottom: EDGE_PILL_CENTER, transform: 'translate(-50%, 50%)' }),
           }}
           title="Jump back to the live edge"
         >
@@ -2767,22 +3879,108 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         </Fragment>
       )}
 
-      {/* Marks pill — shown only while rows are marked (#310); the arrows jump
-          to the previous / next marked row (#442) */}
-      {markedKeysList.length > 0 && (
+      {/* Marks pill — visible marks (top) and hidden marks (bottom) when present.
+          Vertically centered on the same edge band as the newer pill (1- and 2-line).
+          Pointer events stay on the pill so the row underneath is never selected. */}
+      {(actionableMarkedKeys.length > 0 || hiddenMarkedKeys.length > 0) && (
         <div
           className="marks-pill"
-          style={{ position: 'absolute', right: '1rem', top: '0.75rem', zIndex: 20 }}
+          style={{
+            position: 'absolute',
+            right: EDGE_PILL_INSET,
+            top: EDGE_PILL_CENTER,
+            transform: 'translateY(-50%)',
+            zIndex: 20,
+          }}
+          onPointerDown={e => e.stopPropagation()}
+          onMouseDown={e => {
+            e.stopPropagation();
+            e.preventDefault();
+          }}
+          onClick={e => e.stopPropagation()}
         >
-          <button onClick={() => jumpToMark(-1)} disabled={markedIndices.length === 0} title="Jump to previous mark">
-            <ChevronUp size={14} />
-          </button>
-          <button onClick={() => jumpToMark(1)} disabled={markedIndices.length === 0} title="Jump to next mark">
-            <ChevronDown size={14} />
-          </button>
-          <button onClick={clearMarks} className="marks-pill-clear" title="Clear all marks">
-            <X size={13} /> Clear {markedKeysList.length} mark{markedKeysList.length === 1 ? '' : 's'}
-          </button>
+          {actionableMarkedKeys.length > 0 && (
+            <div className="marks-pill-row">
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation();
+                  if (!canJumpMarkPrev) return;
+                  jumpToMark(-1);
+                }}
+                aria-disabled={!canJumpMarkPrev}
+                title="Jump to previous mark"
+              >
+                <ChevronUp size={14} />
+              </button>
+              {!twoLineMarksPill && (
+                <button
+                  type="button"
+                  onClick={e => {
+                    e.stopPropagation();
+                    if (!canJumpMarkNext) return;
+                    jumpToMark(1);
+                  }}
+                  aria-disabled={!canJumpMarkNext}
+                  title="Jump to next mark"
+                >
+                  <ChevronDown size={14} />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation();
+                  clearMarks();
+                }}
+                className="marks-pill-clear"
+                title="Clear all marks"
+              >
+                <X size={13} /> Clear {actionableMarkedKeys.length} mark{actionableMarkedKeys.length === 1 ? '' : 's'}
+              </button>
+            </div>
+          )}
+          {hiddenMarkedKeys.length > 0 && (
+            <div className="marks-pill-row">
+              {!twoLineMarksPill && (
+                <button
+                  type="button"
+                  onClick={e => {
+                    e.stopPropagation();
+                    if (!canJumpHiddenPrev) return;
+                    jumpToHidden(-1);
+                  }}
+                  aria-disabled={!canJumpHiddenPrev}
+                  title="Jump to previous hidden"
+                >
+                  <ChevronUp size={14} />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation();
+                  if (!canJumpHiddenNext) return;
+                  jumpToHidden(1);
+                }}
+                aria-disabled={!canJumpHiddenNext}
+                title="Jump to next hidden"
+              >
+                <ChevronDown size={14} />
+              </button>
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation();
+                  clearHidden();
+                }}
+                className="marks-pill-clear"
+                title="Clear all hidden"
+              >
+                <X size={13} /> Clear {hiddenMarkedKeys.length} hidden
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -2839,70 +4037,199 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               <div aria-hidden style={{ height: `${oppositeSpacerPx}px`, width: '100%' }} />
             )}
             <div
+              ref={listContentRef}
               style={{
                 height: `${virtTotalPx}px`,
                 width: '100%',
                 position: 'relative'
               }}
             >
-              {virtualizer.getVirtualItems().map((virtualRow) => {
-                const t = telegramRows[virtualRow.index];
-                const key = anchorKey(t);
-                const marked = markedSet.has(key);
-                // The most-recently-clicked row is the most prominent (#310).
-                const latest = marked && key === lastMarked;
-                // Present only as unfiltered Time-Delta-Context, not a real filter
-                // match (#343) — a distinct wash, but marks still take priority.
-                const isContext = !marked && !!contextKeys?.has(key);
-                const targetColor = activeTargetColors[t.target_address];
-                return (
+            {(() => {
+              const virtualItems = virtualizer.getVirtualItems();
+              const firstVisibleRowIndex = virtualItems[0]?.index ?? -1;
+              return virtualItems.map((virtualRow) => {
+              const t = telegramRows[virtualRow.index];
+              const key = anchorKey(t);
+              // Row wash follows mouse (multi)selection only — not manual/goto marks.
+              const mouseSelected = hasMarkReason(markReasons, key, 'mouse');
+              const manualMarked = hasMarkReason(markReasons, key, 'manual');
+              const autoMarked = hasMarkReason(markReasons, key, 'auto');
+              const railMarked = manualMarked || autoMarked;
+              const inContext = !!contextKeys?.has(key);
+              const latest = mouseSelected && key === lastMarked;
+              // Context wash stays for every context row (soft `context` reason).
+              const isContext = !mouseSelected && inContext;
+              const railSigns = inContext && contextAnchorTimestamps.length > 0
+                ? contextRailSigns(
+                  new Date(t.timestamp).getTime(),
+                  contextAnchorTimestamps,
+                  deltaBeforeMs,
+                  deltaAfterMs,
+                )
+                : { before: false, after: false };
+              // Row colour index (if set) takes precedence over address-based colours.
+              const markColor = markColorFromIndex(markColorIndices[key]);
+              const targetColor = markColor ?? activeTargetColors[t.target_address];
+              const railTitle = railMarked ? 'Unmark this message' : 'Mark this message';
+              // Rail fill: colour when set; else context wash; user `manual` on
+              // the latest row uses latest wash; `auto` / other manuals use
+              // selected-but-not-latest wash. Body only.
+              const railBackground = !railMarked
+                ? undefined
+                : markColor
+                  ? `color-mix(in srgb, ${markColor} 34%, transparent)`
+                  : inContext
+                    ? CONTEXT_WASH
+                    : (latest && manualMarked)
+                      ? MOUSE_LATEST_WASH
+                      : MOUSE_SELECTED_WASH;
+              const zebra = (virtualRow.index + stripeOffset) % 2 === 0 ? 'var(--bg-subtle)' : 'transparent';
+              const rowWash = latest
+                ? MOUSE_LATEST_WASH
+                : mouseSelected
+                  ? MOUSE_SELECTED_WASH
+                  : isContext
+                    ? CONTEXT_WASH
+                    : targetColor
+                      ? `color-mix(in srgb, ${targetColor} 9%, transparent)`
+                      : zebra;
+              return (
+                <div
+                  key={virtualRow.key}
+                  data-index={virtualRow.index}
+                  data-akey={key}
+                  onMouseDown={handleMarkMouseDown}
+                  onClick={e => handleMarkClick(e, key, virtualRow.index)}
+                  ref={virtualizer.measureElement}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    transform: `translateY(${virtualRow.start}px)`,
+                    display: 'flex',
+                    borderBottom: '1px solid var(--border-color)',
+                    fontSize: '0.8125rem',
+                    background: zebra,
+                    alignItems: 'start',
+                    minHeight: '60px', // Ensure a minimum touch/visual target
+                    userSelect: 'text',
+                  }}
+                  title={inContext ? 'Unfiltered Time-Delta-Context — this telegram did not match the active filters' : undefined}
+                  className={`log-row${mouseSelected ? ' marked' : ''}${latest ? ' latest' : ''}${isContext ? ' context' : ''}${rowFlash?.key === key ? ' row-flash' : ''}`}
+                  data-flash-gen={rowFlash?.key === key ? rowFlash.gen : undefined}
+                  onAnimationEnd={e => {
+                    if (e.animationName !== 'row-flash-fade') return;
+                    if (e.target !== e.currentTarget) return;
+                    setRowFlash(prev => (prev?.key === key ? null : prev));
+                  }}
+                >
+                  {/* Rail: click anywhere to mark; colour swatch also cycles colour. */}
                   <div
-                    key={virtualRow.key}
-                    data-index={virtualRow.index}
-                    data-akey={key}
-                    onClick={(e) => handleRowClick(e, key, virtualRow.index)}
-                    ref={virtualizer.measureElement}
+                    role="button"
+                    tabIndex={0}
+                    title={railTitle}
+                    onClick={e => handleRailMarkClick(e, key)}
+                    onKeyDown={e => {
+                      if (e.key !== 'Enter' && e.key !== ' ') return;
+                      e.preventDefault();
+                      handleRailMarkClick(e as unknown as React.MouseEvent, key);
+                    }}
                     style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: '100%',
-                      transform: `translateY(${virtualRow.start}px)`,
+                      width: RAIL_WIDTH,
+                      flexShrink: 0,
+                      alignSelf: 'stretch',
+                      display: 'grid',
+                      gridTemplateRows: '1fr auto 1fr',
+                      background: railBackground,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <div
+                      aria-label={railSigns.before ? 'Context before an anchored telegram' : undefined}
+                      data-context-rail={railSigns.before ? 'before' : undefined}
+                      style={{
+                        minHeight: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'var(--text-dim)',
+                        fontSize: '0.7rem',
+                        fontVariantNumeric: 'tabular-nums',
+                        lineHeight: 1,
+                      }}
+                    >
+                      {railSigns.before ? '∧' : null}
+                    </div>
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '0.15rem 0',
+                      }}
+                    >
+                      <button
+                        type="button"
+                        aria-label={markColor ? 'Row colour' : 'Set row colour'}
+                        title={markColor
+                          ? 'Row colour — click for the next colour (Ctrl-click to clear, Alt-click to hide)'
+                          : 'Set a row colour (Alt-click to hide)'}
+                        onClick={e => handleRailColorClick(e, key)}
+                        style={{
+                          width: RAIL_COLOR_SWATCH_SIZE,
+                          height: RAIL_COLOR_SWATCH_SIZE,
+                          flexShrink: 0,
+                          padding: 0,
+                          borderRadius: '50%',
+                          cursor: 'pointer',
+                          background: markColor ?? 'transparent',
+                          border: markColor
+                            ? `1.5px solid ${markColor}`
+                            : '1.5px dashed var(--text-dim)',
+                          // Colour without a manual mark stays visible but dimmed.
+                          opacity: !markColor ? 0.45 : railMarked ? 1 : 0.45,
+                        }}
+                      />
+                    </div>
+                    <div
+                      aria-label={railSigns.after ? 'Context after an anchored telegram' : undefined}
+                      data-context-rail={railSigns.after ? 'after' : undefined}
+                      style={{
+                        minHeight: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'var(--text-dim)',
+                        fontSize: '0.7rem',
+                        fontVariantNumeric: 'tabular-nums',
+                        lineHeight: 1,
+                      }}
+                    >
+                      {railSigns.after ? '∨' : null}
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
                       display: 'grid',
                       gridTemplateColumns: gridTemplate,
-                      borderBottom: '1px solid var(--border-color)',
-                      fontSize: '0.8125rem',
-                      // Marked rows get an accent wash that overrides the zebra
-                      // stripe; the latest click is washed more strongly and gets
-                      // an accent bar. Context-only rows get a distinct (warning-
-                      // hued) wash instead, so they read apart from real matches.
-                      // color-mix adapts to the theme's accent/warning colors.
-                      background: latest
-                        ? 'color-mix(in srgb, var(--accent-primary) 34%, transparent)'
-                        : marked
-                          ? 'color-mix(in srgb, var(--accent-primary) 16%, transparent)'
-                          : isContext
-                            ? 'color-mix(in srgb, var(--warning, #f59e0b) 12%, transparent)'
-                            : targetColor
-                              ? `color-mix(in srgb, ${targetColor} 9%, transparent)`
-                              : (virtualRow.index + stripeOffset) % 2 === 0 ? 'var(--bg-subtle)' : 'transparent',
-                      // A colour given to the row's target in the filter panel (#509):
-                      // a bar on the left, and a wash where nothing else tints the row.
-                      boxShadow: latest
-                        ? 'inset 3px 0 0 0 var(--accent-primary)'
-                        : targetColor ? `inset 4px 0 0 0 ${targetColor}` : undefined,
                       alignItems: 'start',
-                      minHeight: '60px' // Ensure a minimum touch/visual target
+                      alignSelf: 'stretch',
+                      background: rowWash,
                     }}
-                    title={isContext ? 'Unfiltered Time-Delta-Context — this telegram did not match the active filters' : undefined}
-                    className={`log-row${marked ? ' marked' : ''}${latest ? ' latest' : ''}${isContext ? ' context' : ''}`}
                   >
                     {visibleCols.map(c => (
-                      <React.Fragment key={c.id}>{renderCell(c.id, t)}</React.Fragment>
+                      <React.Fragment key={c.id}>
+                        {renderCell(c.id, t, virtualRow.index, virtualRow.index === firstVisibleRowIndex)}
+                      </React.Fragment>
                     ))}
                   </div>
-                );
-              })}
+                </div>
+              );
+            });
+            })()}
             </div>
             {liveEdge === 'top' && oppositeSpacerPx > 0 && (
               <div aria-hidden style={{ height: `${oppositeSpacerPx}px`, width: '100%' }} />
@@ -2937,8 +4264,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   );
 };
 
-// Add styles for quick filter buttons and resize handles
-const style = document.createElement('style');
+// Add styles for quick filter buttons and resize handles.
+// Replace by id so HMR does not leave stale rules (e.g. old user-select:none).
+const TELEGRAM_TABLE_STYLE_ID = 'telegram-table-injected-styles';
+const style = (document.getElementById(TELEGRAM_TABLE_STYLE_ID) as HTMLStyleElement | null)
+  ?? document.createElement('style');
+style.id = TELEGRAM_TABLE_STYLE_ID;
 style.textContent = `
   /* Hide native scrollbar on the telegram list port — overlay thumb paints instead. */
   .custom-scrollbar {
@@ -3013,6 +4344,20 @@ style.textContent = `
     opacity: 0.6;
   }
 
+  /* Temporary inner outline — colour from --row-flash-border (theme). */
+  .log-row.row-flash {
+    animation: row-flash-fade 1.4s ease-out forwards;
+  }
+
+  @keyframes row-flash-fade {
+    0%, 35% {
+      box-shadow: inset 0 0 0 1px var(--row-flash-border);
+    }
+    100% {
+      box-shadow: inset 0 0 0 1px transparent;
+    }
+  }
+
   .quick-filter-btn:hover, .quick-visualize-btn:hover, .quick-last-seen-btn:hover, .quick-send-btn:hover {
     opacity: 1 !important;
     background: var(--bg-hover);
@@ -3066,17 +4411,32 @@ style.textContent = `
 
   .jump-to-live-pill:hover {
     filter: brightness(1.08);
-    transform: translateX(-50%) scale(1.03);
+  }
+  .jump-to-live-pill[data-edge="top"]:hover {
+    transform: translate(-50%, -50%) scale(1.03);
+  }
+  .jump-to-live-pill[data-edge="bottom"]:hover {
+    transform: translate(-50%, 50%) scale(1.03);
   }
 
   .marks-pill {
     display: flex;
+    flex-direction: column;
     align-items: stretch;
     border: 1px solid var(--border-color);
-    border-radius: 999px;
+    border-radius: 12px;
     background: var(--bg-panel);
     box-shadow: var(--shadow-lg);
     overflow: hidden;
+  }
+
+  .marks-pill-row {
+    display: flex;
+    align-items: stretch;
+  }
+
+  .marks-pill-row + .marks-pill-row {
+    border-top: 1px solid var(--border-color);
   }
 
   .marks-pill button {
@@ -3093,7 +4453,7 @@ style.textContent = `
     transition: color 0.15s, background 0.15s;
   }
 
-  .marks-pill button:first-child {
+  .marks-pill-row button:first-child {
     padding-left: 0.6rem;
   }
 
@@ -3102,12 +4462,12 @@ style.textContent = `
     border-left: 1px solid var(--border-color);
   }
 
-  .marks-pill button:hover:not(:disabled) {
+  .marks-pill button:hover:not([aria-disabled="true"]) {
     color: var(--accent-primary);
     background: var(--bg-hover);
   }
 
-  .marks-pill button:disabled {
+  .marks-pill button[aria-disabled="true"] {
     opacity: 0.4;
     cursor: default;
   }
@@ -3117,7 +4477,7 @@ style.textContent = `
     border: none;
     cursor: pointer;
     color: var(--text-dim);
-    padding: 0.15rem;
+    padding: 0.05rem;
     border-radius: 4px;
     display: flex;
     align-items: center;
@@ -3158,7 +4518,8 @@ style.textContent = `
     align-items: center;
     gap: 0.4rem;
     padding: 0.4rem;
-    background: var(--bg-panel);
+    /* Opaque — --bg-panel is glassy/translucent and lets the list show through. */
+    background: var(--bg-dark);
     border: 1px solid var(--border-color);
     border-radius: 8px;
     box-shadow: var(--shadow-lg);
@@ -3246,4 +4607,4 @@ style.textContent = `
     background: var(--accent-primary);
   }
 `;
-document.head.appendChild(style);
+if (!style.parentNode) document.head.appendChild(style);

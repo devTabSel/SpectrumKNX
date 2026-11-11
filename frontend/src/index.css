@@ -31,6 +31,8 @@
   --info: #3b82f6;
   /* Native form controls (date picker icon, select popup) follow the theme (#438) */
   --native-scheme: dark;
+  /* Temporary row flash outline (TelegramTable): white on dark, black on light */
+  --row-flash-border: #ffffff;
 
   /* KNX Specific Colors */
   --dpt-1: #3b82f6;  /* Switch */
@@ -64,6 +66,7 @@
     --success: #13733a;
     --error: #c81e1e;
     --native-scheme: light;
+    --row-flash-border: #000000;
   }
 }
 
@@ -90,6 +93,7 @@
   --warning-text: #fbbf24;
   --success: #22c55e;
   --native-scheme: dark;
+  --row-flash-border: #ffffff;
 }
 
 /* === Explicit light override === */
@@ -116,6 +120,7 @@
   --success: #13733a;
   --error: #c81e1e;
   --native-scheme: light;
+  --row-flash-border: #000000;
 }
 
 * {

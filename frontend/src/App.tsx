@@ -24,6 +24,10 @@ import { TelegramTable, type SortConfig, type SortKey, type ListGotoRequest } fr
 import { expandWithDeltaContext } from './utils/deltaContextExpansion';
 import { activeQuickFilter } from './utils/quickFilter';
 import { anchorKey } from './utils/anchorKey';
+import type { MarkReasonsMap } from './utils/markReasons';
+import { visibleMarkedKeysFrom } from './utils/markReasons';
+import type { MarkColorIndexMap } from './utils/markColors';
+import { forceIncludeKeys } from './utils/forceIncludeKeys';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
 import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
@@ -256,6 +260,9 @@ function App() {
   // Master enable/disable of the filter set (#370): when off the list shows all
   // telegrams while activeFilters is preserved.
   const [filtersEnabled, setFiltersEnabled] = useState(initialUiState.filtersEnabled);
+  // Bumped when the main filter set changes the telegram list — TT pins + flashes.
+  const [ttViewChangeToken, setTtViewChangeToken] = useState(0);
+  const noteTtViewChange = useCallback(() => setTtViewChangeToken(n => n + 1), []);
   const [activeTab, setActiveTab] = useState<'live' | 'history' | 'import'>(
     initialView ? 'history' : initialWorkspace?.tab ?? 'live',
   );
@@ -356,11 +363,17 @@ function App() {
 
   // The Visualization is independent of the main filter (#361): editing the
   // filter changes only the telegram list, never the plotted target selection.
+  const handleFiltersEnabledChange = useCallback((enabled: boolean) => {
+    setFiltersEnabled(enabled);
+    noteTtViewChange();
+  }, [noteTtViewChange]);
+
   const handleFiltersChange = useCallback((newFilters: ActiveFilters | ((prev: ActiveFilters) => ActiveFilters)) => {
     // Every change passes through here, so a removed entry also loses its
     // switched-off marker (#437) and cannot come back switched off later.
     setActiveFilters(prev => pruneDisabled(typeof newFilters === 'function' ? newFilters(prev) : newFilters));
-  }, []);
+    noteTtViewChange();
+  }, [noteTtViewChange]);
   // The filters in effect: selections minus the ones switched off (#437).
   const appliedFilters = useMemo(() => enabledFilters(activeFilters), [activeFilters]);
 
@@ -560,44 +573,6 @@ function App() {
     return () => window.removeEventListener('popstate', onPopState);
   }, [initialView]);
 
-  // ── Persist UI Session State (#341) ──────────────────────────────────────────
-  useEffect(() => {
-    const handle = setTimeout(() => {
-      saveUiState({
-        quickFilter: {
-          open: quickFilterOpen,
-          enabled: quickFilterEnabled,
-          patterns: quickPatterns,
-        },
-        listFollow,
-        listAnchorKey,
-        infoBarOpen,
-        zoomRange,
-        statsSearch,
-        buildingSearch,
-        lastSeenLimit,
-        lastSeenLive,
-        lastSeenSearch,
-        filtersEnabled,
-      });
-    }, 500);
-    return () => clearTimeout(handle);
-  }, [
-    quickFilterOpen,
-    quickFilterEnabled,
-    quickPatterns,
-    listFollow,
-    listAnchorKey,
-    infoBarOpen,
-    zoomRange,
-    statsSearch,
-    buildingSearch,
-    lastSeenLimit,
-    lastSeenLive,
-    lastSeenSearch,
-    filtersEnabled,
-  ]);
-
   // ── Rate Calculation Loop ───────────────────────────────────────────────────
   useEffect(() => {
     const interval = setInterval(() => {
@@ -689,8 +664,14 @@ function App() {
 
   // ── Telegram list marks (#310) ──────────────────────────────────────────────
   // Lifted above the conditionally-rendered panels so marked rows survive
-  // main-panel navigation. Keyed by the table's anchorKey identity.
-  const [markedTelegramKeys, setMarkedTelegramKeys] = useState<string[]>([]);
+  // main-panel navigation. Keys carry mark reasons (mouse / goto / context /
+  // manual); keyed by the table's anchorKey identity. Restored from ui session.
+  const [telegramMarkReasons, setTelegramMarkReasons] = useState<MarkReasonsMap>(
+    () => initialUiState.markReasons,
+  );
+  const [telegramMarkColorIndices, setTelegramMarkColorIndices] = useState<MarkColorIndexMap>(
+    () => initialUiState.markColorIndices,
+  );
   const [lastMarkedTelegramKey, setLastMarkedTelegramKey] = useState<string | null>(null);
   // Write-to-bus "go to": center this telegram in the list. The table marks it
   // only when the current filters still show that exact telegram.
@@ -700,10 +681,60 @@ function App() {
   // ── Per-message Time-Delta-Context flags (#319) ─────────────────────────────
   // Same lifting rationale as marks; each flagged telegram always anchors a
   // context window around itself regardless of the active filters.
-  const [flaggedTelegramKeys, setFlaggedTelegramKeys] = useState<string[]>([]);
+  const [flaggedTelegramKeys, setFlaggedTelegramKeys] = useState<string[]>(
+    () => initialUiState.flaggedKeys,
+  );
   // Global "all" state: every filter match anchors a window. Off, only the
   // flagged telegrams do.
-  const [contextForAllMatches, setContextForAllMatches] = useState(true);
+  const [contextForAllMatches, setContextForAllMatches] = useState(
+    () => initialUiState.contextForAllMatches,
+  );
+
+  // ── Persist UI Session State (#341) ──────────────────────────────────────────
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      saveUiState({
+        quickFilter: {
+          open: quickFilterOpen,
+          enabled: quickFilterEnabled,
+          patterns: quickPatterns,
+        },
+        listFollow,
+        listAnchorKey,
+        infoBarOpen,
+        zoomRange,
+        statsSearch,
+        buildingSearch,
+        lastSeenLimit,
+        lastSeenLive,
+        lastSeenSearch,
+        filtersEnabled,
+        markReasons: telegramMarkReasons,
+        markColorIndices: telegramMarkColorIndices,
+        flaggedKeys: flaggedTelegramKeys,
+        contextForAllMatches,
+      });
+    }, 500);
+    return () => clearTimeout(handle);
+  }, [
+    quickFilterOpen,
+    quickFilterEnabled,
+    quickPatterns,
+    listFollow,
+    listAnchorKey,
+    infoBarOpen,
+    zoomRange,
+    statsSearch,
+    buildingSearch,
+    lastSeenLimit,
+    lastSeenLive,
+    lastSeenSearch,
+    filtersEnabled,
+    telegramMarkReasons,
+    telegramMarkColorIndices,
+    flaggedTelegramKeys,
+    contextForAllMatches,
+  ]);
 
   // ── Sorting (#311: multi-level, ctrl/cmd-click adds a level) ─────────────────
   const [sortConfig, setSortConfig] = useState<SortConfig>(readSortConfigPref);
@@ -838,8 +869,16 @@ function App() {
     // "preserving all per-message flags" — inert, not cleared, while off.
     const flags = f.deltaContextEnabled ? new Set(flaggedTelegramKeys) : EMPTY_KEY_SET;
 
-    return expandWithDeltaContext(sortedLiveTelegrams, matches, anchorKey, flags, deltaBeforeMs, deltaAfterMs, contextForAllMatches);
-  }, [sortedLiveTelegrams, appliedFilters, filtersEnabled, flaggedTelegramKeys, contextForAllMatches, quickFilterOpen, quickFilterEnabled, quickPatterns]);
+    const expanded = expandWithDeltaContext(
+      sortedLiveTelegrams, matches, anchorKey, flags, deltaBeforeMs, deltaAfterMs, contextForAllMatches,
+    );
+    // Non-hidden marks always stay visible, without turning into context anchors.
+    const forcedMarks = new Set(visibleMarkedKeysFrom(telegramMarkReasons));
+    return {
+      items: forceIncludeKeys(sortedLiveTelegrams, expanded.items, anchorKey, forcedMarks),
+      contextKeys: expanded.contextKeys,
+    };
+  }, [sortedLiveTelegrams, appliedFilters, filtersEnabled, flaggedTelegramKeys, contextForAllMatches, quickFilterOpen, quickFilterEnabled, quickPatterns, telegramMarkReasons]);
   const filteredLiveTelegrams = deltaExpandedLive.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = deltaExpandedLive.contextKeys;
@@ -1329,7 +1368,7 @@ function App() {
                     onUploadProject={() => setIsSettingsOpen(true)}
                     writeEnabled={serverConfig?.status?.write_enabled}
                     filtersEnabled={filtersEnabled}
-                    onFiltersEnabledChange={setFiltersEnabled}
+                    onFiltersEnabledChange={handleFiltersEnabledChange}
                   />
               </ResizablePane>
 
@@ -1434,6 +1473,7 @@ function App() {
                     </div>
                     <TelegramTable
                     telegrams={filteredLiveTelegrams}
+                    forceIncludeFrom={sortedLiveTelegrams}
                     visibleColumns={visibleColumns}
                     sortConfig={sortConfig}
                     onSort={handleSort}
@@ -1460,8 +1500,11 @@ function App() {
                     onJumpToLive={jumpToLiveResume}
                     listAnchorKey={listAnchorKey}
                     onListAnchorKeyChange={setListAnchorKey}
-                    markedKeys={markedTelegramKeys}
-                    onMarkedKeysChange={setMarkedTelegramKeys}
+                    viewChangeToken={ttViewChangeToken}
+                    markReasons={telegramMarkReasons}
+                    onMarkReasonsChange={setTelegramMarkReasons}
+                    markColorIndices={telegramMarkColorIndices}
+                    onMarkColorIndicesChange={setTelegramMarkColorIndices}
                     lastMarkedKey={lastMarkedTelegramKey}
                     onLastMarkedKeyChange={setLastMarkedTelegramKey}
                     flaggedKeys={flaggedTelegramKeys}
@@ -1493,7 +1536,8 @@ function App() {
             onVisualizationTargetsChange={setSelectedVisualizationTargets}
             initialView={initialView}
             filtersEnabled={filtersEnabled}
-            onFiltersEnabledChange={setFiltersEnabled}
+            onFiltersEnabledChange={handleFiltersEnabledChange}
+            viewChangeToken={ttViewChangeToken}
           />
         )}
       </main>

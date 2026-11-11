@@ -78,10 +78,23 @@ describe('makeValueMatcher', () => {
     expect(m(v({ value_numeric: 1 }))).toBe(true);
   });
 
-  it('ORs the two rows when they are not both plain numbers', () => {
-    const m = makeValueMatcher('On', 'Off');
-    expect(m(v({ value_formatted: 'On' }))).toBe(true);
-    expect(m(v({ value_formatted: 'Off' }))).toBe(true);
-    expect(m(v({ value_formatted: 'Toggle' }))).toBe(false);
+  it('top matches the formatted cell; bottom matches raw_hex (not a composite)', () => {
+    const m = makeValueMatcher('On', '0x01');
+    expect(m(v({ value_formatted: 'On', raw_hex: '02' }))).toBe(true);
+    expect(m(v({ value_formatted: 'Off', raw_hex: '01' }))).toBe(true);
+    expect(m(v({ value_formatted: 'Off', raw_hex: '02' }))).toBe(false);
+  });
+
+  it('does not match text patterns against a joined formatted+unit+hex string', () => {
+    const m = makeValueMatcher('07', '');
+    // "07" as plain decimal digits is a decimal wildcard against value_numeric.
+    expect(m(v({ value_numeric: 7, raw_hex: '07', value_formatted: 'On' }))).toBe(false);
+    expect(m(v({ value_numeric: 7 }))).toBe(false);
+    expect(m(v({ value_numeric: 07 }))).toBe(false);
+    expect(m(v({ value_numeric: 7 }))).toBe(false);
+    // Literal/regex text on top looks only at formatted, not raw_hex.
+    const text = makeValueMatcher('regex:07', '');
+    expect(text(v({ value_formatted: 'On', raw_hex: '07' }))).toBe(false);
+    expect(text(v({ value_formatted: '07' }))).toBe(true);
   });
 });

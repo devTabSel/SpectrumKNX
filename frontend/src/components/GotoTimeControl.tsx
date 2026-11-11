@@ -29,7 +29,11 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
     // Reseed to the newest telegram each time the popover opens.
     setValue(seedMs != null ? format(new Date(seedMs), INPUT_FMT) : '');
     const r = btnRef.current?.getBoundingClientRect();
-    if (r) setPos({ top: r.bottom + 4, left: r.left });
+    if (r) {
+      // Sit in the middle header row: vertically centered on the clock,
+      // horizontally just to its right over the column labels.
+      setPos({ top: r.top + r.height / 2, left: r.right + 6 });
+    }
     setOpen(true);
   };
 
@@ -70,7 +74,13 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
         <div
           ref={cardRef}
           className="goto-time-popover"
-          style={{ position: 'fixed', top: pos.top, left: pos.left, zIndex: 1000 }}
+          style={{
+            position: 'fixed',
+            top: pos.top,
+            left: pos.left,
+            transform: 'translateY(-50%)',
+            zIndex: 1000,
+          }}
         >
           <input
             type="datetime-local"

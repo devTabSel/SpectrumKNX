@@ -11,9 +11,11 @@ interface Timestamped {
 export interface DeltaExpansionResult<T> {
   /** The full visible set: filter matches, flagged anchors, and pulled-in context rows. */
   items: T[];
-  /** Identity keys (via `anchorKeyOf`) of items present only because they fell
-   * within a window — i.e. they neither matched the filter nor were flagged.
-   * Used to visually mark context-only rows (#343). */
+  /**
+   * Identity keys of visible rows that do **not** match the primary filter.
+   * Independent of per-row context flags: flagging anchors a window around a
+   * row but must not change whether that row is classified as context (#343).
+   */
   contextKeys: Set<string>;
 }
 
@@ -56,11 +58,47 @@ export function expandWithDeltaContext<T extends Timestamped>(
 
   const contextKeys = new Set<string>();
   const kept = items.filter((t, i) => {
-    if (effectiveMatch[i]) return true;
+    // Filter matches are never context rows.
+    if (matches[i]) return true;
+    // Flagged non-matches stay visible and still count as context — the flag
+    // only adds an anchor window, it does not clear context classification.
+    if (flagged[i]) {
+      contextKeys.add(anchorKeyOf(t));
+      return true;
+    }
     const ts = new Date(t.timestamp).getTime();
     const within = anchorTimestamps.some(mts => ts >= mts - beforeMs && ts <= mts + afterMs);
     if (within) contextKeys.add(anchorKeyOf(t));
     return within;
   });
   return { items: kept, contextKeys };
+}
+
+/** Whether a context row sits before (∧) and/or after (∨) active context anchors. */
+export interface ContextRailSigns {
+  /** Row is older than an anchor and inside that anchor's before-window → rail ∧. */
+  before: boolean;
+  /** Row is newer than an anchor and inside that anchor's after-window → rail ∨. */
+  after: boolean;
+}
+
+/**
+ * Rail ∧/∨ for a context-only row relative to telegrams that currently anchor
+ * a context window (active context button / all-matches). A row can be before
+ * one anchor and after another at the same time.
+ */
+export function contextRailSigns(
+  rowTs: number,
+  anchorTimestamps: readonly number[],
+  beforeMs: number,
+  afterMs: number,
+): ContextRailSigns {
+  let before = false;
+  let after = false;
+  for (const ats of anchorTimestamps) {
+    if (beforeMs > 0 && rowTs < ats && rowTs >= ats - beforeMs) before = true;
+    if (afterMs > 0 && rowTs > ats && rowTs <= ats + afterMs) after = true;
+    if (before && after) break;
+  }
+  return { before, after };
 }

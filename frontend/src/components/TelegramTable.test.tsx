@@ -2742,3 +2742,100 @@ test('manual → auto pause away from the spacer requests nothing', () => {
     scrollBlockSize = 800;
   }
 });
+
+test('header icon rail exposes info and quick-filter toggles', () => {
+  const { container } = render(
+    <TelegramTable
+      telegrams={[makeTelegram()]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+  expect(screen.getByTitle('Show info bar')).toBeInTheDocument();
+  expect(screen.getByTitle('Show quick filter bar')).toBeInTheDocument();
+  // Header is flex with a fixed-width rail beside the column grid.
+  const header = container.querySelector('.header-col')!.parentElement!.parentElement!;
+  expect(header.style.display).toBe('flex');
+});
+
+test('SOURCE focus toggle filters to focusListAddresses', () => {
+  localStorage.removeItem('spectrum-knx.telegramTable.sourceFocusOnly');
+  localStorage.removeItem('spectrum-knx.telegramTable.targetFocusOnly');
+  const telegrams = [
+    makeTelegram({ source_address: '1.1.1', raw_hex: 'a' }),
+    makeTelegram({ source_address: '1.1.2', raw_hex: 'b' }),
+  ];
+  const { container, unmount } = render(
+    <TelegramTable
+      telegrams={telegrams}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      focusListAddresses={['1.1.1']}
+    />,
+  );
+  expect(container.querySelectorAll('.log-row')).toHaveLength(2);
+  fireEvent.click(screen.getByTitle(/whose source is flagged/));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(1);
+  expect(container.querySelector('.log-row')!.textContent).toContain('1.1.1');
+  unmount();
+  localStorage.removeItem('spectrum-knx.telegramTable.sourceFocusOnly');
+  localStorage.removeItem('spectrum-knx.telegramTable.targetFocusOnly');
+});
+
+test('Δt cell shows previous and next deltas', () => {
+  const { container } = render(
+    <TelegramTable
+      telegrams={[
+        makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', raw_hex: 'a' }),
+        makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', raw_hex: 'b' }),
+        makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', raw_hex: 'c' }),
+      ]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+  const middle = container.querySelectorAll('.log-row')[1]!;
+  // Descending time sort: top = gap to newer (-), bottom = gap to older (+).
+  // Without a context window the "+" slot stays a plus glyph (no context button).
+  expect(middle.textContent).toMatch(/- ?00:01\.000/);
+  expect(middle.textContent).toMatch(/\+ ?00:01\.000/);
+  expect(middle.querySelector('button[title*="around this message"]')).toBeNull();
+});
+
+test('DPT cell shows key and description; visualize sits on source/target', () => {
+  const onQuickVisualize = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={[makeTelegram({
+        dpt_main: 1, dpt_sub: 1, dpt_name: '1.001 - Switch', unit: null,
+        source_address: '1.1.1', target_address: '1/2/3',
+      })]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={onQuickVisualize}
+    />,
+  );
+  const row = container.querySelector('.log-row')!;
+  expect(row.textContent).toContain('1.001');
+  expect(row.textContent).toContain('Switch');
+  expect(screen.getByTitle('visualize this device')).toBeInTheDocument();
+  expect(screen.getByTitle('visualize this GA')).toBeInTheDocument();
+  expect(screen.queryByTitle('Visualize this target')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByTitle('visualize this GA'));
+  expect(onQuickVisualize).toHaveBeenCalledWith('1/2/3');
+});
