@@ -1251,6 +1251,54 @@ test('quick info bar (#311): toggled via the header button and summarizes the vi
   expect(screen.getByText(/Newest:/)).toBeInTheDocument();
 });
 
+test('quick info bar (#311): still shown with zero counts when the list is empty', () => {
+  render(
+    <TelegramTable
+      telegrams={[]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+  expect(screen.getByText(/0 telegrams/)).toBeInTheDocument();
+  expect(screen.getByText(/0 sources/)).toBeInTheDocument();
+  expect(screen.queryByText(/Oldest:/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Newest:/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/CSV/)).not.toBeInTheDocument();
+});
+
+test('quick info bar (#311): lays out metrics in the column grid like the quick filter', () => {
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(4, 3)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+  const headerCols = container.querySelectorAll('.header-col');
+  const infoBar = screen.getByText(/Oldest:/).parentElement!.parentElement!;
+  expect(infoBar.childElementCount).toBe(headerCols.length);
+  // Two rows in TIME: oldest above newest.
+  const timeCol = screen.getByText(/Oldest:/).parentElement!;
+  expect(timeCol.children[0]).toHaveTextContent(/Oldest:/);
+  expect(timeCol.children[1]).toHaveTextContent(/Newest:/);
+  // Two rows in Δt: min above max.
+  const deltaCol = screen.getByText(/Min Δt:/).parentElement!;
+  expect(deltaCol.children[0]).toHaveTextContent(/Min Δt:/);
+  expect(deltaCol.children[1]).toHaveTextContent(/Max Δt:/);
+});
+
 test('quick info bar shows the busiest second as a max rate (#441)', () => {
   const at = (ts: string) => makeTelegram({ timestamp: ts, raw_hex: ts });
   render(

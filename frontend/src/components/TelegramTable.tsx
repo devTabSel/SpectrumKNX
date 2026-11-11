@@ -558,7 +558,22 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // Summarizes the currently visible (sorted + filtered) rows; oldest/newest
   // and min/max Δt jump to their row via gotoIndex regardless of sort order.
   const infoMetrics = useMemo(() => {
-    if (telegramRows.length === 0) return null;
+    // Keep the bar usable when the view is empty (no rows / all filtered out).
+    if (telegramRows.length === 0) {
+      return {
+        count: 0,
+        oldestIdx: -1,
+        newestIdx: -1,
+        minDeltaIdx: -1,
+        maxDeltaIdx: -1,
+        peak: null,
+        sourceCount: 0,
+        targetCount: 0,
+        dptCount: 0,
+        typeCounts: [] as [string, number][],
+        contextCount: 0,
+      };
+    }
     let oldestIdx = 0, newestIdx = 0;
     let minDeltaIdx = -1, maxDeltaIdx = -1;
     const sources = new Set<string>();
@@ -2245,13 +2260,20 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
   };
 
+  // Chips fill their column cell like quick-filter inputs (two rows / column).
   const infoChipStyle: React.CSSProperties = {
     display: 'inline-flex', alignItems: 'center', gap: '0.3rem',
+    width: '100%', minWidth: 0, boxSizing: 'border-box',
     background: 'var(--bg-tag)', border: '1px solid var(--border-subtle)', borderRadius: '4px',
     padding: '0.15rem 0.45rem', fontSize: '0.68rem', color: 'var(--text-dim)',
+    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
   };
   const infoChipBtnStyle: React.CSSProperties = {
     ...infoChipStyle, cursor: 'pointer', background: 'transparent',
+  };
+  const infoColStyle: React.CSSProperties = {
+    padding: '0.35rem 0.5rem', display: 'flex', flexDirection: 'column',
+    gap: '0.25rem', minWidth: 0,
   };
 
   // Refresh the visible index range, then count telegrams strictly newer than
@@ -2296,72 +2318,148 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* Quick info bar (#311): collapsible summary directly above the header. */}
+      {/* Quick info bar (#311): same column grid as the quick filter — two rows
+          per column (oldest/newest, min/max Δt, counts, …). */}
       {infoOpen && infoMetrics && (
-        <div style={{
-          display: 'flex', flexDirection: 'column', gap: '0.3rem',
-          padding: '0.4rem 0.75rem', borderBottom: '1px solid var(--border-color)',
-          background: 'var(--bg-subtle)', flexShrink: 0,
-        }}>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
-            <button
-              style={infoChipBtnStyle} title="Jump to the oldest telegram in the current view"
-              onClick={() => gotoIndex(infoMetrics.oldestIdx)}
-            >
-              Oldest: {format(new Date(telegramRows[infoMetrics.oldestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
-            </button>
-            <button
-              style={infoChipBtnStyle} title="Jump to the newest telegram in the current view"
-              onClick={() => gotoIndex(infoMetrics.newestIdx)}
-            >
-              Newest: {format(new Date(telegramRows[infoMetrics.newestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS')}
-            </button>
-            {infoMetrics.minDeltaIdx !== -1 && (
-              <button
-                style={infoChipBtnStyle} title="Jump to the smallest time gap in the current view"
-                onClick={() => gotoIndex(infoMetrics.minDeltaIdx)}
-              >
-                Min Δt: {telegramRows[infoMetrics.minDeltaIdx].deltaStr}
-              </button>
-            )}
-            {infoMetrics.maxDeltaIdx !== -1 && (
-              <button
-                style={infoChipBtnStyle} title="Jump to the largest time gap in the current view"
-                onClick={() => gotoIndex(infoMetrics.maxDeltaIdx)}
-              >
-                Max Δt: {telegramRows[infoMetrics.maxDeltaIdx].deltaStr}
-              </button>
-            )}
-            {infoMetrics.peak && (
-              <button
-                style={infoChipBtnStyle} title="Most telegrams within one second in the current view — jump to the start of that burst"
-                onClick={() => gotoIndex(infoMetrics.peak!.startIdx)}
-              >
-                Max rate: {infoMetrics.peak.count}/s
-              </button>
-            )}
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.4rem', alignItems: 'center' }}>
-            <span style={infoChipStyle}>{infoMetrics.count} telegram{infoMetrics.count !== 1 ? 's' : ''}</span>
-            <span style={infoChipStyle}>{infoMetrics.sourceCount} source{infoMetrics.sourceCount !== 1 ? 's' : ''}</span>
-            <span style={infoChipStyle}>{infoMetrics.targetCount} target{infoMetrics.targetCount !== 1 ? 's' : ''}</span>
-            <span style={infoChipStyle}>{infoMetrics.dptCount} DPT{infoMetrics.dptCount !== 1 ? 's' : ''}</span>
-            {infoMetrics.typeCounts.map(([type, n]) => (
-              <span key={type} style={infoChipStyle}>{type}: {n}</span>
-            ))}
-            {infoMetrics.contextCount > 0 && (
-              <span style={infoChipStyle} title="Rows shown only as unfiltered Time-Delta-Context, not real filter matches (#343)">
-                {infoMetrics.contextCount} context
-              </span>
-            )}
-            <button
-              style={infoChipBtnStyle}
-              title="Download the telegrams in the current view (all filters applied, in list order) as CSV"
-              onClick={() => downloadTelegramsCsv(telegramRows)}
-            >
-              <Download size={11} /> CSV
-            </button>
-          </div>
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: gridTemplate,
+            background: 'var(--bg-subtle)',
+            borderBottom: '1px solid var(--border-color)',
+            flexShrink: 0,
+            paddingRight: '8px', // align with the header's scrollbar compensation
+          }}
+        >
+          {visibleCols.map(c => {
+            if (c.id === 'time') {
+              if (infoMetrics.count === 0) {
+                return <div key={c.id} style={infoColStyle} />;
+              }
+              const oldestTs = format(new Date(telegramRows[infoMetrics.oldestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS');
+              const newestTs = format(new Date(telegramRows[infoMetrics.newestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS');
+              return (
+                <div key={c.id} style={infoColStyle}>
+                  <button
+                    style={infoChipBtnStyle}
+                    title={`Jump to the oldest telegram in the current view (${oldestTs})`}
+                    onClick={() => gotoIndex(infoMetrics.oldestIdx)}
+                  >
+                    Oldest: {oldestTs}
+                  </button>
+                  <button
+                    style={infoChipBtnStyle}
+                    title={`Jump to the newest telegram in the current view (${newestTs})`}
+                    onClick={() => gotoIndex(infoMetrics.newestIdx)}
+                  >
+                    Newest: {newestTs}
+                  </button>
+                </div>
+              );
+            }
+            if (c.id === 'delta') {
+              return (
+                <div key={c.id} style={infoColStyle}>
+                  {infoMetrics.minDeltaIdx !== -1 ? (
+                    <button
+                      style={infoChipBtnStyle} title="Jump to the smallest time gap in the current view"
+                      onClick={() => gotoIndex(infoMetrics.minDeltaIdx)}
+                    >
+                      Min Δt: {telegramRows[infoMetrics.minDeltaIdx].deltaStr}
+                    </button>
+                  ) : <span style={{ ...infoChipStyle, visibility: 'hidden' }} aria-hidden>&nbsp;</span>}
+                  {infoMetrics.maxDeltaIdx !== -1 ? (
+                    <button
+                      style={infoChipBtnStyle} title="Jump to the largest time gap in the current view"
+                      onClick={() => gotoIndex(infoMetrics.maxDeltaIdx)}
+                    >
+                      Max Δt: {telegramRows[infoMetrics.maxDeltaIdx].deltaStr}
+                    </button>
+                  ) : <span style={{ ...infoChipStyle, visibility: 'hidden' }} aria-hidden>&nbsp;</span>}
+                </div>
+              );
+            }
+            if (c.id === 'source') {
+              return (
+                <div key={c.id} style={infoColStyle}>
+                  <span style={infoChipStyle}>{infoMetrics.sourceCount} source{infoMetrics.sourceCount !== 1 ? 's' : ''}</span>
+                  <span style={{ ...infoChipStyle, visibility: 'hidden' }} aria-hidden>&nbsp;</span>
+                </div>
+              );
+            }
+            if (c.id === 'target') {
+              return (
+                <div key={c.id} style={infoColStyle}>
+                  <span style={infoChipStyle}>{infoMetrics.targetCount} target{infoMetrics.targetCount !== 1 ? 's' : ''}</span>
+                  <span style={{ ...infoChipStyle, visibility: 'hidden' }} aria-hidden>&nbsp;</span>
+                </div>
+              );
+            }
+            if (c.id === 'type') {
+              const types = infoMetrics.typeCounts;
+              const allTitle = types.map(([t, n]) => `${t}: ${n}`).join(', ') || undefined;
+              const top = types[0];
+              const bottom = types[1];
+              return (
+                <div key={c.id} style={infoColStyle}>
+                  {top
+                    ? <span style={infoChipStyle} title={allTitle}>{top[0]}: {top[1]}</span>
+                    : <span style={infoChipStyle}>0 types</span>}
+                  {bottom
+                    ? (
+                      <span style={infoChipStyle} title={allTitle}>
+                        {bottom[0]}: {bottom[1]}{types.length > 2 ? ` +${types.length - 2}` : ''}
+                      </span>
+                    )
+                    : <span style={{ ...infoChipStyle, visibility: 'hidden' }} aria-hidden>&nbsp;</span>}
+                </div>
+              );
+            }
+            if (c.id === 'dpt') {
+              return (
+                <div key={c.id} style={infoColStyle}>
+                  <span style={infoChipStyle}>{infoMetrics.dptCount} DPT{infoMetrics.dptCount !== 1 ? 's' : ''}</span>
+                  <span style={{ ...infoChipStyle, visibility: 'hidden' }} aria-hidden>&nbsp;</span>
+                </div>
+              );
+            }
+            // value: telegram count (+ context) / max-rate + CSV
+            return (
+              <div key={c.id} style={infoColStyle}>
+                <span
+                  style={infoChipStyle}
+                  title={infoMetrics.contextCount > 0
+                    ? 'Rows shown only as unfiltered Time-Delta-Context, not real filter matches (#343)'
+                    : undefined}
+                >
+                  {infoMetrics.count} telegram{infoMetrics.count !== 1 ? 's' : ''}
+                  {infoMetrics.contextCount > 0 ? ` · ${infoMetrics.contextCount} context` : ''}
+                </span>
+                {infoMetrics.count > 0 ? (
+                  <div style={{ display: 'flex', gap: '0.25rem', minWidth: 0 }}>
+                    {infoMetrics.peak && (
+                      <button
+                        style={{ ...infoChipBtnStyle, width: 'auto', flex: 1 }}
+                        title="Most telegrams within one second in the current view — jump to the start of that burst"
+                        onClick={() => gotoIndex(infoMetrics.peak!.startIdx)}
+                      >
+                        Max rate: {infoMetrics.peak.count}/s
+                      </button>
+                    )}
+                    <button
+                      style={{ ...infoChipBtnStyle, width: infoMetrics.peak ? 'auto' : '100%', flex: infoMetrics.peak ? undefined : 1 }}
+                      title="Download the telegrams in the current view (all filters applied, in list order) as CSV"
+                      onClick={() => downloadTelegramsCsv(telegramRows)}
+                    >
+                      <Download size={11} /> CSV
+                    </button>
+                  </div>
+                ) : (
+                  <span style={{ ...infoChipStyle, visibility: 'hidden' }} aria-hidden>&nbsp;</span>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
