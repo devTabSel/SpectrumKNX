@@ -2852,28 +2852,193 @@ test('metered reveal: manual pause stays a hard stop, no slice is requested', ()
   }
 });
 
-test('metered reveal: overlay scrollbar thumb pulled past the fill stop feeds the backlog', () => {
+test('thumb drag away from fill: scrollTop stays monotonic (no backlog-map jump)', () => {
   scrollBlockSize = 800;
   const h = meteredHandlers();
   try {
-    const { container } = render(meteredProps(makeList(20, 19), true, 30, h));
+    const { container } = render(meteredProps(makeList(30, 29), true, 20, h));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    // Start mid-list so dragging toward older actually moves scrollTop.
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 4;
+    fireEvent.scroll(port);
+    const thumb = screen.getByTestId('list-scrollbar-thumb');
+    const tops: number[] = [];
+    act(() => {
+      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 200 });
+      for (const y of [220, 240, 260, 280, 300]) {
+        fireEvent.pointerMove(thumb, { pointerId: 1, clientY: y });
+        tops.push(port.scrollTop);
+      }
+      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 300 });
+    });
+    expect(tops.length).toBeGreaterThan(1);
+    for (let i = 1; i < tops.length; i++) {
+      expect(tops[i]).toBeGreaterThanOrEqual(tops[i - 1]);
+    }
+    expect(h.onPauseReveal).not.toHaveBeenCalled();
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('metered reveal: overlay scrollbar thumb toward fill meters like wheel (no full flush / no edge jump)', () => {
+  scrollBlockSize = ROW * 2;
+  const h = meteredHandlers();
+  try {
+    const { container, rerender } = render(meteredProps(makeList(8, 7), true, 50, h));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP;
+    fireEvent.scroll(port);
+    h.onListFollowChange.mockClear();
+    const thumb = screen.getByTestId('list-scrollbar-thumb');
+
+    // Thumb toward fill at the hard stop — same engageLiveTowardNewer path as wheel.
+    act(() => {
+      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 200 });
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 160 });
+    });
+    expect(h.onPauseReveal).toHaveBeenCalledTimes(1);
+    const firstN = h.onPauseReveal.mock.calls[0][0] as number;
+    expect(firstN).toBeGreaterThan(0);
+    expect(firstN).toBeLessThanOrEqual(8);
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+    expect(h.onListFollowChange).not.toHaveBeenCalledWith(true);
+
+    // Rows land under the pin; seamless path must not claim follow / full flush.
+    const pinned = LIVE_EDGE_TOP + firstN * ROW;
+    port.scrollTop = pinned;
+    rerender(meteredProps(makeList(8 + firstN, 7 + firstN), true, 50 - firstN, h));
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+    expect(h.onListFollowChange).not.toHaveBeenCalledWith(true);
+    expect(screen.getByRole('button', { name: /newer telegram/ })).toBeInTheDocument();
+
+    act(() => {
+      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 160 });
+    });
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('thumb handle is recomputed live while the mouse is held (backlog change repaints it)', () => {
+  scrollBlockSize = 800;
+  const h = meteredHandlers();
+  try {
+    const rows = makeList(20, 19);
+    const { container, rerender } = render(meteredProps(rows, true, 30, h));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 4;
+    fireEvent.scroll(port);
+    const thumb = screen.getByTestId('list-scrollbar-thumb');
+    act(() => {
+      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 100 });
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 130 });
+    });
+    const heightBefore = Number.parseFloat(thumb.style.height);
+    const topBefore = Number.parseFloat(thumb.style.top);
+    const scrollBefore = port.scrollTop;
+    // Still held: a smaller backlog must grow the handle at once.
+    rerender(meteredProps(rows, true, 5, h));
+    const heightAfter = Number.parseFloat(thumb.style.height);
+    expect(heightAfter).toBeGreaterThan(heightBefore);
+    // And further moves keep scrolling from live geometry (no origin snap).
+    act(() => {
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 160 });
+    });
+    expect(port.scrollTop).toBeGreaterThanOrEqual(scrollBefore);
+    expect(Number.parseFloat(thumb.style.top)).toBeGreaterThanOrEqual(0);
+    expect(Number.isFinite(topBefore)).toBe(true);
+    act(() => {
+      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 160 });
+    });
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('metered reveal: thumb drag and wheel request the same slice for the same scroll delta', () => {
+  scrollBlockSize = ROW * 2;
+  const runWheel = () => {
+    const h = meteredHandlers();
+    const { container, unmount } = render(meteredProps(makeList(8, 7), true, 50, h));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP;
+    fireEvent.scroll(port);
+    fireEvent.wheel(port, { deltaY: -40 });
+    const n = h.onPauseReveal.mock.calls[0]?.[0];
+    unmount();
+    return n;
+  };
+  const runThumb = () => {
+    const h = meteredHandlers();
+    const { container, unmount } = render(meteredProps(makeList(8, 7), true, 50, h));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP;
+    fireEvent.scroll(port);
+    const thumb = screen.getByTestId('list-scrollbar-thumb');
+    // Thumb px per scroll px under the live geometry; pick a ~40px scroll move.
+    const virtSH = port.scrollHeight + 50 * ROW;
+    const thumbH = Number.parseFloat(thumb.style.height);
+    const travel = port.clientHeight - thumbH;
+    const thumbDy = -(40 / (virtSH - port.clientHeight)) * travel;
+    act(() => {
+      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 300 });
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 300 + thumbDy });
+    });
+    const n = h.onPauseReveal.mock.calls[0]?.[0];
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+    act(() => {
+      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 300 + thumbDy });
+    });
+    unmount();
+    return n;
+  };
+  try {
+    const wheelN = runWheel();
+    expect(wheelN).toBe(2);
+    expect(runThumb()).toBe(wheelN);
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('metered reveal: repeated thumb moves while a step is pending accumulate like wheel', () => {
+  scrollBlockSize = ROW * 2;
+  const h = meteredHandlers();
+  try {
+    const { container, rerender } = render(meteredProps(makeList(8, 7), true, 50, h));
     const port = container.querySelector('.custom-scrollbar') as HTMLElement;
     port.scrollTop = LIVE_EDGE_TOP;
     fireEvent.scroll(port);
     const thumb = screen.getByTestId('list-scrollbar-thumb');
 
-    // Dragging up from the settled edge: the real range is exhausted, the
-    // overhang asks for backlog rows (capped per step).
     act(() => {
-      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 200 });
-      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 100 });
+      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 300 });
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 280 });
     });
     expect(h.onPauseReveal).toHaveBeenCalledTimes(1);
-    expect(h.onPauseReveal.mock.calls[0][0]).toBeGreaterThan(0);
-    expect(h.onPauseReveal.mock.calls[0][0]).toBeLessThanOrEqual(8);
-    expect(h.onPauseFlush).not.toHaveBeenCalled();
+    const firstN = h.onPauseReveal.mock.calls[0][0] as number;
+
+    // Further into fill while the first slice has not landed: delta accumulates;
+    // after rows land the merge path may top the reveal (same as wheel).
     act(() => {
-      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 100 });
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 200 });
+    });
+    expect(h.onPauseReveal).toHaveBeenCalledTimes(1);
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+
+    port.scrollTop = LIVE_EDGE_TOP + firstN * ROW;
+    rerender(meteredProps(makeList(8 + firstN, 7 + firstN), true, 50 - firstN, h));
+    // Pending accumulated delta may top up the slice once rows have height.
+    expect(h.onPauseReveal.mock.calls.length).toBeGreaterThanOrEqual(1);
+    const lastN = h.onPauseReveal.mock.calls.at(-1)![0] as number;
+    expect(lastN).toBeGreaterThan(0);
+    expect(lastN).toBeLessThanOrEqual(8);
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+
+    act(() => {
+      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 200 });
     });
   } finally {
     scrollBlockSize = 800;

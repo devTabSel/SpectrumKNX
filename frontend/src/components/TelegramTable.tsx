@@ -1191,21 +1191,30 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // Latest toward-newer live-edge helpers for the global key listener (empty deps).
   const engageLiveTowardNewerRef = useRef<(deltaY: number) => void>(() => {});
   const keyTowardNewerRef = useRef<(key: string) => boolean>(() => false);
+  const syncOverlayScrollbarRef = useRef(() => {});
   const keyScrollDeltaRef = useRef<(key: string) => number>(() => 0);
   const scheduleRubberBandRef = useRef(() => {});
   const unlockScrollGeometryIfSettledRef = useRef(() => {});
   const inFillRubberZoneRef = useRef<() => boolean>(() => false);
   const inOppositeRubberZoneRef = useRef<() => boolean>(() => false);
+  // Thumb drag state: only the last pointer Y. Each move becomes an incremental
+  // scroll delta (live geometry), exactly like successive wheel events.
+  const sbDragRef = useRef<{
+    pointerId: number;
+    lastY: number;
+  } | null>(null);
   useEffect(() => {
     const release = () => {
       if (!scrollbarHeldRef.current) return;
       scrollbarHeldRef.current = false;
+      if (sbDragRef.current) sbDragRef.current = null;
       noteUserScroll();
       if (inFillRubberZoneRef.current() || inOppositeRubberZoneRef.current()) {
         scheduleRubberBandRef.current();
       } else {
         unlockScrollGeometryIfSettledRef.current();
       }
+      syncOverlayScrollbarRef.current();
     };
     // Keys scroll the list without it holding focus, so listen globally.
     const onKey = (e: KeyboardEvent) => {
@@ -1805,11 +1814,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // an extra render that would clear the sticky newer-pill across a flush gap.
   const sbTrackRef = useRef<HTMLDivElement | null>(null);
   const sbThumbRef = useRef<HTMLDivElement | null>(null);
-  const sbDragRef = useRef<{
-    pointerId: number;
-    startY: number;
-    startScrollTop: number;
-  } | null>(null);
 
   /**
    * Virtual backlog px for the overlay thumb — same basis as the newer pill:
@@ -1833,7 +1837,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     return Math.max(0, newer - mergedOut) * ROW_ESTIMATE;
   };
 
-  /** Paint-only thumb: size/position from the newer-pill backlog (not raw pausedCount). */
+  /**
+   * Paint-only thumb: size/position from the newer-pill backlog (not raw
+   * pausedCount). Always computed from live state — also while the thumb is held.
+   */
   const syncOverlayScrollbar = () => {
     const el = parentRef.current;
     const track = sbTrackRef.current;
@@ -1857,26 +1864,53 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     thumb.style.top = `${top}px`;
     thumb.style.height = `${thumbHeight}px`;
   };
+  syncOverlayScrollbarRef.current = syncOverlayScrollbar;
 
   /**
-   * Thumb drag → real scrollTop, clamped to the real scroll range. `raw` is the
-   * unclamped target: how far past the fill hard-stop the thumb was pulled is
-   * the backlog the drag asks for.
+   * One user scroll gesture of `deltaY` px along the scroll axis — the single
+   * entry for wheel and scrollbar-thumb drag. Runs BEFORE the actual scroll
+   * (native for wheel, explicit for thumb) so the pause-buffer step arms its
+   * pin/anchor while the viewport is still at rest.
    */
-  const mapThumbDeltaToScrollTop = (startScrollTop: number, deltaY: number) => {
+  const handleScrollGesture = (deltaY: number, opts?: { pulseOnce?: boolean }) => {
+    noteUserScroll();
+    if (wheelTowardNewer(deltaY)) {
+      engageLiveTowardNewer(deltaY);
+      // Hard-stop overscroll: scrollTop may not change, so remount to
+      // restart the pause-label highlight fade on each attempt.
+      if (isManualPause && fillRubberFullyVisible()) {
+        if (!opts?.pulseOnce) {
+          pulseFillPauseLabels();
+        } else if (!fillPauseSbPulsedRef.current) {
+          fillPauseSbPulsedRef.current = true;
+          pulseFillPauseLabels();
+        }
+      }
+    }
+    // While a backlog step is pending the geometry must stay live.
+    if (flushPinRef.current) return;
+    if (inOppositeRubberZone() || inFillRubberBand()) {
+      lockScrollGeometry();
+    } else {
+      unlockScrollGeometryIfSettled();
+    }
+    if (inFillRubberBand() || inOppositeRubberZone()) scheduleRubberBand();
+  };
+
+  /**
+   * Thumb pixels → scroll pixels with the CURRENT virtual geometry (recomputed
+   * on every move, never frozen), so the handle always spans what is painted.
+   */
+  const thumbPxToScrollPx = (thumbDy: number) => {
     const el = parentRef.current;
-    if (!el) return { next: startScrollTop, raw: startScrollTop };
-    const { clientHeight, scrollHeight } = el;
-    const backlogPx = overlayBacklogPx(startScrollTop, clientHeight);
-    const virtSH = scrollHeight + backlogPx;
+    if (!el) return 0;
+    const { clientHeight, scrollHeight, scrollTop } = el;
+    const virtSH = scrollHeight + overlayBacklogPx(scrollTop, clientHeight);
     const thumbHeight = Math.max(LIST_SB_MIN_THUMB_PX, (clientHeight * clientHeight) / Math.max(virtSH, 1));
     const trackTravel = Math.max(0, clientHeight - thumbHeight);
-    const maxScroll = Math.max(0, scrollHeight - clientHeight);
     const virtMaxScroll = Math.max(0, virtSH - clientHeight);
-    if (trackTravel <= 0 || maxScroll <= 0) return { next: startScrollTop, raw: startScrollTop };
-    const virtDelta = (deltaY / trackTravel) * virtMaxScroll;
-    const raw = startScrollTop + virtDelta;
-    return { next: Math.max(0, Math.min(maxScroll, raw)), raw };
+    if (trackTravel <= 0 || virtMaxScroll <= 0) return 0;
+    return (thumbDy / trackTravel) * virtMaxScroll;
   };
 
   const onSbThumbPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1887,43 +1921,25 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     e.currentTarget.setPointerCapture?.(e.pointerId);
     scrollbarHeldRef.current = true;
     lockScrollGeometry();
-    sbDragRef.current = {
-      pointerId: e.pointerId,
-      startY: e.clientY,
-      startScrollTop: el.scrollTop,
-    };
+    sbDragRef.current = { pointerId: e.pointerId, lastY: e.clientY };
   };
 
+  // Each move is one wheel-equivalent delta: same gesture handler (metered
+  // pause-buffer mixing, pending-step accumulation, hard stop), then the scroll
+  // itself, then an immediate live repaint of the handle.
   const onSbThumbPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = sbDragRef.current;
     const el = parentRef.current;
     if (!drag || drag.pointerId !== e.pointerId || !el) return;
-    noteUserScroll();
-    const deltaY = e.clientY - drag.startY;
-    const before = el.scrollTop;
-    const { next, raw } = mapThumbDeltaToScrollTop(drag.startScrollTop, deltaY);
-    el.scrollTop = next;
-    // Thumb dragged further into fill while already at the hard stop.
-    const towardFill = liveEdge === 'top' ? deltaY < 0 : deltaY > 0;
-    // Pulled past the fill stop with a backlog waiting: the overhang is the
-    // part of the drag that asks for backlog rows — feed them in steps.
-    if (towardFill && backlogFeedActive() && !flushPinRef.current) {
-      const settled = settledEdgeScrollTop();
-      const overhang = liveEdge === 'top' ? settled - raw : raw - settled;
-      if (overhang > 0) {
-        engageLiveTowardNewer(liveEdge === 'top' ? -overhang : overhang);
-      }
-    }
-    if (
-      isManualPause
-      && towardFill
-      && before === next
-      && fillRubberFullyVisible()
-      && !fillPauseSbPulsedRef.current
-    ) {
-      fillPauseSbPulsedRef.current = true;
-      pulseFillPauseLabels();
-    }
+    const dy = e.clientY - drag.lastY;
+    drag.lastY = e.clientY;
+    if (dy === 0) return;
+    const scrollDelta = thumbPxToScrollPx(dy);
+    if (scrollDelta === 0) return;
+    handleScrollGesture(scrollDelta, { pulseOnce: true });
+    const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+    el.scrollTop = Math.max(0, Math.min(maxScroll, el.scrollTop + scrollDelta));
+    syncOverlayScrollbar();
   };
 
   const onSbThumbPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1932,6 +1948,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     sbDragRef.current = null;
     fillPauseSbPulsedRef.current = false;
     try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+    syncOverlayScrollbar();
     // Global pointerup listener also clears scrollbarHeldRef + rubber/unlock.
   };
 
@@ -2949,14 +2966,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       // Seamless flush: pin + gesture delta only — never scrollToEdge.
       // Follow only if newest is still fully visible after the delta (user
       // landed on the live edge); a mid-backlog delta must not snap to edge.
-      const el = parentRef.current;
-      const beforePin = el?.scrollTop ?? 0;
       pinFlushViewport();
-      // A held scrollbar thumb maps from the drag's start scrollTop: rows
-      // inserted before it shift that origin by the pin.
-      if (el && sbDragRef.current && liveEdge === 'top') {
-        sbDragRef.current.startScrollTop += el.scrollTop - beforePin;
-      }
       const leftover = applyPendingFlushScroll();
       if (revealLanded && continueRevealIfSlotOpen(leftover, true)) return;
       finishFlush();
@@ -4158,25 +4168,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       <div
         ref={parentRef}
         onScroll={handleScroll}
-        onWheel={e => {
-          noteUserScroll();
-          if (wheelTowardNewer(e.deltaY)) {
-            engageLiveTowardNewer(e.deltaY);
-            // Hard-stop overscroll: scrollTop may not change, so remount to
-            // restart the pause-label highlight fade on each attempt.
-            if (isManualPause && fillRubberFullyVisible()) {
-              pulseFillPauseLabels();
-            }
-          }
-          // While a backlog step is pending the geometry must stay live.
-          if (flushPinRef.current) return;
-          if (inOppositeRubberZone() || inFillRubberBand()) {
-            lockScrollGeometry();
-          } else {
-            unlockScrollGeometryIfSettled();
-          }
-          if (inFillRubberBand() || inOppositeRubberZone()) scheduleRubberBand();
-        }}
+        onWheel={e => handleScrollGesture(e.deltaY)}
         onTouchMove={noteUserScroll}
         // A press on the container itself (not on a row) is the scrollbar.
         onPointerDown={e => {
