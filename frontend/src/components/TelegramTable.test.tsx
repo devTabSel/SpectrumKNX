@@ -934,7 +934,7 @@ test('jump pill counts telegrams newer than the newest one on screen, for both t
     expect(screen.queryByText(/new telegram/)).not.toBeInTheDocument();
     live.unmount();
 
-    // Scrolled so the fourth row is the newest one on screen: three are newer.
+    // Scrolled so the fourth row is the newest settled on screen: three are newer.
     // scrollTop is measured past the fill-rubber padding (settled edge = LIVE_EDGE_TOP).
     const three = render(table(rows, sortConfig, false));
     scrollTo(three.container, LIVE_EDGE_TOP + ROW * 3);
@@ -947,6 +947,20 @@ test('jump pill counts telegrams newer than the newest one on screen, for both t
     expect(screen.getByRole('button', { name: '1 newer telegram' })).toBeInTheDocument();
     one.unmount();
 
+    // Partially scrolled toward fill: row 3 is only clipped, still the on-screen
+    // anchor — so still 3 newer (not 4). Completely scrolled-out merged rows
+    // (0..2) stay in the pill; overscan must not suppress them.
+    const partial = render(table(rows, sortConfig, false));
+    scrollTo(partial.container, LIVE_EDGE_TOP + ROW * 3 + ROW / 2);
+    expect(screen.getByRole('button', { name: '3 newer telegrams' })).toBeInTheDocument();
+    partial.unmount();
+
+    // Completely past row 3 toward fill → row 3 joins the pill → 4 newer.
+    const past = render(table(rows, sortConfig, false));
+    scrollTo(past.container, LIVE_EDGE_TOP + ROW * 4);
+    expect(screen.getByRole('button', { name: '4 newer telegrams' })).toBeInTheDocument();
+    past.unmount();
+
     // Oldest first. The viewport holds the two oldest rows, so eight are newer.
     const asc: SortConfig = [{ key: 'timestamp', direction: 'asc' }];
     const ascRows = rows.slice().reverse();
@@ -957,6 +971,125 @@ test('jump pill counts telegrams newer than the newest one on screen, for both t
     // Live mode hides the pill even while those newer rows are off screen.
     view.rerender(table(ascRows, asc, true));
     expect(screen.queryByText(/new telegram/)).not.toBeInTheDocument();
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('jump pill keeps a fill-edge partial as anchor; only fully scrolled-out count', () => {
+  // Viewport holds ~2 rows. Index 2 half out toward fill still intersects →
+  // anchor; N = 2 (rows 0..1 fully out). Overscan must not suppress the pill.
+  const ROW = 85;
+  scrollBlockSize = ROW * 2;
+  try {
+    const rows = makeList(10, 9);
+    const { container } = render(
+      <TelegramTable
+        telegrams={rows}
+        visibleColumns={visibleColumns}
+        sortConfig={sortConfig}
+        onSort={vi.fn()}
+        activeFilters={DEFAULT_FILTERS}
+        onQuickFilter={vi.fn()}
+        onQuickVisualize={vi.fn()}
+        listFollow={false}
+        onListFollowChange={vi.fn()}
+        onListAnchorKeyChange={vi.fn()}
+      />,
+    );
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 2 + ROW / 2;
+    fireEvent.scroll(port);
+    expect(screen.getByRole('button', { name: '2 newer telegrams' })).toBeInTheDocument();
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('jump pill newer count follows filter on and off', () => {
+  // Filter off: three fill-offscreen rows. Filter on: only the three newest
+  // match — after scroll, N is among that keep set only (1), not the unfiltered 3.
+  const ROW = 85;
+  scrollBlockSize = ROW * 2;
+  const rows = makeList(10, 9).map((t, i) => ({
+    ...t,
+    target_address: i < 3 ? '1/2/keep' : '1/2/drop',
+  }));
+  const base = {
+    telegrams: rows,
+    visibleColumns,
+    sortConfig,
+    onSort: vi.fn(),
+    activeFilters: DEFAULT_FILTERS,
+    onQuickFilter: vi.fn(),
+    onQuickVisualize: vi.fn(),
+    listFollow: false,
+    onListFollowChange: vi.fn(),
+    onListAnchorKeyChange: vi.fn(),
+  };
+  try {
+    const { container, rerender } = render(<TelegramTable {...base} />);
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 3;
+    fireEvent.scroll(port);
+    expect(screen.getByRole('button', { name: '3 newer telegrams' })).toBeInTheDocument();
+
+    rerender(
+      <TelegramTable
+        {...base}
+        quickFilterOpen
+        quickFilterEnabled
+        quickPatterns={{ target: { top: '1/2/keep', bottom: '' } }}
+      />,
+    );
+    // Keep-only list has 3 rows; scroll one row off toward fill → 1 newer.
+    port.scrollTop = LIVE_EDGE_TOP + ROW;
+    fireEvent.scroll(port);
+    expect(screen.getByRole('button', { name: '1 newer telegram' })).toBeInTheDocument();
+
+    rerender(<TelegramTable {...base} />);
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 3;
+    fireEvent.scroll(port);
+    expect(screen.getByRole('button', { name: '3 newer telegrams' })).toBeInTheDocument();
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('filter off: newer pill adds unmerged backlog to fully scrolled-out merged rows', () => {
+  // N = merged completely out toward fill (3) + pause backlog (2) = 5.
+  // Math.max(merged, paused) would wrongly show 3.
+  // Thumb virtual backlog = N − mergedOut (= paused only); merged-out already in scrollHeight.
+  const ROW = 85;
+  scrollBlockSize = ROW * 2;
+  const rows = makeList(10, 9);
+  try {
+    const { container } = render(
+      <TelegramTable
+        telegrams={rows}
+        visibleColumns={visibleColumns}
+        sortConfig={sortConfig}
+        onSort={vi.fn()}
+        activeFilters={DEFAULT_FILTERS}
+        onQuickFilter={vi.fn()}
+        onQuickVisualize={vi.fn()}
+        listFollow={false}
+        onListFollowChange={vi.fn()}
+        onListAnchorKeyChange={vi.fn()}
+        isPaused
+        {...pauseBacklogFor(rows, 2)}
+      />,
+    );
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 3;
+    fireEvent.scroll(port);
+    expect(screen.getByRole('button', { name: '5 newer telegrams' })).toBeInTheDocument();
+    const thumb = screen.getByTestId('list-scrollbar-thumb');
+    const sh = port.scrollHeight;
+    expect(Number.parseFloat(thumb.style.height)).toBeCloseTo(
+      Math.max(20, (scrollBlockSize * scrollBlockSize) / (sh + 2 * ROW)),
+      0,
+    );
   } finally {
     scrollBlockSize = 800;
   }
@@ -2250,6 +2383,8 @@ test('pausedCount does not grow scrollHeight; pill still shows backlog', () => {
     const baseAsc = portAsc.scrollHeight;
     ascView.rerender(props(4, asc));
     expect(portAsc.scrollHeight).toBe(baseAsc);
+    // Viewport (~800px) may clip the newest published row at the fill edge;
+    // only fully scrolled-out merged rows count, plus the 4 paused → 4 newer.
     expect(screen.getByRole('button', { name: '4 newer telegrams' })).toBeInTheDocument();
     ascView.unmount();
   } finally {

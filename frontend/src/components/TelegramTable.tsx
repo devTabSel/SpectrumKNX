@@ -284,28 +284,41 @@ function timeMs(timestamp: string): number {
 }
 
 /**
- * Rows strictly newer than `newestMs` in a list ordered by time.
- * Descending lists (newest first) keep those rows at the start; ascending
- * lists keep them at the end.
+ * Merged rows completely scrolled out of the viewport toward the fill axis
+ * (partial overlap does not count). `liveEdge === 'top'` → rows fully above
+ * the viewport; `'bottom'` → fully below. Walks from the fill edge so
+ * unmeasured sizes stop the scan rather than inventing offsets.
  */
-function countNewerThan(rows: { timestamp: string }[], newestMs: number, ascending: boolean): number {
-  if (!Number.isFinite(newestMs) || rows.length === 0) return 0;
-  let lo = 0;
-  let hi = rows.length;
-  if (ascending) {
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (timeMs(rows[mid].timestamp) <= newestMs) lo = mid + 1;
-      else hi = mid;
+function countFillAxisScrolledOut(
+  rowCount: number,
+  liveEdge: 'top' | 'bottom',
+  scrollTop: number,
+  clientHeight: number,
+  getStart: (index: number) => number | undefined,
+  getSize: (index: number) => number | undefined,
+): number {
+  if (rowCount === 0 || clientHeight <= 0) return 0;
+  const viewTop = scrollTop;
+  const viewBottom = scrollTop + clientHeight;
+  let count = 0;
+  if (liveEdge === 'top') {
+    for (let i = 0; i < rowCount; i++) {
+      const start = getStart(i);
+      const size = getSize(i);
+      if (start === undefined || size === undefined || size <= 0) break;
+      if (start + size <= viewTop) count++;
+      else break;
     }
-    return rows.length - lo;
+  } else {
+    for (let i = rowCount - 1; i >= 0; i--) {
+      const start = getStart(i);
+      const size = getSize(i);
+      if (start === undefined || size === undefined || size <= 0) break;
+      if (start >= viewBottom) count++;
+      else break;
+    }
   }
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (timeMs(rows[mid].timestamp) > newestMs) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
+  return count;
 }
 
 // ── Quick filter bar (#271, #309) ────────────────────────────────────────────
@@ -1145,8 +1158,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // click would re-enable follow immediately.
   const detachedFromEdgeRef = useRef(!(listFollow ?? true));
   // Last positive newer-pill count; held across the flush gap until a real
-  // newerCount is measured again.
+  // newerCount is measured again. Overlay thumb reads the same value.
   const stickyNewerCountRef = useRef(0);
+  const displayNewerCountRef = useRef(0);
   // Mirrors atEdgeRef for render. Pill still shows when a backlog exists.
   const [followingLive, setFollowingLive] = useState(listFollow ?? true);
   // Armed on every pause flush; forces pin (never scrollToEdge) until the
@@ -1797,14 +1811,36 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     startScrollTop: number;
   } | null>(null);
 
-  /** Paint-only thumb: size/position as if filter-visible pause rows were in scrollHeight. */
+  /**
+   * Virtual backlog px for the overlay thumb — same basis as the newer pill:
+   * displayNewerCount minus merged rows already in scrollHeight (fill-offscreen).
+   * Equals filter-visible pause rows in the steady state; keeps sticky count
+   * during a flush gap so thumb and pill stay aligned.
+   */
+  const overlayBacklogPx = (scrollTop: number, clientHeight: number) => {
+    const newer = Math.max(0, displayNewerCountRef.current);
+    if (telegramRows.length === 0) return newer * ROW_ESTIMATE;
+    if (!isTimeSort) return Math.max(0, visiblePausedCount) * ROW_ESTIMATE;
+    const mergedOut = countFillAxisScrolledOut(
+      telegramRows.length,
+      liveEdge,
+      scrollTop,
+      clientHeight,
+      (i) => virtualizer.measurementsCache[i]?.start
+        ?? virtualizer.getOffsetForIndex(i, 'start')?.[0],
+      (i) => virtualizer.measurementsCache[i]?.size ?? ROW_ESTIMATE,
+    );
+    return Math.max(0, newer - mergedOut) * ROW_ESTIMATE;
+  };
+
+  /** Paint-only thumb: size/position from the newer-pill backlog (not raw pausedCount). */
   const syncOverlayScrollbar = () => {
     const el = parentRef.current;
     const track = sbTrackRef.current;
     const thumb = sbThumbRef.current;
     if (!el || !track || !thumb) return;
     const { clientHeight, scrollHeight, scrollTop } = el;
-    const backlogPx = telegramRows.length > 0 ? Math.max(0, visiblePausedCount) * ROW_ESTIMATE : 0;
+    const backlogPx = overlayBacklogPx(scrollTop, clientHeight);
     const virtSH = scrollHeight + backlogPx;
     if (virtSH <= clientHeight + 0.5) {
       track.style.display = 'none';
@@ -1831,7 +1867,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     const el = parentRef.current;
     if (!el) return { next: startScrollTop, raw: startScrollTop };
     const { clientHeight, scrollHeight } = el;
-    const backlogPx = telegramRows.length > 0 ? Math.max(0, visiblePausedCount) * ROW_ESTIMATE : 0;
+    const backlogPx = overlayBacklogPx(startScrollTop, clientHeight);
     const virtSH = scrollHeight + backlogPx;
     const thumbHeight = Math.max(LIST_SB_MIN_THUMB_PX, (clientHeight * clientHeight) / Math.max(virtSH, 1));
     const trackTravel = Math.max(0, clientHeight - thumbHeight);
@@ -3318,34 +3354,40 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     gap: '0.25rem', minWidth: 0,
   };
 
-  // Refresh the visible index range, then count filter-visible telegrams
-  // (published∪paused) strictly newer than the newest one on screen. Overscan
-  // rows are rendered but not on screen. A range computed while every row still
-  // has size 0 is meaningless: the virtualizer's binary search treats every
-  // start offset as equal and lands on an arbitrary middle index.
+  // Newer pill = filter-visible unmerged (pause backlog) + filter-visible
+  // merged rows completely scrolled out toward the fill axis. Partial overlap
+  // with the viewport does not count as out. `telegramRows` is already the
+  // on-list (filter) set; `visiblePausedCount` is the filtered backlog.
   const virtualItems = virtualizer.getVirtualItems();
-  const visibleRange = virtualizer.range;
   let newerCount = 0;
   const rangeMeasured = virtualItems.some(item => item.size > 0);
+  const scrollEl = parentRef.current;
   if (isTimeSort) {
     if (telegramRows.length === 0) {
-      // Empty viewport: every filter-visible pill row (usually pause backlog) counts.
+      // Empty list: every filter-visible pill row (usually pause backlog) counts.
       newerCount = pillVisible.length;
-    } else if (visibleRange && rangeMeasured && virtualizer.getTotalSize() > 0) {
-      const start = Math.max(0, visibleRange.startIndex);
-      const end = Math.min(telegramRows.length - 1, visibleRange.endIndex);
-      if (end >= start) {
-        let newest = -Infinity;
-        for (let i = start; i <= end; i++) {
-          const ms = timeMs(telegramRows[i].timestamp);
-          if (ms > newest) newest = ms;
-        }
-        newerCount = countNewerThan(pillVisible, newest, liveEdge === 'bottom');
+    } else {
+      let mergedOut = 0;
+      if (rangeMeasured && scrollEl && virtualizer.getTotalSize() > 0) {
+        mergedOut = countFillAxisScrolledOut(
+          telegramRows.length,
+          liveEdge,
+          scrollEl.scrollTop,
+          scrollEl.clientHeight,
+          (i) => virtualizer.measurementsCache[i]?.start
+            ?? virtualizer.getOffsetForIndex(i, 'start')?.[0],
+          // Fall back to the estimate so fill-offscreen rows outside the
+          // overscan window still count when the filter is off / list is long.
+          (i) => virtualizer.measurementsCache[i]?.size ?? ROW_ESTIMATE,
+        );
       }
+      // Always add the filtered pause backlog — do not use Math.max (that
+      // dropped unmerged rows whenever merged-out already exceeded them).
+      newerCount = mergedOut + visiblePausedCount;
     }
+  } else {
+    newerCount = visiblePausedCount;
   }
-  // The filter-visible backlog always counts, also while the range is unmeasured.
-  newerCount = Math.max(newerCount, visiblePausedCount);
   // Across a pause-buffer flush the measured count can briefly drop to 0 —
   // keep sticky only for that unpause frame or while the virtualizer is
   // unmeasured. Show the pill whenever there is a filter-visible backlog,
@@ -3363,6 +3405,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const displayNewerCount = rawNewerCount > 0
     ? rawNewerCount
     : (telegramRows.length > 0 && (!rangeMeasured || justUnpaused) ? stickyNewerCountRef.current : 0);
+  displayNewerCountRef.current = displayNewerCount;
+
+  // Thumb follows the same newer count as the pill (incl. sticky across flush).
+  useLayoutEffect(() => {
+    syncOverlayScrollbar();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayNewerCount]);
 
   // Escape clears the mouse selection and drops OS focus (e.g. colour-swatch ring)
   // while focus is inside the table (not in an input).
