@@ -21,13 +21,10 @@ import {
 } from './utils/uiState';
 import { DeviceStatusOverlay } from './components/DeviceStatusOverlay';
 import { TelegramTable, type SortConfig, type SortKey, type ListGotoRequest } from './components/TelegramTable';
-import { expandWithDeltaContext } from './utils/deltaContextExpansion';
-import { activeQuickFilter } from './utils/quickFilter';
 import { anchorKey } from './utils/anchorKey';
 import type { MarkReasonsMap } from './utils/markReasons';
-import { visibleMarkedKeysFrom } from './utils/markReasons';
 import type { MarkColorIndexMap } from './utils/markColors';
-import { forceIncludeKeys } from './utils/forceIncludeKeys';
+import { selectVisibleTelegrams } from './utils/selectVisibleTelegrams';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
 import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
@@ -64,12 +61,10 @@ import { useUpdateCheck } from './hooks/useUpdateCheck';
 import {
   DEFAULT_FILTERS,
   countFilterOptions,
-  effectiveDeltaContext,
   hasActiveFilters,
   enabledFilters,
   pruneDisabled,
   countSelections,
-  matchesTelegram,
   type ActiveFilters,
   type FilterOptions,
 } from './types/filters';
@@ -82,7 +77,7 @@ const DISMISSED_UPDATE_PREF = 'dismissed_update_version';
 
 const EMPTY_FILTER_OPTIONS: FilterOptions = { sources: [], targets: [], types: [], dpts: [], ga_group_names: {}, pa_line_names: {} };
 
-const NavDropdown = ({ activeTab, isSettingsOpen, isDatabaseOpen, onChange }: { activeTab: string, isSettingsOpen: boolean, isDatabaseOpen: boolean, onChange: (id: string) => void }) => {
+const NavDropdown = ({ activeTab, isSettingsOpen, isDatabaseOpen, onChange }: { activeTab: string; isSettingsOpen: boolean; isDatabaseOpen: boolean; onChange: (id: string) => void }) => {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -221,8 +216,6 @@ const PanelSwitch = ({ active, onChange }: { active: MainPanel; onChange: (p: Ma
 );
 
 // Stable identity so passing "no flags" doesn't churn memo deps (#319).
-const EMPTY_KEY_SET: ReadonlySet<string> = new Set();
-
 /**
  * Settings-screen timestamp: locale date + time. ETS records its own
  * last-modified string, which is not always parseable — show it verbatim
@@ -340,6 +333,7 @@ function App() {
     setConnected: setCacheConnected,
     setPaused: setCachePaused,
     pausedCount,
+    pausedTelegrams,
     revealPaused,
     loadRange,
     isLoading: isHistoryLoading,
@@ -847,41 +841,39 @@ function App() {
   );
 
   // ── In-memory filtering (live view) ────────────────────────────────────────
-  const deltaExpandedLive = useMemo(() => {
-    const f = appliedFilters;
-    // Master toggle off (#370): show everything, keep the filter set intact.
-    const noFilter =
-      !filtersEnabled ||
-      (f.sources.length === 0 &&
-      f.targets.length === 0 &&
-      f.types.length === 0 &&
-      f.directions.length === 0 &&
-      f.dpts.length === 0);
+  const visibleOpts = useMemo(() => ({
+    filters: appliedFilters,
+    filtersEnabled,
+    quickFilterOpen,
+    quickFilterEnabled,
+    quickPatterns,
+    flaggedKeys: flaggedTelegramKeys,
+    contextForAllMatches,
+    markReasons: telegramMarkReasons,
+  }), [
+    appliedFilters, filtersEnabled, quickFilterOpen, quickFilterEnabled, quickPatterns,
+    flaggedTelegramKeys, contextForAllMatches, telegramMarkReasons,
+  ]);
 
-    // Quick-filter matches anchor the context like main-filter matches (#520).
-    const quick = activeQuickFilter(quickFilterOpen, quickFilterEnabled, quickPatterns);
-    const matches = sortedLiveTelegrams.map(t =>
-      (noFilter || matchesTelegram(t, f)) && (!quick || quick(t))
-    );
-
-    const { before: deltaBeforeMs, after: deltaAfterMs } = effectiveDeltaContext(f);
-    // The global toggle off (#318) suppresses per-message flags too, per its
-    // "preserving all per-message flags" — inert, not cleared, while off.
-    const flags = f.deltaContextEnabled ? new Set(flaggedTelegramKeys) : EMPTY_KEY_SET;
-
-    const expanded = expandWithDeltaContext(
-      sortedLiveTelegrams, matches, anchorKey, flags, deltaBeforeMs, deltaAfterMs, contextForAllMatches,
-    );
-    // Non-hidden marks always stay visible, without turning into context anchors.
-    const forcedMarks = new Set(visibleMarkedKeysFrom(telegramMarkReasons));
-    return {
-      items: forceIncludeKeys(sortedLiveTelegrams, expanded.items, anchorKey, forcedMarks),
-      contextKeys: expanded.contextKeys,
-    };
-  }, [sortedLiveTelegrams, appliedFilters, filtersEnabled, flaggedTelegramKeys, contextForAllMatches, quickFilterOpen, quickFilterEnabled, quickPatterns, telegramMarkReasons]);
+  const deltaExpandedLive = useMemo(
+    () => selectVisibleTelegrams(sortedLiveTelegrams, visibleOpts),
+    [sortedLiveTelegrams, visibleOpts],
+  );
   const filteredLiveTelegrams = deltaExpandedLive.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = deltaExpandedLive.contextKeys;
+
+  // Union of published + pause backlog for the newer-pill / scrollbar (not rendered).
+  const sortedPillPool = useMemo(() => {
+    if (pausedTelegrams.length === 0) return sortedLiveTelegrams;
+    return sortTelegrams([...liveTelegrams, ...pausedTelegrams], sortConfig);
+  }, [pausedTelegrams, sortedLiveTelegrams, liveTelegrams, sortConfig]);
+  const pillTelegrams = useMemo(
+    () => (pausedTelegrams.length === 0
+      ? filteredLiveTelegrams
+      : selectVisibleTelegrams(sortedPillPool, visibleOpts).items),
+    [pausedTelegrams.length, filteredLiveTelegrams, sortedPillPool, visibleOpts],
+  );
 
   // ── Count bubbles ───────────────────────────────────────────────
   const filterCounts = useMemo(() => countFilterOptions(sortedLiveTelegrams), [sortedLiveTelegrams]);
@@ -1474,6 +1466,8 @@ function App() {
                     <TelegramTable
                     telegrams={filteredLiveTelegrams}
                     forceIncludeFrom={sortedLiveTelegrams}
+                    pillTelegrams={pillTelegrams}
+                    pausedTelegrams={pausedTelegrams}
                     visibleColumns={visibleColumns}
                     sortConfig={sortConfig}
                     onSort={handleSort}

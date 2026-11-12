@@ -213,12 +213,14 @@ describe('useTelegramCache', () => {
     // Snapshot frozen, but ingestion keeps counting.
     expect(result.current.telegrams).toHaveLength(1);
     expect(result.current.pausedCount).toBe(2);
+    expect(result.current.pausedTelegrams.map(t => t.source_address)).toEqual(['1.2.c', '1.2.b']);
 
     act(() => {
       result.current.setPaused(false);
     });
     expect(result.current.telegrams).toHaveLength(3);
     expect(result.current.pausedCount).toBe(0);
+    expect(result.current.pausedTelegrams).toEqual([]);
   });
 
   it('revealPaused publishes the oldest n of the backlog, stays paused and keeps counting', async () => {
@@ -239,6 +241,9 @@ describe('useTelegramCache', () => {
     });
     expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.a']);
     expect(result.current.pausedCount).toBe(4);
+    expect(result.current.pausedTelegrams.map(t => t.source_address)).toEqual([
+      '1.2.e', '1.2.d', '1.2.c', '1.2.b',
+    ]);
 
     // Oldest two of the backlog become visible; the two newest stay hidden.
     let remaining = -1;
@@ -247,6 +252,7 @@ describe('useTelegramCache', () => {
     });
     expect(remaining).toBe(2);
     expect(result.current.pausedCount).toBe(2);
+    expect(result.current.pausedTelegrams.map(t => t.source_address)).toEqual(['1.2.e', '1.2.d']);
     expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.c', '1.2.b', '1.2.a']);
 
     // Still paused: a new live telegram is hidden and counted, nothing else moves.
@@ -254,6 +260,9 @@ describe('useTelegramCache', () => {
       result.current.addLive(tg(6000, 'f'));
     });
     expect(result.current.pausedCount).toBe(3);
+    expect(result.current.pausedTelegrams.map(t => t.source_address)).toEqual([
+      '1.2.f', '1.2.e', '1.2.d',
+    ]);
     expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.c', '1.2.b', '1.2.a']);
 
     // Over-revealing clamps at zero and shows everything.

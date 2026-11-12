@@ -87,12 +87,23 @@ interface TelegramTableProps {
   onListFollowChange?: (follow: boolean) => void;
   listAnchorKey?: string | null;
   onListAnchorKeyChange?: (key: string | null) => void;
-  /** Buffer snapshot is frozen; fold cache pausedCount into the jump-to-live pill. */
+  /** Buffer snapshot is frozen; pause backlog feeds the jump-to-live pill via pillTelegrams. */
   isPaused?: boolean;
   /** User latched Pause (manual); blocks auto live-follow from newest visibility. */
   isManualPause?: boolean;
   /** Telegrams ingested since the buffer snapshot was frozen. */
   pausedCount?: number;
+  /**
+   * Pause backlog as telegrams (newest first). Used with `pillTelegrams` so the
+   * newer-pill and scrollbar thumb count only filter-visible backlog rows.
+   */
+  pausedTelegrams?: Telegram[];
+  /**
+   * App-visible published∪paused pool (main filter + context + marks). The
+   * table applies Focus/QF/Hidden on top for the newer-pill and thumb. Defaults
+   * to `telegrams` (no pause backlog in the count).
+   */
+  pillTelegrams?: Telegram[];
   /** Reach the frozen live edge while auto-paused: flush without forcing follow. */
   onPauseFlush?: () => void;
   /**
@@ -311,7 +322,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   onDeltaContextChange,
   onDeltaContextEnabledChange,
   listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
-  isPaused = false, isManualPause = false, pausedCount = 0, onPauseFlush, onPauseReveal, onJumpToLive,
+  isPaused = false, isManualPause = false, pausedCount = 0,
+  pausedTelegrams = [], pillTelegrams,
+  onPauseFlush, onPauseReveal, onJumpToLive,
   markReasons: markReasonsProp, onMarkReasonsChange,
   markColorIndices: markColorIndicesProp, onMarkColorIndicesChange,
   lastMarkedKey, onLastMarkedKeyChange,
@@ -742,37 +755,81 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // panel wired yet). An empty list means no matches.
   const focusFilteringActive =
     (sourceFocusOnly || targetFocusOnly) && !focusFilterDisabled && focusListAddresses != null;
-  const focusFilteredRows = useMemo(() => {
-    if (!focusFilteringActive) return telegrams;
-    const focusListSet = new Set(focusListAddresses);
-    return telegrams.filter(t =>
-      (!sourceFocusOnly || focusListSet.has(t.source_address)) &&
-      (!targetFocusOnly || focusListSet.has(t.target_address)),
-    );
-  }, [telegrams, focusFilteringActive, focusListAddresses, sourceFocusOnly, targetFocusOnly]);
 
   // Context rows and flagged anchors are already the result of the
   // Time-Delta-Context expansion, which the parent runs on quick-filter
   // matches too. Filtering them here again would drop the context (#520).
   // Visible marks (≠ hidden) are always kept; `hidden` marks are always dropped.
   // Prefer `forceIncludeFrom` (full buffer) so marks survive even when the parent
-  // already dropped them from `telegrams`.
-  const quickFiltered = useMemo(() => {
-    let list = focusFilteredRows;
+  // already dropped them from `telegrams`. List pool stays published-only so
+  // pause backlog never leaks into rows; pill pool adds paused for mark restore.
+  const applyTableVisibility = useCallback((rows: Telegram[], pool: Telegram[]) => {
+    let list = rows;
+    if (focusFilteringActive) {
+      const focusListSet = new Set(focusListAddresses);
+      list = list.filter(t =>
+        (!sourceFocusOnly || focusListSet.has(t.source_address)) &&
+        (!targetFocusOnly || focusListSet.has(t.target_address)),
+      );
+    }
     if (quickOpen && quickEnabled) {
       const matches = compileQuickFilters(currentPatterns, quickColumnEnabled);
       const flagsActive = activeFilters.deltaContextEnabled;
-      list = focusFilteredRows.filter(t => {
+      list = list.filter(t => {
         if (matches(t)) return true;
         const key = anchorKey(t);
         return !!contextKeys?.has(key) || (flagsActive && flaggedSet.has(key));
       });
     }
     list = list.filter(t => !hiddenMarkedSet.has(anchorKey(t)));
-    const pool = forceIncludeFrom ?? telegrams;
     return forceIncludeKeys(pool, list, anchorKey, visibleMarkedSet)
       .filter(t => !hiddenMarkedSet.has(anchorKey(t)));
-  }, [telegrams, forceIncludeFrom, focusFilteredRows, quickOpen, quickEnabled, currentPatterns, quickColumnEnabled, contextKeys, flaggedSet, activeFilters.deltaContextEnabled, hiddenMarkedSet, visibleMarkedSet]);
+  }, [
+    focusFilteringActive, focusListAddresses, sourceFocusOnly, targetFocusOnly,
+    quickOpen, quickEnabled, currentPatterns, quickColumnEnabled, contextKeys,
+    flaggedSet, activeFilters.deltaContextEnabled, hiddenMarkedSet, visibleMarkedSet,
+  ]);
+
+  const listForcePool = forceIncludeFrom ?? telegrams;
+  // Zebra parity follows this pool index (not the compacted visible index), so
+  // filter / QF toggles do not recolour surviving telegrams.
+  const stripeIndexByKey = useMemo(() => {
+    const map = new Map<string, number>();
+    for (let i = 0; i < listForcePool.length; i++) {
+      map.set(anchorKey(listForcePool[i]), i);
+    }
+    return map;
+  }, [listForcePool]);
+  const quickFiltered = useMemo(
+    () => applyTableVisibility(telegrams, listForcePool),
+    [applyTableVisibility, telegrams, listForcePool],
+  );
+
+  const pillForcePool = useMemo(() => {
+    if (pausedTelegrams.length === 0) return listForcePool;
+    const seen = new Set(listForcePool.map(anchorKey));
+    const extra = pausedTelegrams.filter(t => !seen.has(anchorKey(t)));
+    return extra.length === 0 ? listForcePool : listForcePool.concat(extra);
+  }, [listForcePool, pausedTelegrams]);
+
+  const pillVisible = useMemo(
+    () => applyTableVisibility(pillTelegrams ?? telegrams, pillForcePool),
+    [applyTableVisibility, pillTelegrams, telegrams, pillForcePool],
+  );
+
+  const pausedKeySet = useMemo(
+    () => new Set(pausedTelegrams.map(anchorKey)),
+    [pausedTelegrams],
+  );
+
+  const visiblePausedCount = useMemo(() => {
+    if (pausedKeySet.size === 0) return 0;
+    let n = 0;
+    for (const t of pillVisible) {
+      if (pausedKeySet.has(anchorKey(t))) n++;
+    }
+    return n;
+  }, [pillVisible, pausedKeySet]);
 
   const timeSortDirection: 'asc' | 'desc' | null =
     sortConfig[0]?.key === 'timestamp' ? sortConfig[0].direction : null;
@@ -1182,10 +1239,49 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       setRowFlash(prev => ({ key, gen: (prev?.gen ?? 0) + 1 }));
     });
   }, []);
-  // Zebra stripes must stay with a telegram, not with a row index (#266):
-  // prepends at the live edge shift every index by the number of new rows, so
-  // this offset accumulates those shifts and is added back to the index parity.
+  // Zebra stripes stay with a telegram (#266): colour uses the unfiltered pool
+  // index (stripeIndexByKey) so filter/QF compaction cannot flip survivors.
+  // Live-edge prepends/drops still shift every pool index uniformly — this
+  // offset accumulates that shift and is added back to the pool-index parity.
   const [stripeOffset, setStripeOffset] = useState(0);
+  const prevPoolEdgeRef = useRef<{ firstKey: string | null; lastKey: string | null; len: number }>({
+    firstKey: null, lastKey: null, len: 0,
+  });
+  useLayoutEffect(() => {
+    const pool = listForcePool;
+    const prev = prevPoolEdgeRef.current;
+    const firstKey = pool.length > 0 ? anchorKey(pool[0]) : null;
+    const lastKey = pool.length > 0 ? anchorKey(pool[pool.length - 1]) : null;
+    prevPoolEdgeRef.current = { firstKey, lastKey, len: pool.length };
+
+    if (pool.length === 0) {
+      setStripeOffset(0);
+      return;
+    }
+    if (!isTimeSort || prev.len === 0) return;
+
+    const edgeKey = liveEdge === 'top' ? firstKey : lastKey;
+    const prevEdgeKey = liveEdge === 'top' ? prev.firstKey : prev.lastKey;
+    if (!prevEdgeKey || edgeKey === prevEdgeKey) return;
+
+    let added = -1;
+    if (liveEdge === 'top') {
+      for (let i = 0; i < pool.length; i++) {
+        if (anchorKey(pool[i]) === prevEdgeKey) { added = i; break; }
+      }
+    } else {
+      for (let i = pool.length - 1; i >= 0; i--) {
+        if (anchorKey(pool[i]) === prevEdgeKey) { added = pool.length - 1 - i; break; }
+      }
+    }
+    if (added <= 0) {
+      setStripeOffset(0);
+      return;
+    }
+    const dropped = prev.len + added - pool.length;
+    const indexShift = liveEdge === 'top' ? added : -dropped;
+    setStripeOffset(o => (((o + indexShift) % 2) + 2) % 2);
+  }, [listForcePool, isTimeSort, liveEdge]);
 
   // Sync follow prop. Unfollow always leaves the live edge and arms the detach
   // latch; follow from the parent clears the latch. Follow must NOT claim we
@@ -1273,6 +1369,27 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   /** Fill overscroll that should rubber-band back (nothing waiting to fill it). */
   const inFillRubberBand = () =>
     inFillRubberZone() && !backlogFeedActive() && !manualHoldActive();
+
+  /**
+   * Scroll range a pin may land in. A pin never pushes the viewport into a
+   * rubber zone: that overscroll only settles on a user scroll, so the spacer
+   * would stay open when the pinned row cannot hold its place. A viewport
+   * already inside a zone keeps the raw range — except for action pins
+   * (filter / QF toggle), which settle unless a manual-pause hold parks the
+   * fill spacer on screen.
+   */
+  const pinScrollBounds = (el: HTMLElement, action: boolean) => {
+    const max = Math.max(0, el.scrollHeight - el.clientHeight);
+    const fillAtStart = liveEdge === 'top';
+    const lo = Math.min(max, fillAtStart ? fillRubberPx : oppositeRubberPx);
+    const hi = Math.max(lo, max - (fillAtStart ? oppositeRubberPx : fillRubberPx));
+    const keepRaw = (inZone: boolean, fillSide: boolean) =>
+      inZone && (!action || (fillSide && manualHoldActive()));
+    return {
+      lo: keepRaw(el.scrollTop < lo - 0.5, fillAtStart) ? 0 : lo,
+      hi: keepRaw(el.scrollTop > hi + 0.5, !fillAtStart) ? max : hi,
+    };
+  };
 
   /** Fill spacer fully in the viewport (not partially scrolled away). */
   const fillRubberFullyVisible = () => {
@@ -1680,14 +1797,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     startScrollTop: number;
   } | null>(null);
 
-  /** Paint-only thumb: size/position as if pausedCount rows were in scrollHeight. */
+  /** Paint-only thumb: size/position as if filter-visible pause rows were in scrollHeight. */
   const syncOverlayScrollbar = () => {
     const el = parentRef.current;
     const track = sbTrackRef.current;
     const thumb = sbThumbRef.current;
     if (!el || !track || !thumb) return;
     const { clientHeight, scrollHeight, scrollTop } = el;
-    const backlogPx = telegramRows.length > 0 ? Math.max(0, pausedCount) * ROW_ESTIMATE : 0;
+    const backlogPx = telegramRows.length > 0 ? Math.max(0, visiblePausedCount) * ROW_ESTIMATE : 0;
     const virtSH = scrollHeight + backlogPx;
     if (virtSH <= clientHeight + 0.5) {
       track.style.display = 'none';
@@ -1714,7 +1831,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     const el = parentRef.current;
     if (!el) return { next: startScrollTop, raw: startScrollTop };
     const { clientHeight, scrollHeight } = el;
-    const backlogPx = telegramRows.length > 0 ? Math.max(0, pausedCount) * ROW_ESTIMATE : 0;
+    const backlogPx = telegramRows.length > 0 ? Math.max(0, visiblePausedCount) * ROW_ESTIMATE : 0;
     const virtSH = scrollHeight + backlogPx;
     const thumbHeight = Math.max(LIST_SB_MIN_THUMB_PX, (clientHeight * clientHeight) / Math.max(virtSH, 1));
     const trackTravel = Math.max(0, clientHeight - thumbHeight);
@@ -1817,7 +1934,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   useLayoutEffect(() => {
     syncOverlayScrollbar();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pausedCount, telegramRows.length, virtTotalPx, oppositeSpacerPx, liveEdge, fillRubberPx, viewportHeight]);
+  }, [visiblePausedCount, telegramRows.length, virtTotalPx, oppositeSpacerPx, liveEdge, fillRubberPx, viewportHeight]);
 
   const handleScroll = () => {
     // Labels track fill visibility even for programmatic rubber/settle scrolls.
@@ -2408,8 +2525,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
 
     const wantClampAnim = animateNextPinRef.current;
-    const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
-    const clamped = Math.min(maxScroll, Math.max(0, el.scrollTop + delta));
+    const { lo, hi } = pinScrollBounds(el, wantClampAnim);
+    const clamped = Math.min(hi, Math.max(lo, el.scrollTop + delta));
     markProgrammatic();
     el.scrollTop = clamped;
 
@@ -2439,12 +2556,20 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     refindingAnchorRef.current = true;
     // Ensure measurement cache is warm before reading offsets.
     void virtualizer.getTotalSize();
-    const startInfo = virtualizer.getOffsetForIndex(idx, 'start');
-    const itemStart = startInfo?.[0] ?? idx * ROW_ESTIMATE;
-    const maxScroll = Math.max(0, virtualizer.getTotalSize() - el.clientHeight);
-    const target = Math.min(maxScroll, Math.max(0, itemStart - anchor.offset));
+    // Prefer measurementsCache: getOffsetForIndex clamps to virtTotal-viewport,
+    // which is 0 for short lists and would hide the fill-rubber start (43px).
+    // The range comes from the scrollport (it includes the DOM opposite
+    // spacer) minus the rubber zones — see pinScrollBounds.
+    const itemStart =
+      virtualizer.measurementsCache[idx]?.start
+      ?? virtualizer.getOffsetForIndex(idx, 'start')?.[0]
+      ?? fillRubberPx + idx * ROW_ESTIMATE;
+    const { lo, hi } = pinScrollBounds(el, animateNextPinRef.current);
+    const target = Math.min(hi, Math.max(lo, itemStart - anchor.offset));
     markProgrammatic();
-    virtualizer.scrollToOffset(target);
+    // Set scrollTop directly: scrollToOffset can re-clamp against virtTotal
+    // (excluding the opposite spacer) and undo the short-list target.
+    el.scrollTop = target;
 
     const finish = (found: number | null) => {
       if (found != null && anchorRef.current === anchor) {
@@ -2695,7 +2820,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       releaseStickySpacerIfFits();
     };
 
-    if (rows.length === 0) setStripeOffset(0);
     if (isTimeSort && prev.len === 0 && rows.length > 0 && restoredRef.current) {
       // First rows after the list was emptied (buffer clear): the mount-time
       // restore does not run again, so scrollTop still sits at 0 — inside the
@@ -2704,7 +2828,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       if (jumpToLiveRef.current || atEdgeRef.current) {
         jumpToLiveRef.current = false;
         atEdgeRef.current = true;
-        setStripeOffset(0);
         scrollToEdge();
       }
       return;
@@ -2750,37 +2873,29 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     if (added <= 0) {
       // The previous edge row is gone — the list was replaced or refiltered
       // (e.g. Time-Delta-Context switched off). Keep holding the anchor if its
-      // row survived (#435); otherwise start over.
+      // row survived (#435); otherwise start over. Zebra parity is tracked on
+      // listForcePool, not here.
       const anchor = anchorRef.current;
       if (anchor && rows.some(r => anchorKey(r) === anchor.key)) {
-        setStripeOffset(0);
         pinAnchor();
         return;
       }
       if (jumpingToLive) {
         jumpToLiveRef.current = false;
-        setStripeOffset(0);
         scrollToEdge();
         return;
       }
       if (oppositeRubberBusy()) {
-        setStripeOffset(0);
         return;
       }
       if (pinArmed) {
-        setStripeOffset(0);
         pinFlushViewport();
         return;
       }
       anchorRef.current = null;
       onListAnchorKeyChange?.(null);
-      setStripeOffset(0);
       return;
     }
-
-    const dropped = prev.len + added - rows.length;
-    const indexShift = liveEdge === 'top' ? added : -dropped;
-    setStripeOffset(o => (((o + indexShift) % 2) + 2) % 2);
 
     if (jumpingToLive) {
       jumpToLiveRef.current = false;
@@ -3203,34 +3318,40 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     gap: '0.25rem', minWidth: 0,
   };
 
-  // Refresh the visible index range, then count telegrams strictly newer than
-  // the newest one inside it. Overscan rows are rendered but not on screen.
-  // A range computed while every row still has size 0 is meaningless: the
-  // virtualizer's binary search treats every start offset as equal and lands
-  // on an arbitrary middle index.
+  // Refresh the visible index range, then count filter-visible telegrams
+  // (published∪paused) strictly newer than the newest one on screen. Overscan
+  // rows are rendered but not on screen. A range computed while every row still
+  // has size 0 is meaningless: the virtualizer's binary search treats every
+  // start offset as equal and lands on an arbitrary middle index.
   const virtualItems = virtualizer.getVirtualItems();
   const visibleRange = virtualizer.range;
   let newerCount = 0;
   const rangeMeasured = virtualItems.some(item => item.size > 0);
-  if (isTimeSort && visibleRange && rangeMeasured && telegramRows.length > 0 && virtualizer.getTotalSize() > 0) {
-    const start = Math.max(0, visibleRange.startIndex);
-    const end = Math.min(telegramRows.length - 1, visibleRange.endIndex);
-    if (end >= start) {
-      let newest = -Infinity;
-      for (let i = start; i <= end; i++) {
-        const ms = timeMs(telegramRows[i].timestamp);
-        if (ms > newest) newest = ms;
+  if (isTimeSort) {
+    if (telegramRows.length === 0) {
+      // Empty viewport: every filter-visible pill row (usually pause backlog) counts.
+      newerCount = pillVisible.length;
+    } else if (visibleRange && rangeMeasured && virtualizer.getTotalSize() > 0) {
+      const start = Math.max(0, visibleRange.startIndex);
+      const end = Math.min(telegramRows.length - 1, visibleRange.endIndex);
+      if (end >= start) {
+        let newest = -Infinity;
+        for (let i = start; i <= end; i++) {
+          const ms = timeMs(telegramRows[i].timestamp);
+          if (ms > newest) newest = ms;
+        }
+        newerCount = countNewerThan(pillVisible, newest, liveEdge === 'bottom');
       }
-      newerCount = countNewerThan(telegramRows, newest, liveEdge === 'bottom');
     }
   }
-  // Fold pausedCount always (0 when not frozen). Across a pause-buffer flush the
-  // measured count can briefly drop to 0 — keep sticky only for that unpause
-  // frame or while the virtualizer is unmeasured. Show the pill whenever there
-  // is a backlog, including manual pause while live-follow is still on.
-  // Empty list: no sticky phantom (e.g. after buffer clear); pausedCount alone
-  // may still show real unpublished arrivals.
-  const rawNewerCount = newerCount + pausedCount;
+  // The filter-visible backlog always counts, also while the range is unmeasured.
+  newerCount = Math.max(newerCount, visiblePausedCount);
+  // Across a pause-buffer flush the measured count can briefly drop to 0 —
+  // keep sticky only for that unpause frame or while the virtualizer is
+  // unmeasured. Show the pill whenever there is a filter-visible backlog,
+  // including manual pause while live-follow is still on. Empty list: no
+  // sticky phantom after clear; pillVisible alone may still show arrivals.
+  const rawNewerCount = newerCount;
   const justUnpaused = wasPausedRef.current && !isPaused;
   if (telegramRows.length === 0) {
     stickyNewerCountRef.current = 0;
@@ -4083,7 +4204,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     : (latest && manualMarked)
                       ? MOUSE_LATEST_WASH
                       : MOUSE_SELECTED_WASH;
-              const zebra = (virtualRow.index + stripeOffset) % 2 === 0 ? 'var(--bg-subtle)' : 'transparent';
+              const poolIndex = stripeIndexByKey.get(key);
+              const zebra = ((poolIndex ?? virtualRow.index) + stripeOffset) % 2 === 0
+                ? 'var(--bg-subtle)'
+                : 'transparent';
               const rowWash = latest
                 ? MOUSE_LATEST_WASH
                 : mouseSelected
