@@ -1379,8 +1379,11 @@ test('dragging a column header onto another reorders header and rows, and is rem
     visibleColumns, sortConfig, onSort: vi.fn(), activeFilters: DEFAULT_FILTERS, onQuickFilter: vi.fn(), onQuickVisualize: vi.fn(),
   };
   const { container, unmount } = render(<TelegramTable {...props} />);
-  const headers = () => Array.from(container.querySelectorAll('.header-col')).map(h => h.textContent?.trim().split(/\s/)[0]);
-  const header = (label: string) => Array.from(container.querySelectorAll<HTMLElement>('.header-col')).find(h => h.textContent?.includes(label))!;
+  // SOURCE/TARGET headers also contain a leading "focus" affordance — pick the column label.
+  const headerLabel = (h: Element) =>
+    (h.textContent ?? '').match(/(TIME|Δt|SOURCE|TARGET|TYPE|DPT|VALUE)/)?.[1] ?? '';
+  const headers = () => Array.from(container.querySelectorAll('.header-col')).map(headerLabel);
+  const header = (label: string) => Array.from(container.querySelectorAll<HTMLElement>('.header-col')).find(h => headerLabel(h) === label)!;
   const rowText = () => container.querySelector('.log-row')!.textContent ?? '';
   const dataTransfer = { setData: vi.fn(), effectAllowed: '', dropEffect: '' };
   // jsdom's drag events carry no pointer position, so set it by hand.
@@ -1412,7 +1415,7 @@ test('dragging a column header onto another reorders header and rows, and is rem
   // A fresh table (reload, or the History view) picks the order up again.
   unmount();
   const again = render(<TelegramTable {...props} />);
-  expect(Array.from(again.container.querySelectorAll('.header-col')).map(h => h.textContent?.trim().split(/\s/)[0]))
+  expect(Array.from(again.container.querySelectorAll('.header-col')).map(headerLabel))
     .toEqual(['Δt', 'TARGET', 'SOURCE', 'TYPE', 'DPT', 'VALUE', 'TIME']);
   localStorage.removeItem('spectrum-knx.columnOrder');
 });
