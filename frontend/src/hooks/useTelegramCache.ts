@@ -49,6 +49,11 @@ export interface TelegramCache {
   /** Telegrams ingested since the snapshot was frozen. */
   pausedCount: number;
   /**
+   * Pause backlog as telegrams (newest first). Same length as `pausedCount`;
+   * used for filter-aware newer-pill / scrollbar sizing. Empty when not paused.
+   */
+  pausedTelegrams: Telegram[];
+  /**
    * Reveal the oldest `n` of the paused backlog while staying paused: the
    * published snapshot grows by those rows and `pausedCount` shrinks by `n`.
    * Returns the backlog still hidden. No-op (returns current backlog) when not
@@ -127,14 +132,23 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
   /** Full buffer, including the pause backlog. Not frozen by auto-pause. */
   const [ingested, setIngested] = useState<Telegram[]>([]);
   const [pausedCount, setPausedCount] = useState(0);
+  const [pausedTelegrams, setPausedTelegrams] = useState<Telegram[]>([]);
   /** Mirrors `pausedCount` for synchronous reads (addLive / revealPaused). */
   const pausedCountRef = useRef(0);
   const [activeLoads, setActiveLoads] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  /** Updates pausedCount and the newest-first backlog slice from the buffer. */
   const updatePausedCount = useCallback((next: number) => {
-    pausedCountRef.current = next;
-    setPausedCount(next);
+    const n = Math.max(0, next);
+    pausedCountRef.current = n;
+    setPausedCount(n);
+    if (n <= 0) {
+      setPausedTelegrams([]);
+      return;
+    }
+    const snap = bufferRef.current!.snapshot;
+    setPausedTelegrams(snap.slice(-n).map(e => e.telegram).reverse());
   }, []);
 
   /** Publishes the buffer. The list snapshot stays frozen while paused; ingested does not. */
@@ -499,6 +513,7 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     setConnected,
     setPaused,
     pausedCount,
+    pausedTelegrams,
     revealPaused,
     loadRange,
     isLoading: activeLoads > 0,

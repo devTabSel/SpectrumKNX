@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { expandWithDeltaContext } from './deltaContextExpansion';
+import { contextRailSigns, expandWithDeltaContext } from './deltaContextExpansion';
 
 interface Item {
   key: string;
@@ -28,7 +28,7 @@ describe('expandWithDeltaContext', () => {
     expect(out.contextKeys).toEqual(new Set(['b']));
   });
 
-  it('a flagged item anchors its own window even when it does not match the filter, and is not itself context', () => {
+  it('a flagged non-match anchors its own window and stays classified as context', () => {
     const items = [
       item('a', '2024-01-01T10:00:00.000Z'), // flagged, doesn't match
       item('b', '2024-01-01T10:00:00.500Z'), // near the flagged item
@@ -36,7 +36,18 @@ describe('expandWithDeltaContext', () => {
     ];
     const out = expandWithDeltaContext(items, [false, false, false], keyOf, new Set(['a']), 0, 1000);
     expect(out.items.map(keyOf)).toEqual(['a', 'b']);
-    expect(out.contextKeys).toEqual(new Set(['b'])); // 'a' is flagged, not context
+    // Flag controls the anchor window, not context-row membership (#343).
+    expect(out.contextKeys).toEqual(new Set(['a', 'b']));
+  });
+
+  it('flagging a pulled-in context row keeps it in contextKeys', () => {
+    const items = [
+      item('a', '2024-01-01T10:00:00.000Z'), // match
+      item('b', '2024-01-01T10:00:00.500Z'), // context, then also flagged
+    ];
+    const out = expandWithDeltaContext(items, [true, false], keyOf, new Set(['b']), 0, 1000);
+    expect(out.items.map(keyOf)).toEqual(['a', 'b']);
+    expect(out.contextKeys).toEqual(new Set(['b']));
   });
 
   it('a flagged item is shown even with no window at all (before=after=0)', () => {
@@ -83,5 +94,34 @@ describe('expandWithDeltaContext', () => {
     const unflagged = expandWithDeltaContext(items, matches, keyOf, new Set(), 0, 1000, false);
     expect(unflagged.items.map(keyOf)).toEqual(['m1', 'm2']);
     expect(unflagged.contextKeys).toEqual(new Set());
+  });
+});
+
+describe('contextRailSigns', () => {
+  const anchor = Date.parse('2024-01-01T10:00:00.000Z');
+
+  it('marks a row before an anchor (rail ∧) only', () => {
+    const older = Date.parse('2024-01-01T09:59:59.500Z');
+    expect(contextRailSigns(older, [anchor], 1000, 1000)).toEqual({ before: true, after: false });
+  });
+
+  it('marks a row after an anchor (rail ∨) only', () => {
+    const newer = Date.parse('2024-01-01T10:00:00.500Z');
+    expect(contextRailSigns(newer, [anchor], 1000, 1000)).toEqual({ before: false, after: true });
+  });
+
+  it('respects asymmetric windows and can be before one anchor and after another', () => {
+    const early = Date.parse('2024-01-01T10:00:00.000Z');
+    const late = Date.parse('2024-01-01T10:01:00.000Z');
+    const between = Date.parse('2024-01-01T10:00:30.000Z');
+    // after early (within 60s), before late (within 60s)
+    expect(contextRailSigns(between, [early, late], 60_000, 60_000)).toEqual({ before: true, after: true });
+    // only-after window: before late is ignored
+    expect(contextRailSigns(between, [early, late], 0, 60_000)).toEqual({ before: false, after: true });
+  });
+
+  it('ignores rows outside every anchor window', () => {
+    const far = Date.parse('2024-01-01T10:00:05.000Z');
+    expect(contextRailSigns(far, [anchor], 1000, 1000)).toEqual({ before: false, after: false });
   });
 });

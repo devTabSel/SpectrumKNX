@@ -1,4 +1,13 @@
 import type { QuickPatterns } from './quickFilter';
+import {
+  MARK_REASONS,
+  type MarkReason,
+  type MarkReasonsMap,
+} from './markReasons';
+import {
+  isValidMarkColorIndex,
+  type MarkColorIndexMap,
+} from './markColors';
 
 export interface UiSessionState {
   quickFilter: {
@@ -20,6 +29,14 @@ export interface UiSessionState {
   lastSeenSearch: string;
   /** Master enable/disable of the filter set (#370); absent → enabled. */
   filtersEnabled: boolean;
+  /** Live telegram list mark reasons (manual / hidden / mouse / …). */
+  markReasons: MarkReasonsMap;
+  /** Live telegram list mark colours (palette indices). */
+  markColorIndices: MarkColorIndexMap;
+  /** Per-message Time-Delta-Context flag buttons (#319). */
+  flaggedKeys: string[];
+  /** Every filter match anchors a context window when true. */
+  contextForAllMatches: boolean;
 }
 
 export const DEFAULT_UI_STATE: UiSessionState = {
@@ -38,12 +55,54 @@ export const DEFAULT_UI_STATE: UiSessionState = {
   lastSeenLive: true,
   lastSeenSearch: '',
   filtersEnabled: true,
+  markReasons: {},
+  markColorIndices: {},
+  flaggedKeys: [],
+  contextForAllMatches: true,
 };
 
 export const UI_STORAGE_KEY = 'spectrum-knx-ui';
 
 interface StoredUiState extends UiSessionState {
   v: number;
+}
+
+const MARK_REASON_SET = new Set<string>(MARK_REASONS);
+
+function sanitizeMarkReasons(raw: unknown): MarkReasonsMap {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: MarkReasonsMap = {};
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof key !== 'string' || key.length === 0) continue;
+    if (!Array.isArray(val)) continue;
+    const reasons = val.filter((r): r is MarkReason => typeof r === 'string' && MARK_REASON_SET.has(r));
+    // Drop ephemeral goto/auto; context is re-synced from the soft window on load.
+    const durable = reasons.filter(r => r !== 'goto' && r !== 'context' && r !== 'auto');
+    if (durable.length > 0) out[key] = durable;
+  }
+  return out;
+}
+
+function sanitizeMarkColorIndices(raw: unknown): MarkColorIndexMap {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: MarkColorIndexMap = {};
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof key !== 'string' || key.length === 0) continue;
+    if (isValidMarkColorIndex(val)) out[key] = val;
+  }
+  return out;
+}
+
+function sanitizeFlaggedKeys(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const k of raw) {
+    if (typeof k !== 'string' || k.length === 0 || seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
 }
 
 export function saveUiState(state: UiSessionState): void {
@@ -100,5 +159,9 @@ function sanitize(p: Partial<StoredUiState>): UiSessionState {
     lastSeenLive: typeof p.lastSeenLive === 'boolean' ? p.lastSeenLive : true,
     lastSeenSearch: typeof p.lastSeenSearch === 'string' ? p.lastSeenSearch : '',
     filtersEnabled: typeof p.filtersEnabled === 'boolean' ? p.filtersEnabled : true,
+    markReasons: sanitizeMarkReasons(p.markReasons),
+    markColorIndices: sanitizeMarkColorIndices(p.markColorIndices),
+    flaggedKeys: sanitizeFlaggedKeys(p.flaggedKeys),
+    contextForAllMatches: typeof p.contextForAllMatches === 'boolean' ? p.contextForAllMatches : true,
   };
 }

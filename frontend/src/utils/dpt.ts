@@ -161,6 +161,28 @@ export function dptDesignation(key: string, label?: string | null): string {
   return DPT_DESIGNATIONS[key] ?? '';
 }
 
+/** Top DPT cell text in the telegram table (`1.001` / `1.x`). */
+export function dptKeyLabel(dptMain: number | null, dptSub: number | null): string | null {
+  if (dptMain == null) return null;
+  if (dptSub == null) return `${dptMain}.x`;
+  return `${dptMain}.${String(dptSub).padStart(3, '0')}`;
+}
+
+/** Bottom DPT cell text — description only, no leading type code. */
+export function dptDescriptionLabel(
+  dptName: string | null,
+  unit: string | null | undefined,
+): string | null {
+  if (!dptName) return unit ? `(${unit})` : null;
+  const cleaned = dptName.trim();
+  // Stored names often look like "1.001 - Switch"; keep only the description row.
+  const withoutCode = cleaned
+    .replace(/^\d+(?:\.\d+)?\s*[-–:]\s*/u, '')
+    .trim();
+  const base = withoutCode.length > 0 ? withoutCode : cleaned;
+  return unit ? `${base} (${unit})` : base;
+}
+
 /** Unit in parentheses at the end of a designation, e.g. "Temperature (°C)" → "°C". */
 export function dptUnit(key: string, label?: string | null): string {
   const name = dptDesignation(key, label);

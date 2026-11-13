@@ -49,12 +49,14 @@ interface HistorySearchProps {
   /** Master filter switch, shared with the Group Monitor (#370, #436). */
   filtersEnabled?: boolean;
   onFiltersEnabledChange?: (enabled: boolean) => void;
+  /** Forwarded to TelegramTable so filter edits pin + flash the preferred row. */
+  viewChangeToken?: number;
 }
 
 export const HistorySearch: React.FC<HistorySearchProps> = ({
   visibleColumns, loadLimit, filterOptions, activeFilters, onFiltersChange, onOpenSettings,
   projectLoaded, selectedVisualizationTargets, onVisualizationTargetsChange, initialView,
-  filtersEnabled = true, onFiltersEnabledChange,
+  filtersEnabled = true, onFiltersEnabledChange, viewChangeToken,
 }) => {
   const [telegrams, setTelegrams] = useState<Telegram[]>([]);
   const [isLoaderOpen, setIsLoaderOpen] = useState(false);
@@ -371,6 +373,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
           ) : (
             <TelegramTable
               telegrams={filteredSortedTelegrams}
+              forceIncludeFrom={sortedTelegrams}
               visibleColumns={visibleColumns}
               sortConfig={sortConfig}
               onSort={handleSort}
@@ -390,6 +393,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               contextForAllMatches={contextForAllMatches}
               onContextForAllMatchesChange={setContextForAllMatches}
               contextKeys={contextTelegramKeys}
+              viewChangeToken={viewChangeToken}
             />
           )}
         </div>

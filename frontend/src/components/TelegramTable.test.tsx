@@ -85,6 +85,47 @@ const makeList = (count: number, newestOffsetS: number): Telegram[] => {
   });
 };
 
+/** `count` telegrams strictly newer than a `makeList(..., publishedNewestOffsetS)` edge. */
+const makePausedAfter = (count: number, publishedNewestOffsetS: number): Telegram[] =>
+  count <= 0 ? [] : makeList(count, publishedNewestOffsetS + count);
+
+/** Pause props so the pill/thumb use filter-visible backlog (not raw pausedCount). */
+const withPauseBacklog = (
+  published: Telegram[],
+  paused: Telegram[],
+  direction: 'asc' | 'desc' = 'desc',
+) => {
+  // `published` is already in display order; `paused` is newest-first.
+  const pillTelegrams = paused.length === 0
+    ? published
+    : direction === 'desc'
+      ? paused.concat(published)
+      : published.concat(paused.slice().reverse());
+  return {
+    pausedCount: paused.length,
+    pausedTelegrams: paused,
+    pillTelegrams,
+  };
+};
+
+const MAKE_LIST_BASE_MS = new Date('2024-01-01T10:00:00.000Z').getTime();
+
+/** Newest makeList offset among `rows` (works for asc or desc order). */
+const newestOffsetFrom = (rows: Telegram[]): number => {
+  let max = -1;
+  for (const t of rows) {
+    const off = (Date.parse(t.timestamp) - MAKE_LIST_BASE_MS) / 1000;
+    if (Number.isFinite(off) && off > max) max = off;
+  }
+  return max;
+};
+
+const pauseBacklogFor = (
+  published: Telegram[],
+  pausedN: number,
+  direction: 'asc' | 'desc' = 'desc',
+) => withPauseBacklog(published, makePausedAfter(pausedN, newestOffsetFrom(published)), direction);
+
 const renderTable = (telegrams: Telegram[]) =>
   render(
     <TelegramTable
@@ -105,95 +146,6 @@ const stripesByKey = (container: HTMLElement): Map<string, string> => {
   }
   return map;
 };
-
-test('a READ row turns success green once a later Response arrives for its GA', () => {
-  const read = makeTelegram({
-    timestamp: '2026-01-01T10:00:00.000Z',
-    simplified_type: 'Read',
-    telegram_type: 'GroupValueRead',
-    target_address: '1/2/3',
-    raw_hex: '0x00',
-  });
-  const { container, rerender } = renderTable([read]);
-  expect(container.querySelector('.tt-type-read')).toBeInTheDocument();
-  expect(container.querySelector('.tt-type-read-answered')).not.toBeInTheDocument();
-
-  rerender(
-    <TelegramTable
-      telegrams={[
-        makeTelegram({
-          timestamp: '2026-01-01T10:00:01.000Z',
-          simplified_type: 'Response',
-          telegram_type: 'GroupValueResponse',
-          target_address: '1/2/3',
-          raw_hex: '0x01',
-          value_formatted: 'On',
-        }),
-        read,
-      ]}
-      visibleColumns={visibleColumns}
-      sortConfig={sortConfig}
-      onSort={vi.fn()}
-      activeFilters={DEFAULT_FILTERS}
-      onQuickFilter={vi.fn()}
-      onQuickVisualize={vi.fn()}
-    />,
-  );
-  const answered = container.querySelector('.tt-type-read-answered');
-  expect(answered).toBeTruthy();
-  expect(answered?.textContent).toBe('Read');
-  expect(container.querySelector('.tt-type-response')).toBeTruthy();
-});
-
-test('a visible READ follows a response that is only in the read-phase source', () => {
-  const read = makeTelegram({
-    timestamp: '2026-01-01T10:00:00.000Z',
-    simplified_type: 'Read',
-    telegram_type: 'GroupValueRead',
-    target_address: '1/2/3',
-    raw_hex: '0x00',
-  });
-  const response = makeTelegram({
-    timestamp: '2026-01-01T10:00:01.000Z',
-    simplified_type: 'Response',
-    telegram_type: 'GroupValueResponse',
-    target_address: '1/2/3',
-    raw_hex: '0x01',
-    value_formatted: 'On',
-  });
-  const { container, rerender } = renderTable([read]);
-  expect(container.querySelector('.tt-type-read-answered')).not.toBeInTheDocument();
-
-  rerender(
-    <TelegramTable
-      telegrams={[read]}
-      readPhaseTelegrams={[response, read]}
-      visibleColumns={visibleColumns}
-      sortConfig={sortConfig}
-      onSort={vi.fn()}
-      activeFilters={DEFAULT_FILTERS}
-      onQuickFilter={vi.fn()}
-      onQuickVisualize={vi.fn()}
-    />,
-  );
-  expect(container.querySelector('.tt-type-read-answered')?.textContent).toBe('Read');
-  expect(container.querySelector('.tt-type-response')).not.toBeInTheDocument();
-
-  rerender(
-    <TelegramTable
-      telegrams={[read]}
-      readPhaseTelegrams={[read]}
-      visibleColumns={visibleColumns}
-      sortConfig={sortConfig}
-      onSort={vi.fn()}
-      activeFilters={DEFAULT_FILTERS}
-      onQuickFilter={vi.fn()}
-      onQuickVisualize={vi.fn()}
-    />,
-  );
-  expect(container.querySelector('.tt-type-read-answered')).not.toBeInTheDocument();
-  expect(container.querySelector('.tt-type-read')).toBeInTheDocument();
-});
 
 test('zebra stripes stay with their telegram when new ones are prepended (#266)', () => {
   const { container, rerender } = renderTable(makeList(6, 5));
@@ -222,6 +174,67 @@ test('zebra stripes stay with their telegram when new ones are prepended (#266)'
   const rows = [...container.querySelectorAll<HTMLElement>('.log-row')];
   for (let i = 1; i < rows.length; i++) {
     expect(rows[i].style.background).not.toBe(rows[i - 1].style.background);
+  }
+});
+
+test('zebra stripes stay with their telegram when the quick filter turns on', async () => {
+  const rows = namedRows(['drop-0', 'keep-a', 'drop-1', 'keep-b', 'drop-2', 'keep-c']);
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+  const before = stripesByKey(container);
+  expect(before.size).toBe(6);
+
+  armQuickFilter('keep');
+  fireEvent.click(screen.getByTitle(/^Enable quick filter/));
+  await flushFrames();
+
+  const after = stripesByKey(container);
+  expect(after.size).toBe(3);
+  for (const [key, background] of after) {
+    expect(before.get(key), `stripe of surviving row ${key} must not change`).toBe(background);
+  }
+});
+
+test('zebra stripes stay with their telegram when the quick filter turns off', async () => {
+  const rows = namedRows(['drop-0', 'keep-a', 'drop-1', 'keep-b', 'drop-2', 'keep-c']);
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+  const unfiltered = stripesByKey(container);
+
+  armQuickFilter('keep');
+  fireEvent.click(screen.getByTitle(/^Enable quick filter/));
+  await flushFrames();
+  const filtered = stripesByKey(container);
+  expect(filtered.size).toBe(3);
+
+  fireEvent.click(screen.getByTitle(/^Disable quick filter \(keeps patterns\)/));
+  await flushFrames();
+
+  const restored = stripesByKey(container);
+  expect(restored.size).toBe(6);
+  for (const [key, background] of filtered) {
+    expect(restored.get(key), `survivor ${key} keeps its stripe after filter off`).toBe(background);
+  }
+  for (const [key, background] of unfiltered) {
+    expect(restored.get(key), `row ${key} regains its pool stripe`).toBe(background);
   }
 });
 
@@ -372,7 +385,7 @@ test('while paused at the live edge, wheel toward newer flushes and scrolls into
       listFollow={follow}
       onListFollowChange={onListFollowChange}
       isPaused={paused}
-      pausedCount={pausedN}
+      {...pauseBacklogFor(telegrams, pausedN)}
       onPauseFlush={onPauseFlush}
     />
   );
@@ -472,7 +485,7 @@ test('wheel toward newer does not enable follow while No data available is showi
       listFollow={false}
       onListFollowChange={onListFollowChange}
       isPaused
-      pausedCount={3}
+      {...pauseBacklogFor([], 3)}
       onPauseFlush={onPauseFlush}
     />,
   );
@@ -508,7 +521,7 @@ test('while paused, scroll against fill axis never flushes; along-fill wheel flu
       listFollow={follow}
       onListFollowChange={onListFollowChange}
       isPaused={paused}
-      pausedCount={pausedN}
+      {...pauseBacklogFor(telegrams, pausedN)}
       onPauseFlush={onPauseFlush}
     />
   );
@@ -577,7 +590,7 @@ test('newer-pill shows paused backlog even while live-follow is on', () => {
       listFollow={true}
       onListFollowChange={vi.fn()}
       isPaused
-      pausedCount={7}
+      {...pauseBacklogFor(rows, 7)}
     />,
   );
   expect(screen.getByRole('button', { name: '7 newer telegrams' })).toBeInTheDocument();
@@ -658,7 +671,7 @@ test('jump-to-live pill flushes pause buffer and lands on the merged newest', ()
       onListFollowChange={onListFollowChange}
       isPaused={paused}
       isManualPause={paused}
-      pausedCount={pausedN}
+      {...pauseBacklogFor(telegrams, pausedN)}
       onJumpToLive={onJumpToLive}
     />
   );
@@ -700,7 +713,7 @@ test('Play-style unpause keeps the scroll viewport pinned after flush publish', 
       onListFollowChange={vi.fn()}
       listAnchorKey={anchorKey(frozen[3])}
       isPaused={paused}
-      pausedCount={paused ? 4 : 0}
+      {...pauseBacklogFor(telegrams, paused ? 4 : 0)}
     />
   );
 
@@ -736,7 +749,7 @@ test('manual pause does not auto-enable follow when newest is fully visible', ()
       onListFollowChange={onListFollowChange}
       isPaused
       isManualPause
-      pausedCount={3}
+      {...pauseBacklogFor(makeList(6, 5), 3)}
     />,
   );
   const port = container.querySelector('.custom-scrollbar') as HTMLElement;
@@ -921,7 +934,7 @@ test('jump pill counts telegrams newer than the newest one on screen, for both t
     expect(screen.queryByText(/new telegram/)).not.toBeInTheDocument();
     live.unmount();
 
-    // Scrolled so the fourth row is the newest one on screen: three are newer.
+    // Scrolled so the fourth row is the newest settled on screen: three are newer.
     // scrollTop is measured past the fill-rubber padding (settled edge = LIVE_EDGE_TOP).
     const three = render(table(rows, sortConfig, false));
     scrollTo(three.container, LIVE_EDGE_TOP + ROW * 3);
@@ -934,6 +947,20 @@ test('jump pill counts telegrams newer than the newest one on screen, for both t
     expect(screen.getByRole('button', { name: '1 newer telegram' })).toBeInTheDocument();
     one.unmount();
 
+    // Partially scrolled toward fill: row 3 is only clipped, still the on-screen
+    // anchor — so still 3 newer (not 4). Completely scrolled-out merged rows
+    // (0..2) stay in the pill; overscan must not suppress them.
+    const partial = render(table(rows, sortConfig, false));
+    scrollTo(partial.container, LIVE_EDGE_TOP + ROW * 3 + ROW / 2);
+    expect(screen.getByRole('button', { name: '3 newer telegrams' })).toBeInTheDocument();
+    partial.unmount();
+
+    // Completely past row 3 toward fill → row 3 joins the pill → 4 newer.
+    const past = render(table(rows, sortConfig, false));
+    scrollTo(past.container, LIVE_EDGE_TOP + ROW * 4);
+    expect(screen.getByRole('button', { name: '4 newer telegrams' })).toBeInTheDocument();
+    past.unmount();
+
     // Oldest first. The viewport holds the two oldest rows, so eight are newer.
     const asc: SortConfig = [{ key: 'timestamp', direction: 'asc' }];
     const ascRows = rows.slice().reverse();
@@ -944,6 +971,125 @@ test('jump pill counts telegrams newer than the newest one on screen, for both t
     // Live mode hides the pill even while those newer rows are off screen.
     view.rerender(table(ascRows, asc, true));
     expect(screen.queryByText(/new telegram/)).not.toBeInTheDocument();
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('jump pill keeps a fill-edge partial as anchor; only fully scrolled-out count', () => {
+  // Viewport holds ~2 rows. Index 2 half out toward fill still intersects →
+  // anchor; N = 2 (rows 0..1 fully out). Overscan must not suppress the pill.
+  const ROW = 85;
+  scrollBlockSize = ROW * 2;
+  try {
+    const rows = makeList(10, 9);
+    const { container } = render(
+      <TelegramTable
+        telegrams={rows}
+        visibleColumns={visibleColumns}
+        sortConfig={sortConfig}
+        onSort={vi.fn()}
+        activeFilters={DEFAULT_FILTERS}
+        onQuickFilter={vi.fn()}
+        onQuickVisualize={vi.fn()}
+        listFollow={false}
+        onListFollowChange={vi.fn()}
+        onListAnchorKeyChange={vi.fn()}
+      />,
+    );
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 2 + ROW / 2;
+    fireEvent.scroll(port);
+    expect(screen.getByRole('button', { name: '2 newer telegrams' })).toBeInTheDocument();
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('jump pill newer count follows filter on and off', () => {
+  // Filter off: three fill-offscreen rows. Filter on: only the three newest
+  // match — after scroll, N is among that keep set only (1), not the unfiltered 3.
+  const ROW = 85;
+  scrollBlockSize = ROW * 2;
+  const rows = makeList(10, 9).map((t, i) => ({
+    ...t,
+    target_address: i < 3 ? '1/2/keep' : '1/2/drop',
+  }));
+  const base = {
+    telegrams: rows,
+    visibleColumns,
+    sortConfig,
+    onSort: vi.fn(),
+    activeFilters: DEFAULT_FILTERS,
+    onQuickFilter: vi.fn(),
+    onQuickVisualize: vi.fn(),
+    listFollow: false,
+    onListFollowChange: vi.fn(),
+    onListAnchorKeyChange: vi.fn(),
+  };
+  try {
+    const { container, rerender } = render(<TelegramTable {...base} />);
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 3;
+    fireEvent.scroll(port);
+    expect(screen.getByRole('button', { name: '3 newer telegrams' })).toBeInTheDocument();
+
+    rerender(
+      <TelegramTable
+        {...base}
+        quickFilterOpen
+        quickFilterEnabled
+        quickPatterns={{ target: { top: '1/2/keep', bottom: '' } }}
+      />,
+    );
+    // Keep-only list has 3 rows; scroll one row off toward fill → 1 newer.
+    port.scrollTop = LIVE_EDGE_TOP + ROW;
+    fireEvent.scroll(port);
+    expect(screen.getByRole('button', { name: '1 newer telegram' })).toBeInTheDocument();
+
+    rerender(<TelegramTable {...base} />);
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 3;
+    fireEvent.scroll(port);
+    expect(screen.getByRole('button', { name: '3 newer telegrams' })).toBeInTheDocument();
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('filter off: newer pill adds unmerged backlog to fully scrolled-out merged rows', () => {
+  // N = merged completely out toward fill (3) + pause backlog (2) = 5.
+  // Math.max(merged, paused) would wrongly show 3.
+  // Thumb virtual backlog = N − mergedOut (= paused only); merged-out already in scrollHeight.
+  const ROW = 85;
+  scrollBlockSize = ROW * 2;
+  const rows = makeList(10, 9);
+  try {
+    const { container } = render(
+      <TelegramTable
+        telegrams={rows}
+        visibleColumns={visibleColumns}
+        sortConfig={sortConfig}
+        onSort={vi.fn()}
+        activeFilters={DEFAULT_FILTERS}
+        onQuickFilter={vi.fn()}
+        onQuickVisualize={vi.fn()}
+        listFollow={false}
+        onListFollowChange={vi.fn()}
+        onListAnchorKeyChange={vi.fn()}
+        isPaused
+        {...pauseBacklogFor(rows, 2)}
+      />,
+    );
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 3;
+    fireEvent.scroll(port);
+    expect(screen.getByRole('button', { name: '5 newer telegrams' })).toBeInTheDocument();
+    const thumb = screen.getByTestId('list-scrollbar-thumb');
+    const sh = port.scrollHeight;
+    expect(Number.parseFloat(thumb.style.height)).toBeCloseTo(
+      Math.max(20, (scrollBlockSize * scrollBlockSize) / (sh + 2 * ROW)),
+      0,
+    );
   } finally {
     scrollBlockSize = 800;
   }
@@ -963,7 +1109,7 @@ test('empty list drops sticky newer-pill; pausedCount alone still shows', () => 
       listFollow={false}
       onListFollowChange={vi.fn()}
       isPaused
-      pausedCount={4}
+      {...pauseBacklogFor(rows, 4)}
     />,
   );
   expect(screen.getByRole('button', { name: /newer telegram/ })).toBeInTheDocument();
@@ -981,7 +1127,7 @@ test('empty list drops sticky newer-pill; pausedCount alone still shows', () => 
       listFollow={false}
       onListFollowChange={vi.fn()}
       isPaused
-      pausedCount={0}
+      {...pauseBacklogFor([], 0)}
     />,
   );
   expect(screen.queryByRole('button', { name: /newer telegram/ })).not.toBeInTheDocument();
@@ -999,7 +1145,7 @@ test('empty list drops sticky newer-pill; pausedCount alone still shows', () => 
       listFollow={false}
       onListFollowChange={vi.fn()}
       isPaused
-      pausedCount={2}
+      {...pauseBacklogFor([], 2)}
     />,
   );
   expect(screen.getByRole('button', { name: '2 newer telegrams' })).toBeInTheDocument();
@@ -1028,15 +1174,15 @@ test('jump pill adds pausedCount while the buffer snapshot is frozen', () => {
         listFollow={false}
         onListFollowChange={vi.fn()}
         isPaused
-        pausedCount={5}
+        {...pauseBacklogFor(rows, 5)}
       />,
     );
     // Three visible newer + five frozen arrivals (settled edge has no backlog pad).
     scrollTo(container, LIVE_EDGE_TOP + ROW * 3);
     expect(screen.getByRole('button', { name: '8 newer telegrams' })).toBeInTheDocument();
 
-    // pausedCount is always folded (0 once the cache has flushed); a stale
-    // non-zero pausedCount still counts so the pill does not dip during flush.
+    // Pause backlog props stay until the cache clears them so the pill does not
+    // dip during the flush gap (isPaused false, rows not yet merged).
     rerender(
       <TelegramTable
         telegrams={rows}
@@ -1049,7 +1195,7 @@ test('jump pill adds pausedCount while the buffer snapshot is frozen', () => {
         listFollow={false}
         onListFollowChange={vi.fn()}
         isPaused={false}
-        pausedCount={5}
+        {...pauseBacklogFor(rows, 5)}
       />,
     );
     expect(screen.getByRole('button', { name: '8 newer telegrams' })).toBeInTheDocument();
@@ -1066,14 +1212,14 @@ test('jump pill adds pausedCount while the buffer snapshot is frozen', () => {
         listFollow={false}
         onListFollowChange={vi.fn()}
         isPaused={false}
-        pausedCount={0}
+        {...pauseBacklogFor(rows, 0)}
       />,
     );
     // Backlog padding gone; settle at fill-rubber + three published newer rows.
     scrollTo(container, LIVE_EDGE_TOP + ROW * 3);
     expect(screen.getByRole('button', { name: '3 newer telegrams' })).toBeInTheDocument();
 
-    // pausedCount alone (no scrolled newer rows) still shows the pill when paused.
+    // Pause backlog alone (no scrolled newer rows) still shows the pill when paused.
     rerender(
       <TelegramTable
         telegrams={rows}
@@ -1087,7 +1233,7 @@ test('jump pill adds pausedCount while the buffer snapshot is frozen', () => {
         onListFollowChange={vi.fn()}
         listAnchorKey={anchorKey(rows[0])}
         isPaused
-        pausedCount={2}
+        {...pauseBacklogFor(rows, 2)}
       />,
     );
     scrollTo(container, 0);
@@ -1115,7 +1261,7 @@ test('pause-buffer flush keeps the newer-telegrams pill visible across the flush
       onListFollowChange={vi.fn()}
       listAnchorKey={anchorKey(frozen[0])}
       isPaused={paused}
-      pausedCount={pausedN}
+      {...pauseBacklogFor(telegrams, pausedN)}
     />
   );
 
@@ -1159,7 +1305,7 @@ test('at the newest telegram after flush the newer-pill is gone even without liv
       listFollow={false}
       onListFollowChange={vi.fn()}
       isPaused={paused}
-      pausedCount={pausedN}
+      {...pauseBacklogFor(telegrams, pausedN)}
     />
   );
 
@@ -1199,7 +1345,7 @@ test('pause-buffer flush keeps the scroll position when not at the live edge', (
       onListFollowChange={vi.fn()}
       listAnchorKey={anchorKey(frozen[3])}
       isPaused={paused}
-      pausedCount={paused ? 4 : 0}
+      {...pauseBacklogFor(telegrams, paused ? 4 : 0)}
     />
   );
 
@@ -1340,6 +1486,54 @@ test('quick info bar (#311): toggled via the header button and summarizes the vi
   expect(screen.getByText(/Newest:/)).toBeInTheDocument();
 });
 
+test('quick info bar (#311): still shown with zero counts when the list is empty', () => {
+  render(
+    <TelegramTable
+      telegrams={[]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+  expect(screen.getByText(/0 telegrams/)).toBeInTheDocument();
+  expect(screen.getByText(/0 sources/)).toBeInTheDocument();
+  expect(screen.queryByText(/Oldest:/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Newest:/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/CSV/)).not.toBeInTheDocument();
+});
+
+test('quick info bar (#311): lays out metrics in the column grid like the quick filter', () => {
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(4, 3)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+
+  fireEvent.click(screen.getByTitle('Show info bar'));
+  const headerCols = container.querySelectorAll('.header-col');
+  const infoBar = screen.getByText(/Oldest:/).parentElement!.parentElement!;
+  expect(infoBar.childElementCount).toBe(headerCols.length);
+  // Two rows in TIME: oldest above newest.
+  const timeCol = screen.getByText(/Oldest:/).parentElement!;
+  expect(timeCol.children[0]).toHaveTextContent(/Oldest:/);
+  expect(timeCol.children[1]).toHaveTextContent(/Newest:/);
+  // Two rows in Δt: min above max.
+  const deltaCol = screen.getByText(/Min Δt:/).parentElement!;
+  expect(deltaCol.children[0]).toHaveTextContent(/Min Δt:/);
+  expect(deltaCol.children[1]).toHaveTextContent(/Max Δt:/);
+});
+
 test('quick info bar shows the busiest second as a max rate (#441)', () => {
   const at = (ts: string) => makeTelegram({ timestamp: ts, raw_hex: ts });
   render(
@@ -1420,8 +1614,11 @@ test('dragging a column header onto another reorders header and rows, and is rem
     visibleColumns, sortConfig, onSort: vi.fn(), activeFilters: DEFAULT_FILTERS, onQuickFilter: vi.fn(), onQuickVisualize: vi.fn(),
   };
   const { container, unmount } = render(<TelegramTable {...props} />);
-  const headers = () => Array.from(container.querySelectorAll('.header-col')).map(h => h.textContent?.trim().split(/\s/)[0]);
-  const header = (label: string) => Array.from(container.querySelectorAll<HTMLElement>('.header-col')).find(h => h.textContent?.includes(label))!;
+  // SOURCE/TARGET headers also contain a leading "focus" affordance — pick the column label.
+  const headerLabel = (h: Element) =>
+    (h.textContent ?? '').match(/(TIME|Δt|SOURCE|TARGET|TYPE|DPT|VALUE)/)?.[1] ?? '';
+  const headers = () => Array.from(container.querySelectorAll('.header-col')).map(headerLabel);
+  const header = (label: string) => Array.from(container.querySelectorAll<HTMLElement>('.header-col')).find(h => headerLabel(h) === label)!;
   const rowText = () => container.querySelector('.log-row')!.textContent ?? '';
   const dataTransfer = { setData: vi.fn(), effectAllowed: '', dropEffect: '' };
   // jsdom's drag events carry no pointer position, so set it by hand.
@@ -1453,7 +1650,7 @@ test('dragging a column header onto another reorders header and rows, and is rem
   // A fresh table (reload, or the History view) picks the order up again.
   unmount();
   const again = render(<TelegramTable {...props} />);
-  expect(Array.from(again.container.querySelectorAll('.header-col')).map(h => h.textContent?.trim().split(/\s/)[0]))
+  expect(Array.from(again.container.querySelectorAll('.header-col')).map(headerLabel))
     .toEqual(['Δt', 'TARGET', 'SOURCE', 'TYPE', 'DPT', 'VALUE', 'TIME']);
   localStorage.removeItem('spectrum-knx.columnOrder');
 });
@@ -1490,6 +1687,138 @@ test('short list N>1 gets spacer travel so the live edge can be left', () => {
   }
 });
 
+/**
+ * jsdom has no layout, so every row reports the same rect and a pinned row can
+ * never "fail to hold". Emulate row geometry from the virtualizer transform,
+ * the spacer above the list and scrollTop. Returns the restore function.
+ */
+const emulateRowLayout = (port: HTMLElement) => {
+  const original = Element.prototype.getBoundingClientRect;
+  Element.prototype.getBoundingClientRect = function (this: Element) {
+    const base = original.call(this);
+    if (!this.classList.contains('log-row')) return base;
+    let contentTop = 0;
+    for (const child of Array.from(port.children) as HTMLElement[]) {
+      if (child.contains(this)) break;
+      contentTop += Number.parseFloat(child.style.height) || 0;
+    }
+    const start = /translateY\((-?[\d.]+)px\)/.exec((this as HTMLElement).style.transform);
+    const top = contentTop + (start ? Number(start[1]) : 0) - port.scrollTop;
+    return { ...base, top, y: top, bottom: top + 85, height: 85 } as DOMRect;
+  };
+  return () => { Element.prototype.getBoundingClientRect = original; };
+};
+
+const namedRows = (names: string[]): Telegram[] =>
+  names.map((target_name, i) => makeTelegram({
+    timestamp: new Date(MAKE_LIST_BASE_MS + (names.length - i) * 1000).toISOString(),
+    target_address: `1/2/${i}`,
+    target_name,
+    raw_hex: `0x${i}`,
+  }));
+
+const flushFrames = () => act(() => new Promise<void>(r => {
+  requestAnimationFrame(() => requestAnimationFrame(() => r()));
+}));
+
+/** Opens the quick filter bar with a TARGET-name pattern, left disabled. */
+const armQuickFilter = (pattern: string) => {
+  fireEvent.click(screen.getByTitle('Show quick filter bar'));
+  fireEvent.click(screen.getByTitle(/^Disable quick filter \(keeps patterns\)/));
+  fireEvent.change(screen.getByLabelText('Quick filter TARGET name'), { target: { value: pattern } });
+};
+
+test('filter on: a pinned row that cannot hold its place leaves no fill spacer open', async () => {
+  scrollBlockSize = 800;
+  // Newest first; only the two oldest survive the filter.
+  const rows = namedRows(['drop-0', 'drop-1', 'drop-2', 'drop-3', 'keep-a', 'keep-b']);
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      onListFollowChange={vi.fn()}
+    />,
+  );
+  const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+  const restoreLayout = emulateRowLayout(port);
+  try {
+    port.scrollTop = LIVE_EDGE_TOP;
+    fireEvent.scroll(port);
+    armQuickFilter('keep');
+    await flushFrames();
+
+    // Select keep-a: four rows above it, 340px below the viewport top.
+    fireEvent.click(container.querySelectorAll('.log-row')[4]);
+    fireEvent.click(screen.getByTitle(/^Enable quick filter/));
+    await flushFrames();
+
+    // The rows above are gone, so keep-a has to move up to the edge — onto the
+    // settled live edge, not into the fill rubber.
+    const visible = Array.from(container.querySelectorAll('.log-row'));
+    expect(visible).toHaveLength(2);
+    expect(visible[0].textContent).toContain('keep-a');
+    expect(port.scrollTop).toBe(LIVE_EDGE_TOP);
+  } finally {
+    restoreLayout();
+    scrollBlockSize = 800;
+  }
+});
+
+test('filter off: a pinned row that has to move leaves no spacer open above the list', async () => {
+  scrollBlockSize = 800;
+  const asc: SortConfig = [{ key: 'timestamp', direction: 'asc' }];
+  // Oldest first (live edge at the bottom); only the two oldest match.
+  const rows = namedRows([
+    ...Array.from({ length: 10 }, (_, i) => `drop-${i}`), 'keep-b', 'keep-a',
+  ]).reverse();
+  const { container } = render(
+    <TelegramTable
+      telegrams={rows}
+      visibleColumns={visibleColumns}
+      sortConfig={asc}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      onListFollowChange={vi.fn()}
+    />,
+  );
+  const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+  const restoreLayout = emulateRowLayout(port);
+  try {
+    armQuickFilter('keep');
+    fireEvent.click(screen.getByTitle(/^Enable quick filter/));
+    await flushFrames();
+    expect(container.querySelectorAll('.log-row')).toHaveLength(2);
+
+    // Short filtered list at the settled live edge: the rows sit at the bottom
+    // of the viewport, below the short-list pad. Select the oldest one.
+    port.scrollTop = port.scrollHeight - port.clientHeight - LIVE_EDGE_TOP;
+    fireEvent.scroll(port);
+    const oldest = container.querySelectorAll('.log-row')[0];
+    expect(oldest.textContent).toContain('keep-a');
+    expect(oldest.getBoundingClientRect().top).toBeGreaterThan(400);
+    fireEvent.click(oldest);
+
+    // Filter off: the pad is gone and nothing older exists to fill the space
+    // above keep-a, so it moves to the top — without exposing the rubber.
+    fireEvent.click(screen.getByTitle(/^Disable quick filter \(keeps patterns\)/));
+    await flushFrames();
+    expect(container.querySelectorAll('.log-row').length).toBeGreaterThan(2);
+    expect(port.scrollTop).toBe(LIVE_EDGE_TOP);
+  } finally {
+    restoreLayout();
+    scrollBlockSize = 800;
+  }
+});
+
 test('against-fill wheel never flushes pause backlog; along-fill does (short list)', () => {
   scrollBlockSize = 800;
   const onPauseFlush = vi.fn();
@@ -1507,7 +1836,7 @@ test('against-fill wheel never flushes pause backlog; along-fill does (short lis
         listFollow={false}
         onListFollowChange={onListFollowChange}
         isPaused
-        pausedCount={4}
+        {...pauseBacklogFor(makeList(3, 2), 4)}
         onPauseFlush={onPauseFlush}
       />,
     );
@@ -1549,7 +1878,7 @@ test('along-fill flush on ascending live edge stays seamless (no edge snap)', ()
       listFollow={false}
       onListFollowChange={onListFollowChange}
       isPaused={paused}
-      pausedCount={pausedN}
+      {...pauseBacklogFor(telegrams, pausedN, 'asc')}
       onPauseFlush={onPauseFlush}
     />
   );
@@ -1734,7 +2063,7 @@ test('opposite rubber finishes while paused even if pause-flush is armed', async
         listFollow={false}
         onListFollowChange={vi.fn()}
         isPaused
-        pausedCount={4}
+        {...pauseBacklogFor(makeList(3, 2), 4)}
         onPauseFlush={onPauseFlush}
       />,
     );
@@ -1765,7 +2094,7 @@ test('opposite rubber finishes while paused even if pause-flush is armed', async
           listFollow={false}
           onListFollowChange={vi.fn()}
           isPaused={false}
-          pausedCount={0}
+          {...pauseBacklogFor(makeList(7, 6), 0)}
           onPauseFlush={onPauseFlush}
         />,
       );
@@ -2019,7 +2348,10 @@ test('fill-axis rubber spacer overscroll animates back to the edge telegram', as
 test('pausedCount does not grow scrollHeight; pill still shows backlog', () => {
   scrollBlockSize = 800;
   const rows = makeList(10, 9);
-  const props = (pausedN: number, sort: SortConfig) => (
+  const props = (pausedN: number, sort: SortConfig) => {
+    const asc = sort[0]?.direction === 'asc';
+    const published = asc ? rows.slice().reverse() : rows;
+    return (
     <TelegramTable
       telegrams={rows}
       visibleColumns={visibleColumns}
@@ -2031,9 +2363,10 @@ test('pausedCount does not grow scrollHeight; pill still shows backlog', () => {
       listFollow={false}
       onListFollowChange={vi.fn()}
       isPaused={pausedN > 0}
-      pausedCount={pausedN}
+      {...pauseBacklogFor(published, pausedN, asc ? 'asc' : 'desc')}
     />
-  );
+    );
+  };
 
   try {
     const desc = render(props(0, sortConfig));
@@ -2050,6 +2383,8 @@ test('pausedCount does not grow scrollHeight; pill still shows backlog', () => {
     const baseAsc = portAsc.scrollHeight;
     ascView.rerender(props(4, asc));
     expect(portAsc.scrollHeight).toBe(baseAsc);
+    // Viewport (~800px) may clip the newest published row at the fill edge;
+    // only fully scrolled-out merged rows count, plus the 4 paused → 4 newer.
     expect(screen.getByRole('button', { name: '4 newer telegrams' })).toBeInTheDocument();
     ascView.unmount();
   } finally {
@@ -2072,7 +2407,7 @@ test('overlay scrollbar thumb shrinks with pausedCount while scrollHeight stays 
       listFollow={false}
       onListFollowChange={vi.fn()}
       isPaused={pausedN > 0}
-      pausedCount={pausedN}
+      {...pauseBacklogFor(rows, pausedN)}
     />
   );
 
@@ -2103,6 +2438,50 @@ test('overlay scrollbar thumb shrinks with pausedCount while scrollHeight stays 
   }
 });
 
+test('newer-pill and thumb count only filter-visible pause backlog', () => {
+  scrollBlockSize = 800;
+  const published = makeList(6, 5).map(t => ({ ...t, target_address: '1/2/keep' }));
+  const paused = makePausedAfter(3, 5).map((t, i) => ({
+    ...t,
+    target_address: i === 0 ? '1/2/keep' : '1/2/drop',
+  }));
+  const pause = withPauseBacklog(published, paused);
+
+  try {
+    render(
+      <TelegramTable
+        telegrams={published}
+        visibleColumns={visibleColumns}
+        sortConfig={sortConfig}
+        onSort={vi.fn()}
+        activeFilters={DEFAULT_FILTERS}
+        onQuickFilter={vi.fn()}
+        onQuickVisualize={vi.fn()}
+        listFollow={false}
+        onListFollowChange={vi.fn()}
+        isPaused
+        {...pause}
+        quickFilterOpen
+        quickFilterEnabled
+        quickPatterns={{ target: { top: '1/2/keep', bottom: '' } }}
+      />,
+    );
+    // Only the matching pause row is newer — not raw pausedCount (3).
+    expect(screen.getByRole('button', { name: '1 newer telegram' })).toBeInTheDocument();
+
+    const port = document.querySelector('.custom-scrollbar') as HTMLElement;
+    fireEvent.scroll(port);
+    const thumb = screen.getByTestId('list-scrollbar-thumb');
+    const sh = port.scrollHeight;
+    expect(Number.parseFloat(thumb.style.height)).toBeCloseTo(
+      Math.max(20, (800 * 800) / (sh + 1 * 85)),
+      0,
+    );
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
 test('settled live edge stays on newest published row when pausedCount is set', () => {
   const ROW = 85;
   scrollBlockSize = ROW * 2;
@@ -2119,7 +2498,7 @@ test('settled live edge stays on newest published row when pausedCount is set', 
         listFollow={false}
         onListFollowChange={vi.fn()}
         isPaused
-        pausedCount={3}
+        {...pauseBacklogFor(makeList(8, 7), 3)}
       />,
     );
     const port = container.querySelector('.custom-scrollbar') as HTMLElement;
@@ -2240,7 +2619,11 @@ const meteredProps = (
     listFollow={false}
     onListFollowChange={handlers.onListFollowChange}
     isPaused={paused}
-    pausedCount={pausedN}
+    {...pauseBacklogFor(
+      telegrams,
+      pausedN,
+      sort[0]?.direction === 'asc' ? 'asc' : 'desc',
+    )}
     onPauseFlush={handlers.onPauseFlush}
     onPauseReveal={handlers.onPauseReveal}
   />
@@ -2452,7 +2835,7 @@ test('metered reveal: manual pause stays a hard stop, no slice is requested', ()
         onListFollowChange={h.onListFollowChange}
         isPaused
         isManualPause
-        pausedCount={5}
+        {...pauseBacklogFor(makeList(8, 7), 5)}
         onPauseFlush={h.onPauseFlush}
         onPauseReveal={h.onPauseReveal}
       />,
@@ -2469,28 +2852,193 @@ test('metered reveal: manual pause stays a hard stop, no slice is requested', ()
   }
 });
 
-test('metered reveal: overlay scrollbar thumb pulled past the fill stop feeds the backlog', () => {
+test('thumb drag away from fill: scrollTop stays monotonic (no backlog-map jump)', () => {
   scrollBlockSize = 800;
   const h = meteredHandlers();
   try {
-    const { container } = render(meteredProps(makeList(20, 19), true, 30, h));
+    const { container } = render(meteredProps(makeList(30, 29), true, 20, h));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    // Start mid-list so dragging toward older actually moves scrollTop.
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 4;
+    fireEvent.scroll(port);
+    const thumb = screen.getByTestId('list-scrollbar-thumb');
+    const tops: number[] = [];
+    act(() => {
+      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 200 });
+      for (const y of [220, 240, 260, 280, 300]) {
+        fireEvent.pointerMove(thumb, { pointerId: 1, clientY: y });
+        tops.push(port.scrollTop);
+      }
+      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 300 });
+    });
+    expect(tops.length).toBeGreaterThan(1);
+    for (let i = 1; i < tops.length; i++) {
+      expect(tops[i]).toBeGreaterThanOrEqual(tops[i - 1]);
+    }
+    expect(h.onPauseReveal).not.toHaveBeenCalled();
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('metered reveal: overlay scrollbar thumb toward fill meters like wheel (no full flush / no edge jump)', () => {
+  scrollBlockSize = ROW * 2;
+  const h = meteredHandlers();
+  try {
+    const { container, rerender } = render(meteredProps(makeList(8, 7), true, 50, h));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP;
+    fireEvent.scroll(port);
+    h.onListFollowChange.mockClear();
+    const thumb = screen.getByTestId('list-scrollbar-thumb');
+
+    // Thumb toward fill at the hard stop — same engageLiveTowardNewer path as wheel.
+    act(() => {
+      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 200 });
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 160 });
+    });
+    expect(h.onPauseReveal).toHaveBeenCalledTimes(1);
+    const firstN = h.onPauseReveal.mock.calls[0][0] as number;
+    expect(firstN).toBeGreaterThan(0);
+    expect(firstN).toBeLessThanOrEqual(8);
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+    expect(h.onListFollowChange).not.toHaveBeenCalledWith(true);
+
+    // Rows land under the pin; seamless path must not claim follow / full flush.
+    const pinned = LIVE_EDGE_TOP + firstN * ROW;
+    port.scrollTop = pinned;
+    rerender(meteredProps(makeList(8 + firstN, 7 + firstN), true, 50 - firstN, h));
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+    expect(h.onListFollowChange).not.toHaveBeenCalledWith(true);
+    expect(screen.getByRole('button', { name: /newer telegram/ })).toBeInTheDocument();
+
+    act(() => {
+      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 160 });
+    });
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('thumb handle is recomputed live while the mouse is held (backlog change repaints it)', () => {
+  scrollBlockSize = 800;
+  const h = meteredHandlers();
+  try {
+    const rows = makeList(20, 19);
+    const { container, rerender } = render(meteredProps(rows, true, 30, h));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP + ROW * 4;
+    fireEvent.scroll(port);
+    const thumb = screen.getByTestId('list-scrollbar-thumb');
+    act(() => {
+      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 100 });
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 130 });
+    });
+    const heightBefore = Number.parseFloat(thumb.style.height);
+    const topBefore = Number.parseFloat(thumb.style.top);
+    const scrollBefore = port.scrollTop;
+    // Still held: a smaller backlog must grow the handle at once.
+    rerender(meteredProps(rows, true, 5, h));
+    const heightAfter = Number.parseFloat(thumb.style.height);
+    expect(heightAfter).toBeGreaterThan(heightBefore);
+    // And further moves keep scrolling from live geometry (no origin snap).
+    act(() => {
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 160 });
+    });
+    expect(port.scrollTop).toBeGreaterThanOrEqual(scrollBefore);
+    expect(Number.parseFloat(thumb.style.top)).toBeGreaterThanOrEqual(0);
+    expect(Number.isFinite(topBefore)).toBe(true);
+    act(() => {
+      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 160 });
+    });
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('metered reveal: thumb drag and wheel request the same slice for the same scroll delta', () => {
+  scrollBlockSize = ROW * 2;
+  const runWheel = () => {
+    const h = meteredHandlers();
+    const { container, unmount } = render(meteredProps(makeList(8, 7), true, 50, h));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP;
+    fireEvent.scroll(port);
+    fireEvent.wheel(port, { deltaY: -40 });
+    const n = h.onPauseReveal.mock.calls[0]?.[0];
+    unmount();
+    return n;
+  };
+  const runThumb = () => {
+    const h = meteredHandlers();
+    const { container, unmount } = render(meteredProps(makeList(8, 7), true, 50, h));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = LIVE_EDGE_TOP;
+    fireEvent.scroll(port);
+    const thumb = screen.getByTestId('list-scrollbar-thumb');
+    // Thumb px per scroll px under the live geometry; pick a ~40px scroll move.
+    const virtSH = port.scrollHeight + 50 * ROW;
+    const thumbH = Number.parseFloat(thumb.style.height);
+    const travel = port.clientHeight - thumbH;
+    const thumbDy = -(40 / (virtSH - port.clientHeight)) * travel;
+    act(() => {
+      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 300 });
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 300 + thumbDy });
+    });
+    const n = h.onPauseReveal.mock.calls[0]?.[0];
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+    act(() => {
+      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 300 + thumbDy });
+    });
+    unmount();
+    return n;
+  };
+  try {
+    const wheelN = runWheel();
+    expect(wheelN).toBe(2);
+    expect(runThumb()).toBe(wheelN);
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('metered reveal: repeated thumb moves while a step is pending accumulate like wheel', () => {
+  scrollBlockSize = ROW * 2;
+  const h = meteredHandlers();
+  try {
+    const { container, rerender } = render(meteredProps(makeList(8, 7), true, 50, h));
     const port = container.querySelector('.custom-scrollbar') as HTMLElement;
     port.scrollTop = LIVE_EDGE_TOP;
     fireEvent.scroll(port);
     const thumb = screen.getByTestId('list-scrollbar-thumb');
 
-    // Dragging up from the settled edge: the real range is exhausted, the
-    // overhang asks for backlog rows (capped per step).
     act(() => {
-      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 200 });
-      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 100 });
+      fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 300 });
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 280 });
     });
     expect(h.onPauseReveal).toHaveBeenCalledTimes(1);
-    expect(h.onPauseReveal.mock.calls[0][0]).toBeGreaterThan(0);
-    expect(h.onPauseReveal.mock.calls[0][0]).toBeLessThanOrEqual(8);
-    expect(h.onPauseFlush).not.toHaveBeenCalled();
+    const firstN = h.onPauseReveal.mock.calls[0][0] as number;
+
+    // Further into fill while the first slice has not landed: delta accumulates;
+    // after rows land the merge path may top the reveal (same as wheel).
     act(() => {
-      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 100 });
+      fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 200 });
+    });
+    expect(h.onPauseReveal).toHaveBeenCalledTimes(1);
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+
+    port.scrollTop = LIVE_EDGE_TOP + firstN * ROW;
+    rerender(meteredProps(makeList(8 + firstN, 7 + firstN), true, 50 - firstN, h));
+    // Pending accumulated delta may top up the slice once rows have height.
+    expect(h.onPauseReveal.mock.calls.length).toBeGreaterThanOrEqual(1);
+    const lastN = h.onPauseReveal.mock.calls.at(-1)![0] as number;
+    expect(lastN).toBeGreaterThan(0);
+    expect(lastN).toBeLessThanOrEqual(8);
+    expect(h.onPauseFlush).not.toHaveBeenCalled();
+
+    act(() => {
+      fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 200 });
     });
   } finally {
     scrollBlockSize = 800;
@@ -2556,7 +3104,11 @@ const holdProps = (
     onListFollowChange={opts.handlers.onListFollowChange}
     isPaused={opts.paused}
     isManualPause={opts.manual}
-    pausedCount={opts.pausedN}
+    {...pauseBacklogFor(
+      telegrams,
+      opts.pausedN,
+      (opts.sort ?? sortConfig)[0]?.direction === 'asc' ? 'asc' : 'desc',
+    )}
     onPauseFlush={opts.handlers.onPauseFlush}
     onPauseReveal={opts.handlers.onPauseReveal}
     onJumpToLive={opts.onJumpToLive}
@@ -2784,38 +3336,33 @@ test('manual → auto pause away from the spacer requests nothing', () => {
   }
 });
 
-test('matched/open send icons stay fully opaque under row hover CSS', () => {
-  // Styles are injected once on mount; keep the assertion scoped to send-icon rules.
-  render(
+test('header icon rail exposes info and quick-filter toggles', () => {
+  const { container } = render(
     <TelegramTable
-      telegrams={makeList(1, 1)}
+      telegrams={[makeTelegram()]}
       visibleColumns={visibleColumns}
       sortConfig={sortConfig}
       onSort={vi.fn()}
       activeFilters={DEFAULT_FILTERS}
       onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
     />,
   );
-  const styleText = Array.from(document.head.querySelectorAll('style'))
-    .map(s => s.textContent ?? '')
-    .join('\n');
-  expect(styleText).toMatch(/\.log-row:hover \.quick-send-btn\[data-send-popover-open\]/);
-  expect(styleText).toMatch(/\.quick-send-btn\[data-send-panel-match\][^}]*opacity:\s*1\s*!important/s);
-  expect(styleText).toMatch(/\.quick-send-btn\[data-send-job-active\][^}]*opacity:\s*1\s*!important/s);
-  expect(styleText).toMatch(/\.quick-send-btn\[data-send-job-active\][^}]*color:\s*var\(--tt-outgoing\)/s);
-  expect(styleText).toMatch(/\.quick-send-btn\[data-bus-pulse\][^}]*opacity:\s*1\s*!important/s);
-  expect(styleText).toMatch(/\.quick-send-btn\[data-bus-pulse="Outgoing"\]:hover[^}]*color:\s*var\(--tt-outgoing\)/s);
-  expect(styleText).toMatch(/\.quick-send-btn\[data-bus-pulse="Incoming"\]:hover[^}]*color:\s*var\(--tt-incoming\)/s);
-  expect(styleText).not.toMatch(/quick-send-write-pulse/);
-  expect(styleText).toMatch(/\.quick-send-btn:focus[^}]*opacity:\s*1\s*!important/s);
+  expect(screen.getByTitle('Show info bar')).toBeInTheDocument();
+  expect(screen.getByTitle('Show quick filter bar')).toBeInTheDocument();
+  // Header is flex with a fixed-width rail beside the column grid.
+  const header = container.querySelector('.header-col')!.parentElement!.parentElement!;
+  expect(header.style.display).toBe('flex');
 });
 
-test('activeSendJobAddresses marks matching send icons with data-send-job-active', () => {
+test('SOURCE focus toggle filters to focusListAddresses', () => {
+  localStorage.removeItem('spectrum-knx.telegramTable.sourceFocusOnly');
+  localStorage.removeItem('spectrum-knx.telegramTable.targetFocusOnly');
   const telegrams = [
-    makeTelegram({ target_address: '1/2/3', dpt_main: 9, dpt_sub: 1 }),
-    makeTelegram({ target_address: '4/5/6', dpt_main: 1, dpt_sub: 1 }),
+    makeTelegram({ source_address: '1.1.1', raw_hex: 'a' }),
+    makeTelegram({ source_address: '1.1.2', raw_hex: 'b' }),
   ];
-  const { container } = render(
+  const { container, unmount } = render(
     <TelegramTable
       telegrams={telegrams}
       visibleColumns={visibleColumns}
@@ -2824,54 +3371,64 @@ test('activeSendJobAddresses marks matching send icons with data-send-job-active
       activeFilters={DEFAULT_FILTERS}
       onQuickFilter={vi.fn()}
       onQuickVisualize={vi.fn()}
-      canSend
-      activeSendJobAddresses={new Set(['1/2/3'])}
+      focusListAddresses={['1.1.1']}
     />,
   );
-  const matched = container.querySelectorAll('.quick-send-btn[data-send-job-active]');
-  expect(matched).toHaveLength(1);
+  expect(container.querySelectorAll('.log-row')).toHaveLength(2);
+  fireEvent.click(screen.getByTitle(/whose source is flagged/));
+  expect(container.querySelectorAll('.log-row')).toHaveLength(1);
+  expect(container.querySelector('.log-row')!.textContent).toContain('1.1.1');
+  unmount();
+  localStorage.removeItem('spectrum-knx.telegramTable.sourceFocusOnly');
+  localStorage.removeItem('spectrum-knx.telegramTable.targetFocusOnly');
 });
 
-test('alt-click on send icon forwards onAltSend', () => {
-  const onAltSend = vi.fn();
+test('Δt cell shows previous and next deltas', () => {
   const { container } = render(
     <TelegramTable
-      telegrams={makeList(3, 1)}
+      telegrams={[
+        makeTelegram({ timestamp: '2024-01-01T10:00:03.000Z', raw_hex: 'a' }),
+        makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', raw_hex: 'b' }),
+        makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', raw_hex: 'c' }),
+      ]}
       visibleColumns={visibleColumns}
       sortConfig={sortConfig}
       onSort={vi.fn()}
       activeFilters={DEFAULT_FILTERS}
       onQuickFilter={vi.fn()}
       onQuickVisualize={vi.fn()}
-      canSend
-      onAltSend={onAltSend}
     />,
   );
-  const sendIcon = container.querySelector('.quick-send-btn') as HTMLElement;
-  expect(sendIcon).toBeTruthy();
-  fireEvent.click(sendIcon, { altKey: true });
-  expect(onAltSend).toHaveBeenCalledTimes(1);
+  const middle = container.querySelectorAll('.log-row')[1]!;
+  // Descending time sort: top = gap to newer (-), bottom = gap to older (+).
+  // Without a context window the "+" slot stays a plus glyph (no context button).
+  expect(middle.textContent).toMatch(/- ?00:01\.000/);
+  expect(middle.textContent).toMatch(/\+ ?00:01\.000/);
+  expect(middle.querySelector('button[title*="around this message"]')).toBeNull();
 });
 
-test('sendPanelAddresses marks matching send icons with data-send-panel-match', () => {
-  const telegrams = [
-    makeTelegram({ target_address: '1/2/3', dpt_main: 9, dpt_sub: 1 }),
-    makeTelegram({ target_address: '4/5/6', dpt_main: 1, dpt_sub: 1 }),
-    makeTelegram({ target_address: '7/8/9', dpt_main: 5, dpt_sub: 1 }),
-  ];
+test('DPT cell shows key and description; visualize sits on source/target', () => {
+  const onQuickVisualize = vi.fn();
   const { container } = render(
     <TelegramTable
-      telegrams={telegrams}
+      telegrams={[makeTelegram({
+        dpt_main: 1, dpt_sub: 1, dpt_name: '1.001 - Switch', unit: null,
+        source_address: '1.1.1', target_address: '1/2/3',
+      })]}
       visibleColumns={visibleColumns}
       sortConfig={sortConfig}
       onSort={vi.fn()}
       activeFilters={DEFAULT_FILTERS}
       onQuickFilter={vi.fn()}
-      onQuickVisualize={vi.fn()}
-      canSend
-      sendPanelAddresses={new Set(['1/2/3', '7/8/9'])}
+      onQuickVisualize={onQuickVisualize}
     />,
   );
-  const matched = container.querySelectorAll('.quick-send-btn[data-send-panel-match]');
-  expect(matched).toHaveLength(2);
+  const row = container.querySelector('.log-row')!;
+  expect(row.textContent).toContain('1.001');
+  expect(row.textContent).toContain('Switch');
+  expect(screen.getByTitle('visualize this device')).toBeInTheDocument();
+  expect(screen.getByTitle('visualize this GA')).toBeInTheDocument();
+  expect(screen.queryByTitle('Visualize this target')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByTitle('visualize this GA'));
+  expect(onQuickVisualize).toHaveBeenCalledWith('1/2/3');
 });

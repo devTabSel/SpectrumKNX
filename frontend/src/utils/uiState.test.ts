@@ -29,11 +29,36 @@ test('round-trip save/load works correctly', () => {
     lastSeenLive: false,
     lastSeenSearch: 'lastseen',
     filtersEnabled: false,
+    markReasons: { 'k-1': ['manual', 'mouse'] },
+    markColorIndices: { 'k-1': 2 },
+    flaggedKeys: ['flag-a'],
+    contextForAllMatches: false,
   };
 
   saveUiState(state);
   const loaded = loadUiState();
   expect(loaded).toEqual(state);
+});
+
+test('sanitize keeps durable mark reasons and drops goto/context/auto', () => {
+  localStorage.setItem(
+    UI_STORAGE_KEY,
+    JSON.stringify({
+      v: 1,
+      markReasons: {
+        a: ['manual', 'goto', 'context', 'auto', 'hidden', 'nope'],
+        b: ['mouse'],
+      },
+      markColorIndices: { a: 1, bad: 99 },
+      flaggedKeys: ['x', 'x', 3, ''],
+      contextForAllMatches: false,
+    }),
+  );
+  const loaded = loadUiState();
+  expect(loaded?.markReasons).toEqual({ a: ['manual', 'hidden'], b: ['mouse'] });
+  expect(loaded?.markColorIndices).toEqual({ a: 1 });
+  expect(loaded?.flaggedKeys).toEqual(['x']);
+  expect(loaded?.contextForAllMatches).toBe(false);
 });
 
 test('returns null when storage is empty', () => {

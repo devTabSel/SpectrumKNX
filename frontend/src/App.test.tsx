@@ -37,6 +37,12 @@ vi.mock('./hooks/useTelegramCache', () => {
         }
       };
       cacheCtl.addLive = addLive as (t: { timestamp: string }) => void;
+      // Newest first, like the real cache; re-read whenever the count changes.
+      const pausedTelegrams = React.useMemo(
+        () => backlogRef.current.slice().reverse(),
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        [pausedCount],
+      );
       return {
         telegrams,
         addLive,
@@ -52,6 +58,7 @@ vi.mock('./hooks/useTelegramCache', () => {
           }
         },
         pausedCount,
+        pausedTelegrams,
         revealPaused: (n: number) => {
           cacheCtl.revealCalls.push(n);
           if (!pausedRef.current || n <= 0) return backlogRef.current.length;
