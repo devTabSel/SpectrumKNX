@@ -72,6 +72,9 @@ function parseValueToken(token: string, textField: TextField): Matcher {
   }
   if (/^0x/i.test(token)) return hexMatcher(token);
   if (/^0b/i.test(token)) return binaryMatcher(token);
+  if (token.toLowerCase().startsWith('regex:')) {
+    return regexOrLiteralMatcher(token.slice('regex:'.length), textField);
+  }
   if (/^[\d+*]+$/.test(token) && /\d/.test(token)) return decimalWildcardMatcher(token);
   return regexOrLiteralMatcher(token, textField);
 }

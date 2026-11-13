@@ -6,6 +6,7 @@ import { DEFAULT_FILTERS, type FilterOptions } from '../types/filters';
 import { TARGET_COLORS, resetTargetColors, setTargetColor } from '../utils/targetColors';
 import type { Telegram } from '../hooks/useWebSocket';
 import { makeTelegram } from '../test/telegramFactory';
+import { installVirtualLayout } from '../test/virtualLayout';
 
 // A colour for a group address in the target filter, and its telegrams marked
 // with it in the list (#509).
@@ -34,25 +35,7 @@ const COLUMNS = {
 };
 
 // jsdom has no layout: give the virtualizer a viewport so it renders rows.
-beforeAll(() => {
-  globalThis.ResizeObserver = class {
-    private cb: ResizeObserverCallback;
-    constructor(cb: ResizeObserverCallback) {
-      this.cb = cb;
-    }
-    observe(el: Element) {
-      const size = { inlineSize: 1000, blockSize: el.classList.contains('log-row') ? 85 : 800 };
-      this.cb(
-        [{ target: el, contentRect: el.getBoundingClientRect(), borderBoxSize: [size], contentBoxSize: [size] } as unknown as ResizeObserverEntry],
-        this as unknown as ResizeObserver,
-      );
-    }
-    unobserve() {}
-    disconnect() {}
-  } as unknown as typeof ResizeObserver;
-  Element.prototype.getBoundingClientRect = () =>
-    ({ width: 1000, height: 800, top: 0, bottom: 800, left: 0, right: 1000, x: 0, y: 0, toJSON: () => {} }) as DOMRect;
-});
+beforeAll(installVirtualLayout);
 
 const renderPanel = () => {
   render(<FilterPanel options={OPTIONS} activeFilters={FILTERS} onFiltersChange={vi.fn()} projectLoaded />);
@@ -75,6 +58,19 @@ const renderTable = (filters = FILTERS) =>
 const rowOf = (container: HTMLElement, target: string) =>
   [...container.querySelectorAll<HTMLElement>('.log-row')].find(r => r.textContent?.includes(target))!;
 
+/** Target-address wash lives on the column grid, not the zebra row shell. */
+const washOf = (container: HTMLElement, target: string) =>
+  rowOf(container, target).querySelector<HTMLElement>(':scope > div[style*="grid-template-columns"]')!;
+
+/** jsdom serializes the color-mix hex as rgb(). */
+const rgbOf = (hex: string) => {
+  const n = hex.slice(1);
+  const r = parseInt(n.slice(0, 2), 16);
+  const g = parseInt(n.slice(2, 4), 16);
+  const b = parseInt(n.slice(4, 6), 16);
+  return `rgb(${r}, ${g}, ${b})`;
+};
+
 beforeEach(() => resetTargetColors());
 
 test('each target filter has a colour swatch; clicks walk the palette', () => {
@@ -86,13 +82,13 @@ test('each target filter has a colour swatch; clicks walk the palette', () => {
   expect(kitchen).toHaveAttribute('title', 'Mark telegrams to this address with a colour');
 
   fireEvent.click(kitchen);
-  expect(kitchen).toHaveStyle({ background: TARGET_COLORS[0] });
+  expect(kitchen).toHaveStyle({ backgroundColor: TARGET_COLORS[0] });
   // The next address starts with a colour that is still free.
   fireEvent.click(hall);
-  expect(hall).toHaveStyle({ background: TARGET_COLORS[1] });
+  expect(hall).toHaveStyle({ backgroundColor: TARGET_COLORS[1] });
 
   fireEvent.click(kitchen);
-  expect(kitchen).toHaveStyle({ background: TARGET_COLORS[1] });
+  expect(kitchen).toHaveStyle({ backgroundColor: TARGET_COLORS[1] });
 });
 
 test('a click on the swatch does not switch the filter off', () => {
@@ -107,27 +103,27 @@ test('telegrams to a coloured target are marked in the list', () => {
   setTargetColor('1/2/3', TARGET_COLORS[3]);
   const { container } = renderTable();
 
-  expect(rowOf(container, '1/2/3').style.background).toContain(TARGET_COLORS[3]);
+  expect(washOf(container, '1/2/3').style.background).toContain(rgbOf(TARGET_COLORS[3]));
   expect(rowOf(container, '1/2/3').style.boxShadow).toBe('');
-  expect(rowOf(container, '1/2/4').style.background).not.toContain(TARGET_COLORS[3]);
-  expect(rowOf(container, '2/0/1').style.background).not.toContain(TARGET_COLORS[3]);
+  expect(washOf(container, '1/2/4').style.background).not.toContain(rgbOf(TARGET_COLORS[3]));
+  expect(washOf(container, '2/0/1').style.background).not.toContain(rgbOf(TARGET_COLORS[3]));
 });
 
 test('the list follows a colour set while it is shown', () => {
   const { container } = renderTable();
-  expect(rowOf(container, '1/2/4').style.background).not.toContain(TARGET_COLORS[0]);
+  expect(washOf(container, '1/2/4').style.background).not.toContain(rgbOf(TARGET_COLORS[0]));
   act(() => setTargetColor('1/2/4', TARGET_COLORS[0]));
-  expect(rowOf(container, '1/2/4').style.background).toContain(TARGET_COLORS[0]);
+  expect(washOf(container, '1/2/4').style.background).toContain(rgbOf(TARGET_COLORS[0]));
 });
 
 test('a colour only marks rows while its address is in the target filter', () => {
   setTargetColor('1/2/3', TARGET_COLORS[0]);
   const { container } = renderTable({ ...DEFAULT_FILTERS, targets: ['1/2/4'] });
-  expect(rowOf(container, '1/2/3').style.background).not.toContain(TARGET_COLORS[0]);
+  expect(washOf(container, '1/2/3').style.background).not.toContain(rgbOf(TARGET_COLORS[0]));
 });
 
 test('a switched-off filter keeps marking its rows', () => {
   setTargetColor('1/2/3', TARGET_COLORS[0]);
   const { container } = renderTable({ ...FILTERS, disabled: ['targets:1/2/3'] });
-  expect(rowOf(container, '1/2/3').style.background).toContain(TARGET_COLORS[0]);
+  expect(washOf(container, '1/2/3').style.background).toContain(rgbOf(TARGET_COLORS[0]));
 });

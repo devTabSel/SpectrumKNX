@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useTelegramCache } from './useTelegramCache';
+import { gaReadPhases } from '../utils/telegramCellStyles';
 import { makeTelegram } from '../test/telegramFactory';
 import { toEntry } from '../utils/telegramId';
 import { COVERAGE_STORAGE_KEY } from '../services/telegram-coverage-service';
@@ -210,15 +211,37 @@ describe('useTelegramCache', () => {
       result.current.addLive(tg(3000, 'c'));
     });
 
-    // Snapshot frozen, but ingestion keeps counting.
+    // List snapshot stays frozen. The ingested buffer keeps the live tail.
     expect(result.current.telegrams).toHaveLength(1);
+    expect(result.current.ingested).toHaveLength(3);
     expect(result.current.pausedCount).toBe(2);
     expect(result.current.pausedTelegrams.map(t => t.source_address)).toEqual(['1.2.c', '1.2.b']);
 
     act(() => {
+      result.current.addLive(makeTelegram({
+        timestamp: new Date(4000).toISOString(),
+        source_address: '1.2.read',
+        target_address: '9/9/9',
+        simplified_type: 'Read',
+        telegram_type: 'GroupValueRead',
+      }));
+      result.current.addLive(makeTelegram({
+        timestamp: new Date(5000).toISOString(),
+        source_address: '1.2.rsp',
+        target_address: '9/9/9',
+        simplified_type: 'Response',
+        telegram_type: 'GroupValueResponse',
+      }));
+    });
+    // The pause backlog stays out of the published snapshot. GA read phase
+    // follows `ingested`, so a Response still in the backlog still answers.
+    expect(gaReadPhases(result.current.telegrams).get('9/9/9')).toBeUndefined();
+    expect(gaReadPhases(result.current.ingested).get('9/9/9')).toBe('answered');
+
+    act(() => {
       result.current.setPaused(false);
     });
-    expect(result.current.telegrams).toHaveLength(3);
+    expect(result.current.telegrams).toHaveLength(5);
     expect(result.current.pausedCount).toBe(0);
     expect(result.current.pausedTelegrams).toEqual([]);
   });
@@ -263,6 +286,63 @@ describe('useTelegramCache', () => {
     expect(result.current.pausedTelegrams.map(t => t.source_address)).toEqual([
       '1.2.f', '1.2.e', '1.2.d',
     ]);
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.c', '1.2.b', '1.2.a']);
+
+    // Over-revealing clamps at zero and shows everything.
+    act(() => {
+      remaining = result.current.revealPaused(10);
+    });
+    expect(remaining).toBe(0);
+    expect(result.current.pausedCount).toBe(0);
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual([
+      '1.2.f', '1.2.e', '1.2.d', '1.2.c', '1.2.b', '1.2.a',
+    ]);
+
+    // Not paused: no-op.
+    act(() => {
+      result.current.setPaused(false);
+      result.current.addLive(tg(7000, 'g'));
+    });
+    act(() => {
+      remaining = result.current.revealPaused(1);
+    });
+    expect(remaining).toBe(0);
+    expect(result.current.telegrams).toHaveLength(7);
+  });
+
+  it('revealPaused publishes the oldest n of the backlog, stays paused and keeps counting', async () => {
+    const { result } = renderHook(() => useTelegramCache(1000));
+    await settle(result);
+
+    act(() => {
+      result.current.addLive(tg(1000, 'a'));
+    });
+    act(() => {
+      result.current.setPaused(true);
+    });
+    act(() => {
+      result.current.addLive(tg(2000, 'b'));
+      result.current.addLive(tg(3000, 'c'));
+      result.current.addLive(tg(4000, 'd'));
+      result.current.addLive(tg(5000, 'e'));
+    });
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.a']);
+    expect(result.current.pausedCount).toBe(4);
+
+    // Oldest two of the backlog become visible; the two newest stay hidden.
+    let remaining = -1;
+    act(() => {
+      remaining = result.current.revealPaused(2);
+    });
+    expect(remaining).toBe(2);
+    expect(result.current.pausedCount).toBe(2);
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.c', '1.2.b', '1.2.a']);
+
+    // Still paused: a new live telegram is hidden and counted, nothing else moves.
+    act(() => {
+      result.current.addLive(tg(6000, 'f'));
+    });
+    expect(result.current.pausedCount).toBe(3);
     expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.c', '1.2.b', '1.2.a']);
 
     // Over-revealing clamps at zero and shows everything.

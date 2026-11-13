@@ -34,6 +34,12 @@ const HISTORY_CHUNK_SIZE = 2000;
 export interface TelegramCache {
   /** Current buffer contents, newest first. Frozen while paused. */
   telegrams: Telegram[];
+  /**
+   * Full buffer, newest first, including telegrams ingested while the
+   * published snapshot is frozen. GA read phase follows this buffer
+   * (published list plus pause backlog).
+   */
+  ingested: Telegram[];
   /** Ingest a live telegram from the WebSocket. */
   addLive: (t: Telegram) => void;
   /** Reflect the WS connection so offline windows become coverage gaps. */
@@ -123,6 +129,8 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
   const pendingStoreCountRef = useRef(0);
 
   const [telegrams, setTelegrams] = useState<Telegram[]>([]);
+  /** Full buffer, including the pause backlog. Not frozen by auto-pause. */
+  const [ingested, setIngested] = useState<Telegram[]>([]);
   const [pausedCount, setPausedCount] = useState(0);
   const [pausedTelegrams, setPausedTelegrams] = useState<Telegram[]>([]);
   /** Mirrors `pausedCount` for synchronous reads (addLive / revealPaused). */
@@ -143,10 +151,12 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     setPausedTelegrams(snap.slice(-n).map(e => e.telegram).reverse());
   }, []);
 
-  /** Publishes the buffer as a newest-first snapshot unless frozen by pause. */
+  /** Publishes the buffer. The list snapshot stays frozen while paused; ingested does not. */
   const publish = useCallback(() => {
+    const next = bufferRef.current!.snapshot.map(e => e.telegram).reverse();
+    setIngested(next);
     if (pausedRef.current) return;
-    setTelegrams(bufferRef.current!.snapshot.map(e => e.telegram).reverse());
+    setTelegrams(next);
   }, []);
 
   /**
@@ -430,7 +440,7 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
         );
       }
       if (pausedRef.current) updatePausedCount(pausedCountRef.current + 1);
-      else publish();
+      publish();
     },
     [trackRemoved, publish, saveCoverage, updatePausedCount],
   );
@@ -492,11 +502,13 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     // jump-to-live pill alive with a count that can never appear in the list.
     updatePausedCount(0);
     setTelegrams([]);
+    setIngested([]);
     await cacheRef.current!.clear().catch(() => {});
   }, [trackRemoved, saveCoverage, updatePausedCount]);
 
   return {
     telegrams,
+    ingested,
     addLive,
     setConnected,
     setPaused,

@@ -90,8 +90,6 @@ describe('makeValueMatcher', () => {
     // "07" as plain decimal digits is a decimal wildcard against value_numeric.
     expect(m(v({ value_numeric: 7, raw_hex: '07', value_formatted: 'On' }))).toBe(false);
     expect(m(v({ value_numeric: 7 }))).toBe(false);
-    expect(m(v({ value_numeric: 07 }))).toBe(false);
-    expect(m(v({ value_numeric: 7 }))).toBe(false);
     // Literal/regex text on top looks only at formatted, not raw_hex.
     const text = makeValueMatcher('regex:07', '');
     expect(text(v({ value_formatted: 'On', raw_hex: '07' }))).toBe(false);

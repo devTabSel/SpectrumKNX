@@ -5,7 +5,10 @@ import type { Telegram } from '../hooks/useWebSocket';
 import { ChevronUp, ChevronDown, Filter, LineChart, X, Clock, Circle, PlusCircle, Download, List, Search } from 'lucide-react';
 import { effectiveDeltaContext, type ActiveFilters } from '../types/filters';
 import { contextRailSigns } from '../utils/deltaContextExpansion';
-import { SendToGaPopover } from './SendToGaPopover';
+import { SendToGaHost, SendToGaPopover } from './SendToGaPopover';
+import { type LinkedRowStatus } from './WriteToBusPanel';
+import type { SendCorrespondenceKey } from '../utils/sendCorrespondence';
+import type { BusPayload } from '../utils/dptValues';
 import { GotoTimeControl } from './GotoTimeControl';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
@@ -31,7 +34,6 @@ import {
   clearNonHiddenReasons,
   hasMarkReason,
   hiddenKeysFrom,
-  markedKeysFrom,
   removeMarkReason,
   setSoleMarkReason,
   syncAutoMarkReason,
@@ -42,7 +44,6 @@ import {
 } from '../utils/markReasons';
 import {
   clearAllMarkColorIndices,
-  getMarkColorIndex,
   markColorFromIndex,
   nextMarkColorIndex,
   setMarkColorIndex,
@@ -58,6 +59,12 @@ interface TelegramTableProps {
    * the parent already dropped. Defaults to `telegrams`.
    */
   forceIncludeFrom?: Telegram[];
+  /**
+   * Telegrams that decide whether a visible Read is answered.
+   * The live list passes the full buffer, including the pause backlog.
+   * Omitted → the rows passed as `telegrams`.
+   */
+  readPhaseTelegrams?: Telegram[];
   visibleColumns: { [key: string]: boolean };
   sortConfig: SortConfig;
   /** `additive` (ctrl/cmd-click) adds/toggles a sort level instead of replacing the whole config (#311). */
@@ -68,6 +75,36 @@ interface TelegramTableProps {
   onQuickLastSeen?: (address: string, mode: 'ga' | 'pa') => void;
   /** Enables the per-row "Send to this GA" quick popover; true only when the bus is writable (#214). */
   canSend?: boolean;
+  /** Jump from the send popover's last-value timestamp to the telegram list. */
+  onGotoTelegram?: (telegram: Telegram) => void;
+  /** Live bus feed for the send popover's wait-for-read-response. */
+  latestTelegram?: Telegram | null;
+  /** Alt-click on a row send icon → toggle the send panel. */
+  onAltSend?: () => void;
+  /** Ctrl/Cmd-click on a row send icon → clear or insert that GA in the send panel. */
+  onCtrlSend?: (info: {
+    address: string;
+    name?: string | null;
+    dptMain?: number | null;
+    dptSub?: number | null;
+  }) => void;
+  /** GAs present in the send panel (send-icon opaque/blue; panel open/closed irrelevant). */
+  sendPanelAddresses?: ReadonlySet<string>;
+  /** GAs with a live scheduled send-job (send-icon opaque, green). */
+  activeSendJobAddresses?: ReadonlySet<string>;
+  /** Live job status by GA — popover shows panel-like status when a job is active. */
+  gaJobStatuses?: Record<string, LinkedRowStatus>;
+  /** Linked send-panel row status while a popover job is active. */
+  linkedStatus?: LinkedRowStatus | null;
+  onScheduleCommit?: (draft: SendCorrespondenceKey & { name?: string | null }) => void;
+  onWriteWithSchedule?: (
+    draft: SendCorrespondenceKey & { name?: string | null },
+    payload: BusPayload,
+    opts?: { response?: boolean },
+  ) => void;
+  onReadWithSchedule?: (draft: SendCorrespondenceKey & { name?: string | null }) => void;
+  onCancelLinked?: (rowId?: string) => void;
+  onClearLinked?: (rowId?: string) => void;
 
   // Lifted Quick-Filter state (#280, #309, #341)
   quickFilterOpen?: boolean;
@@ -279,10 +316,6 @@ const EDGE_PILL_INSET = '1rem';
 const EDGE_PILL_HALF = '0.85rem';
 const EDGE_PILL_CENTER = `calc(${EDGE_PILL_INSET} + ${EDGE_PILL_HALF})`;
 
-function timeMs(timestamp: string): number {
-  return new Date(timestamp).getTime();
-}
-
 /**
  * Merged rows completely scrolled out of the viewport toward the fill axis
  * (partial overlap does not count). `liveEdge === 'top'` → rows fully above
@@ -331,6 +364,9 @@ function countFillAxisScrolledOut(
 
 export const TelegramTable: React.FC<TelegramTableProps> = ({
   telegrams, forceIncludeFrom, visibleColumns, sortConfig, onSort, activeFilters, onQuickFilter, onQuickVisualize, onQuickLastSeen, canSend,
+  onGotoTelegram, latestTelegram, onAltSend, onCtrlSend, sendPanelAddresses,
+  activeSendJobAddresses, gaJobStatuses, linkedStatus = null,
+  onScheduleCommit, onWriteWithSchedule, onReadWithSchedule, onCancelLinked, onClearLinked,
   quickFilterOpen, onQuickFilterOpenChange, quickFilterEnabled, onQuickFilterEnabledChange, quickPatterns, onQuickPatternsChange,
   onDeltaContextChange,
   onDeltaContextEnabledChange,
@@ -644,7 +680,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     newLatest: string | null,
   ): MarkReasonsMap => syncAutoMarkReason(map, newLatest), []);
 
-  const markedKeysList = useMemo(() => markedKeysFrom(markReasons), [markReasons]);
   // Mouse-selected keys — rail colour / mark / context actions apply to this set
   // when the clicked row is part of the selection.
   const mouseSelectedKeys = useMemo(
@@ -667,7 +702,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     () => hiddenKeysFrom(markReasons),
     [markReasons],
   );
-  const markedSet = useMemo(() => new Set(markedKeysList), [markedKeysList]);
   const actionableMarkedSet = useMemo(
     () => new Set(actionableMarkedKeys),
     [actionableMarkedKeys],
@@ -2049,17 +2083,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // Pin a row for a user action. Prefer keeping it visually still (instant
   // scroll correction). Only animate when the scroll edge clamps and the row
   // must move (e.g. context collapse while already scrolled to the top).
-  const pinForAction = (key: string) => {
-    if (atEdgeRef.current) {
-      atEdgeRef.current = false;
-      detachedFromEdgeRef.current = true;
-      setFollowingLive(false);
-      onListFollowChange?.(false);
-    }
-    captureAnchor(key);
-    animateNextPinRef.current = true;
-  };
-
   // Preferred pin target after a display-changing action: last selected →
   // first selected (list order) → topmost visible row.
   const preferredPinKey = (rows: typeof telegramRowsRef.current = telegramRowsRef.current): string | null => {
@@ -3276,7 +3299,25 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   name={t.target_name}
                   dptMain={t.dpt_main}
                   dptSub={t.dpt_sub}
+                  triggerId={anchorKey(t)}
                   buttonClassName="quick-send-btn"
+                  suppressTriggerFocus
+                  onGotoTelegram={onGotoTelegram}
+                  latestTelegram={latestTelegram}
+                  onAltSend={onAltSend}
+                  onCtrlSend={onCtrlSend}
+                  panelMatched={Boolean(
+                    t.target_address && sendPanelAddresses?.has(t.target_address),
+                  )}
+                  jobActive={Boolean(
+                    t.target_address && activeSendJobAddresses?.has(t.target_address),
+                  )}
+                  linkedStatus={linkedStatus}
+                  onScheduleCommit={onScheduleCommit}
+                  onWriteWithSchedule={onWriteWithSchedule}
+                  onReadWithSchedule={onReadWithSchedule}
+                  onCancelLinked={onCancelLinked}
+                  onClearLinked={onClearLinked}
                 />
               )}
             </div>
@@ -3369,7 +3410,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // with the viewport does not count as out. `telegramRows` is already the
   // on-list (filter) set; `visiblePausedCount` is the filtered backlog.
   const virtualItems = virtualizer.getVirtualItems();
-  let newerCount = 0;
+  let newerCount: number;
   const rangeMeasured = virtualItems.some(item => item.size > 0);
   const scrollEl = parentRef.current;
   if (isTimeSort) {
@@ -3452,6 +3493,19 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   };
 
   return (
+    <SendToGaHost
+      latestTelegram={latestTelegram}
+      onGotoTelegram={onGotoTelegram}
+      linkedStatus={linkedStatus}
+      gaJobStatuses={gaJobStatuses}
+      onScheduleCommit={onScheduleCommit}
+      onWriteWithSchedule={onWriteWithSchedule}
+      onReadWithSchedule={onReadWithSchedule}
+      onCancelLinked={onCancelLinked}
+      onClearLinked={onClearLinked}
+      onAltSend={onAltSend}
+      onCtrlSend={onCtrlSend}
+    >
     <div
       ref={tableRootRef}
       tabIndex={-1}
@@ -4426,6 +4480,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       </div>
       </div>
     </div>
+    </SendToGaHost>
   );
 };
 
