@@ -1,16 +1,25 @@
 import React, { useMemo, useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
-import { ChevronUp, ChevronDown, Filter, LineChart, X, Clock, Circle, PlusCircle, Download, List, Search } from 'lucide-react';
+import { ChevronUp, ChevronDown, ChevronLeft, Filter, LineChart, X, Clock, Circle, Plus, PlusCircle, Download, List, Search, ToggleLeft, ToggleRight } from 'lucide-react';
 import { effectiveDeltaContext, enabledFilters, matchesTelegram, type ActiveFilters } from '../types/filters';
-import { contextRailSigns } from '../utils/deltaContextExpansion';
-import { SendToGaHost, SendToGaPopover } from './SendToGaPopover';
+import {
+  contextRailSigns,
+  expandWithDeltaContext,
+  individualWindowOn,
+  type IndividualContextWindows,
+} from '../utils/deltaContextExpansion';
+import { SendToGaHost, SendToGaPopover, type ListScrollSnapshot } from './SendToGaPopover';
 import { EventTypeLabel } from './EventTypeLabel';
 import { type LinkedRowStatus } from './WriteToBusPanel';
 import type { SendCorrespondenceKey } from '../utils/sendCorrespondence';
 import type { BusPayload } from '../utils/dptValues';
 import { GotoTimeControl } from './GotoTimeControl';
+import { SecondsField } from './SecondsField';
+import { ThemedDatetimePicker } from './ThemedDatetimePicker';
+import { sanitizeSecondsInput } from '../utils/sendCorrespondence';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
 import {
@@ -26,7 +35,6 @@ import { anchorKey } from '../utils/anchorKey';
 import { downloadTelegramsCsv } from '../utils/telegramCsv';
 import { adjacentMark } from '../utils/adjacentMark';
 import { readListEdge } from '../utils/listEdge';
-import { coveredByAnchors, createPausedVisState, syncPausedVisibility } from '../utils/pausedVisibility';
 import { createStripeState } from '../utils/stripeIndex';
 import { buildTelegramRows, patchTelegramRows, type TelegramRowOf } from '../utils/telegramRowDeltas';
 import { forceIncludeKeys } from '../utils/forceIncludeKeys';
@@ -184,11 +192,16 @@ interface TelegramTableProps {
    * not itself context anchors a window, whether flagged or not. */
   contextForAllMatches?: boolean;
   onContextForAllMatchesChange?: (all: boolean) => void;
+  /** Per-row before/after in ms. Missing key uses the quick-filter window. */
+  individualContextWindows?: IndividualContextWindows;
+  onIndividualContextWindowsChange?: (windows: IndividualContextWindows) => void;
 
   /** Per-row context flag: the row is in the soft Time-Delta-Context window
    * and did not itself match the filters. Not a mark reason. Flagging a row
    * only anchors a window; it does not clear this membership (#343). */
   contextKeys?: ReadonlySet<string>;
+  /** Context telegram key → anchor keys whose context includes it. */
+  contextParents?: ReadonlyMap<string, readonly string[]>;
 
   /** Center this telegram in the visible list. `id` changes on every request
    * so repeating the same telegram jumps again. Selection is set only when
@@ -283,24 +296,361 @@ const SOURCE_NAME_TEXT_STYLE: React.CSSProperties = {
   fontSize: '0.7rem',
   color: 'var(--text-main)',
   fontWeight: 500,
-  marginTop: '0.15rem',
+  marginTop: 0,
   overflow: 'hidden',
   textOverflow: 'ellipsis',
   whiteSpace: 'nowrap',
+  minWidth: 0,
 };
 
 type TelegramRow = TelegramRowOf<Telegram>;
 
-const cellPadding = '0.75rem 1rem'; // Unified padding for all cells
-const ROW_ESTIMATE = 85; // matches the virtualizer's estimateSize
+const cellPadding = '0.25rem 1rem'; // Tight vertical pad so more two-line rows fit
+/** Primary line: address/time/value plus the 14px action icons. */
+const TT_LINE1 = '1.4rem';
+/** Second line: name, date, direction, description, raw, or the other Δt. */
+const TT_LINE2 = '1.05rem';
+/** Every body cell is exactly two lines, so row height stays uniform. */
+const cellBox: React.CSSProperties = {
+  padding: cellPadding,
+  minWidth: 0,
+  overflow: 'hidden',
+  display: 'grid',
+  gridTemplateRows: `${TT_LINE1} ${TT_LINE2}`,
+  alignItems: 'center',
+  rowGap: '0.05rem',
+  lineHeight: 1.2,
+};
+const ROW_ESTIMATE = 85; // virtualizer hint; measureElement uses the real two-line height
 /** Fill-axis overscroll rubber; rubber-bands back to the edge telegram. */
 const FILL_RUBBER_PX = Math.round(ROW_ESTIMATE / 2);
 /** Stable empty backlog so a missing prop does not change identity every render. */
 const EMPTY_PAUSED: Telegram[] = [];
 const EDGE_SCROLL_EPS = 20;
-/** An empty quick-filter cell adds no predicate, so it sits on the dark inset. */
+/**
+ * Truly empty cells sit on the dark inset. Whitespace-only counts as input
+ * (lighter field) even though it still adds no filter predicate.
+ */
 const qfInputClass = (value: string) =>
-  `quick-filter-bar-input${value.trim() === '' ? ' idle' : ''}`;
+  `quick-filter-bar-input${value === '' ? ' idle' : ''}`;
+
+function contextMs(raw: string): number {
+  const t = raw.trim();
+  if (t === '') return 0;
+  const n = Number(t);
+  return Number.isFinite(n) && n >= 0 ? n : NaN;
+}
+
+type ContextTriggerRect = {
+  top: number;
+  left: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+};
+
+/** Same placement rules as the send popover: prefer right-below the trigger. */
+function placeContextPopup(
+  trigger: ContextTriggerRect,
+  card: HTMLElement | null,
+): { left: number; top: number } {
+  const pad = 8;
+  const gap = 6;
+  const table = document.querySelector('[data-telegram-table]');
+  const bounds = table?.getBoundingClientRect() ?? {
+    top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight,
+    width: window.innerWidth, height: window.innerHeight,
+  };
+  const width = Math.min(card?.offsetWidth || 160, Math.max(140, bounds.width - pad * 2));
+  const height = Math.min(card?.offsetHeight || 160, Math.max(120, bounds.height - pad * 2));
+  const minLeft = bounds.left + pad;
+  const maxLeft = Math.max(minLeft, bounds.right - width - pad);
+  const minTop = bounds.top + pad;
+  const maxTop = Math.max(minTop, bounds.bottom - height - pad);
+
+  const belowRightLeft = trigger.right + gap;
+  const belowRightTop = trigger.bottom + gap;
+  const fitsBelowRight =
+    belowRightLeft >= minLeft
+    && belowRightTop >= minTop
+    && belowRightLeft + width <= bounds.right - pad
+    && belowRightTop + height <= bounds.bottom - pad;
+
+  let left: number;
+  let top: number;
+  if (fitsBelowRight) {
+    left = belowRightLeft;
+    top = belowRightTop;
+  } else {
+    const rightOf = trigger.right + gap;
+    const leftOf = trigger.left - width - gap;
+    if (rightOf + width <= bounds.right - pad) left = rightOf;
+    else if (leftOf >= bounds.left + pad) left = leftOf;
+    else left = Math.min(Math.max(minLeft, rightOf), maxLeft);
+    top = trigger.top;
+    if (top + height > bounds.bottom - pad) top = Math.max(minTop, bounds.bottom - pad - height);
+    else if (top < minTop) top = minTop;
+    top = Math.min(maxTop, Math.max(minTop, top));
+  }
+  left = Math.min(maxLeft, Math.max(minLeft, left));
+  top = Math.min(maxTop, Math.max(minTop, top));
+  return { left, top };
+}
+
+function clampContextPopupPos(
+  left: number,
+  top: number,
+  card: HTMLElement | null,
+): { left: number; top: number } {
+  const pad = 8;
+  const table = document.querySelector('[data-telegram-table]');
+  const bounds = table?.getBoundingClientRect() ?? {
+    top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight,
+    width: window.innerWidth, height: window.innerHeight,
+  };
+  const width = Math.min(card?.offsetWidth || 160, Math.max(140, bounds.width - pad * 2));
+  const height = Math.min(card?.offsetHeight || 160, Math.max(120, bounds.height - pad * 2));
+  const minLeft = bounds.left + pad;
+  const maxLeft = Math.max(minLeft, bounds.right - width - pad);
+  const minTop = bounds.top + pad;
+  const maxTop = Math.max(minTop, bounds.bottom - height - pad);
+  return {
+    left: Math.min(maxLeft, Math.max(minLeft, left)),
+    top: Math.min(maxTop, Math.max(minTop, top)),
+  };
+}
+
+function ContextWindowPopup({
+  popup,
+  onChange,
+  onCommit,
+  captureListScroll,
+  restoreListScroll,
+}: {
+  popup: {
+    trigger: ContextTriggerRect;
+    before: string;
+    after: string;
+    on: boolean;
+    /** True when any selected row already has before/after set. */
+    selectionHasTimes: boolean;
+  };
+  onChange: (before: string, after: string, on: boolean) => void;
+  /** Enter applies the draft and closes. Esc / outside click discards. */
+  onCommit: () => void;
+  captureListScroll?: () => ListScrollSnapshot | null;
+  restoreListScroll?: (snap: ListScrollSnapshot) => void | Promise<void>;
+}) {
+  const beforeMs = contextMs(popup.before);
+  const afterMs = contextMs(popup.after);
+  const draftHasTimes = Number.isFinite(beforeMs) && Number.isFinite(afterMs)
+    && (beforeMs > 0 || afterMs > 0);
+  // On/off when the draft has times, or any row in the selection already has them.
+  const canOn = draftHasTimes || popup.selectionHasTimes;
+  const onEnter = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    onCommit();
+  };
+
+  const cardRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const anchoredPosRef = useRef<{ left: number; top: number } | null>(null);
+  const [posAway, setPosAway] = useState(false);
+  const [listSnapshot, setListSnapshot] = useState<ListScrollSnapshot | null>(null);
+  const [listScrollAway, setListScrollAway] = useState(false);
+  const listSnapshotRef = useRef<ListScrollSnapshot | null>(null);
+  listSnapshotRef.current = listSnapshot;
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    origLeft: number;
+    origTop: number;
+  } | null>(null);
+
+  const placeFull = useCallback(() => {
+    const next = placeContextPopup(popup.trigger, cardRef.current);
+    anchoredPosRef.current = next;
+    setPosAway(false);
+    setPos(next);
+  }, [popup.trigger]);
+
+  useLayoutEffect(() => {
+    const snap = captureListScroll?.() ?? (() => {
+      const scrollEl = document.querySelector('[data-telegram-scroll]') as HTMLElement | null;
+      if (!scrollEl) return null;
+      return { scrollTop: scrollEl.scrollTop, key: null, offset: 0 };
+    })();
+    setListSnapshot(snap);
+    setListScrollAway(false);
+    placeFull();
+    // Re-measure after first paint so card size is known (same as send popover).
+    requestAnimationFrame(() => placeFull());
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- open placement only
+  }, []);
+
+  useEffect(() => {
+    if (!pos || !anchoredPosRef.current) return;
+    const a = anchoredPosRef.current;
+    setPosAway(a.left !== pos.left || a.top !== pos.top);
+  }, [pos]);
+
+  useEffect(() => {
+    const onScroll = (e: Event) => {
+      if (!(e.target instanceof HTMLElement) || !e.target.hasAttribute('data-telegram-scroll')) return;
+      const snap = listSnapshotRef.current;
+      setListScrollAway(snap != null && e.target.scrollTop !== snap.scrollTop);
+    };
+    const onResize = () => placeFull();
+    document.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onResize);
+    return () => {
+      document.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
+    };
+  }, [placeFull]);
+
+  const restoreOpen = () => {
+    const snap = listSnapshot;
+    setListScrollAway(false);
+    const done = snap == null
+      ? undefined
+      : restoreListScroll
+        ? restoreListScroll(snap)
+        : (() => {
+            const scrollEl = document.querySelector('[data-telegram-scroll]') as HTMLElement | null;
+            if (scrollEl) scrollEl.scrollTop = snap.scrollTop;
+          })();
+    void Promise.resolve(done).then(() => { placeFull(); });
+  };
+
+  const onDragPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || !pos) return;
+    const t = e.target as HTMLElement;
+    if (t.closest('button, input, select, textarea')) return;
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    dragRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      origLeft: pos.left,
+      origTop: pos.top,
+    };
+  };
+  const onDragPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    const next = clampContextPopupPos(
+      d.origLeft + (e.clientX - d.startX),
+      d.origTop + (e.clientY - d.startY),
+      cardRef.current,
+    );
+    setPos(next);
+  };
+  const onDragPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragRef.current?.pointerId !== e.pointerId) return;
+    dragRef.current = null;
+    try { e.currentTarget.releasePointerCapture?.(e.pointerId); } catch { /* already released */ }
+  };
+
+  if (!pos) return null;
+
+  return (
+    <div
+      ref={cardRef}
+      data-testid="context-window-popup"
+      style={{
+        position: 'fixed',
+        left: pos.left,
+        top: pos.top,
+        zIndex: 1000,
+        width: 'max-content',
+        minWidth: 140,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'stretch',
+        gap: '0.55rem',
+        padding: '0.7rem 0.8rem',
+        background: 'var(--bg-panel)',
+        backdropFilter: 'var(--glass-blur)',
+        border: '1px solid var(--border-color)',
+        borderRadius: 10,
+        boxShadow: 'var(--shadow-lg)',
+        boxSizing: 'border-box',
+      }}
+      onMouseDown={e => e.stopPropagation()}
+    >
+      <div
+        data-context-window-drag-handle=""
+        onPointerDown={onDragPointerDown}
+        onPointerMove={onDragPointerMove}
+        onPointerUp={onDragPointerUp}
+        onPointerCancel={onDragPointerUp}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.45rem',
+          cursor: 'grab',
+          touchAction: 'none',
+          userSelect: 'none',
+        }}
+        title="Drag to move"
+      >
+        <PlusCircle size={16} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} aria-hidden />
+        <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)', flex: 1, minWidth: 0 }}>
+          Context window
+        </span>
+        {(listScrollAway || posAway) && (
+          <button
+            type="button"
+            className="quick-filter-bar-toggle"
+            title="Restore list and popup position"
+            aria-label="Restore list and popup position"
+            onClick={restoreOpen}
+            style={{ flexShrink: 0, margin: 0, cursor: 'pointer' }}
+          >
+            <ChevronLeft size={13} />
+          </button>
+        )}
+      </div>
+      <SecondsField
+        placeholder="before"
+        unit="ms"
+        value={popup.before}
+        onChange={v => onChange(v, popup.after, popup.on)}
+        title="Context before"
+        ariaLabel="Individual context before (ms)"
+        autoFocus
+        onKeyDown={onEnter}
+      />
+      <SecondsField
+        placeholder="after"
+        unit="ms"
+        value={popup.after}
+        onChange={v => onChange(popup.before, v, popup.on)}
+        title="Context after"
+        ariaLabel="Individual context after (ms)"
+        onKeyDown={onEnter}
+      />
+      <button
+        type="button"
+        className={`quick-filter-bar-toggle${popup.on ? ' open' : ''}`}
+        aria-label={popup.on ? 'On' : 'Off'}
+        aria-pressed={popup.on}
+        disabled={!popup.on && !canOn}
+        title={canOn || popup.on
+          ? 'Individual context window (applies to the whole selection)'
+          : 'Before or after must be set on at least one selected row'}
+        onClick={() => onChange(popup.before, popup.after, !popup.on)}
+        style={{ alignSelf: 'flex-start' }}
+      >
+        {popup.on ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
+      </button>
+    </div>
+  );
+}
 /**
  * Most pause-backlog rows revealed per step. Must stay below the virtualizer's
  * overscan so the row pinned across the insert is still rendered and can be
@@ -416,7 +766,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   infoBarOpen, onInfoBarOpenChange,
   flaggedKeys, onFlaggedKeysChange,
   contextForAllMatches, onContextForAllMatchesChange,
+  individualContextWindows: individualContextWindowsProp, onIndividualContextWindowsChange,
   contextKeys,
+  contextParents,
   gotoRequest,
   viewChangeToken,
   onFocusCategorySelect,
@@ -567,13 +919,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     onQuickColumnEnabledChange?.(next);
   }, [onQuickColumnEnabledChange]);
 
-  /** True when at least one quick-filter cell of the column has a value. */
+  /** True when at least one quick-filter cell of the column has a value (blanks count). */
   const columnHasQuickContent = useCallback((id: ColId) => {
     if (id === 'delta') {
       return activeFilters.deltaBeforeMs > 0 || activeFilters.deltaAfterMs > 0;
     }
     const cell = currentPatterns[id];
-    return !!(cell?.top.trim() || cell?.bottom.trim());
+    return !!(cell?.top || cell?.bottom);
   }, [activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs, currentPatterns]);
 
   /** Turn a column filter on the first time an empty cell receives text. */
@@ -593,9 +945,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     const prevCell = currentPatterns[id] ?? EMPTY_CELL;
     const nextCell = { ...prevCell, [row]: text };
     setQuickPatterns(prev => ({ ...prev, [id]: nextCell }));
-    const bothEmpty = nextCell.top.trim() === '' && nextCell.bottom.trim() === '';
+    // Whitespace-only still counts as input for enable/idle; trim only for filter match.
+    const bothEmpty = nextCell.top === '' && nextCell.bottom === '';
     if (bothEmpty) disableQuickColumnWhenEmpty(id);
-    else if (prevCell[row].trim() === '' && text.trim() !== '') enableQuickColumnOnInput(id);
+    else if (prevCell[row] === '' && text !== '') enableQuickColumnOnInput(id);
     // Debounce pin/flash while typing so each keystroke does not thrash the list.
     if (patternPinTimerRef.current) clearTimeout(patternPinTimerRef.current);
     patternPinTimerRef.current = setTimeout(() => requestDisplayPinRef.current(), 250);
@@ -901,6 +1254,20 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     onFlaggedKeysChange?.(val);
   }, [onFlaggedKeysChange]);
   const flaggedSet = useMemo(() => new Set(flaggedKeysList), [flaggedKeysList]);
+  const [internalContextWindows, setInternalContextWindows] = useState<IndividualContextWindows>({});
+  const individualWindows = individualContextWindowsProp ?? internalContextWindows;
+  const setIndividualWindows = useCallback((next: IndividualContextWindows) => {
+    setInternalContextWindows(next);
+    onIndividualContextWindowsChange?.(next);
+  }, [onIndividualContextWindowsChange]);
+  const [contextWindowPopup, setContextWindowPopup] = useState<{
+    trigger: ContextTriggerRect;
+    targets: string[];
+    before: string;
+    after: string;
+    on: boolean;
+    selectionHasTimes: boolean;
+  } | null>(null);
 
   // Colours given to target filters (#509) apply while the address is in the
   // filter, switched off or not; a colour of a removed filter is kept for when
@@ -935,10 +1302,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const focusFilteringActive =
     (sourceFocusOnly || targetFocusOnly) && !focusFilterDisabled && focusListAddresses != null;
 
-  // Context rows and flagged anchors are already the result of the
-  // Time-Delta-Context expansion, which the parent runs on quick-filter
-  // matches too. Filtering them here again would drop the context (#520).
-  // Visible marks and mouse selections are always kept; hide-flagged rows are always dropped.
+  // Context rows are already the result of the Time-Delta-Context expansion,
+  // which the parent runs on quick-filter matches too. Filtering them here
+  // again would drop the context (#520). A context button does not keep a
+  // non-matching row. Visible marks and mouse selections are always kept;
+  // hide-flagged rows are always dropped.
   // Prefer `forceIncludeFrom` (full buffer) so marks survive even when the parent
   // already dropped them from `telegrams`. List pool stays published-only so
   // pause backlog never leaks into rows; pill pool adds paused for mark restore.
@@ -961,12 +1329,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
     if (quickOpen && quickEnabled) {
       const matches = compileQuickFilters(currentPatterns, quickColumnEnabled);
-      const flagsActive = activeFilters.deltaContextEnabled;
-      list = list.filter(t => {
-        if (matches(t)) return true;
-        const key = anchorKey(t);
-        return !!contextKeys?.has(key) || (flagsActive && flaggedSet.has(key));
-      });
+      list = list.filter(t => matches(t) || !!contextKeys?.has(anchorKey(t)));
     }
     list = list.filter(t => !hiddenKeySet.has(anchorKey(t)));
     return forceIncludeKeys(pool, list, anchorKey, pinnedKeySet)
@@ -974,7 +1337,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   }, [
     focusFilteringActive, focusListAddresses, sourceFocusOnly, targetFocusOnly,
     quickOpen, quickEnabled, currentPatterns, quickColumnEnabled, contextKeys,
-    flaggedSet, activeFilters.deltaContextEnabled, hiddenKeySet, pinnedKeySet,
+    hiddenKeySet, pinnedKeySet,
   ]);
 
   const listForcePool = forceIncludeFrom ?? telegrams;
@@ -1008,52 +1371,39 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     () => (focusFilteringActive ? new Set(focusListAddresses) : null),
     [focusFilteringActive, focusListAddresses],
   );
-  const pauseVisEpoch = useMemo(() => ({
-    noMainFilter, pillFilters, pillQuick, focusAddressSet, sourceFocusOnly, targetFocusOnly,
-    hiddenKeySet, pinnedKeySet, flaggedSet, contextForAll,
-    deltaBeforeMs, deltaAfterMs, deltaOn: activeFilters.deltaContextEnabled,
-  }), [
-    noMainFilter, pillFilters, pillQuick, focusAddressSet, sourceFocusOnly, targetFocusOnly,
-    hiddenKeySet, pinnedKeySet, flaggedSet, contextForAll,
-    deltaBeforeMs, deltaAfterMs, activeFilters.deltaContextEnabled,
-  ]);
-  const pauseVisRef = useRef(createPausedVisState());
-  const windowOn = deltaBeforeMs > 0 || deltaAfterMs > 0;
   const primaryMatch = (t: Telegram) =>
     (noMainFilter || matchesTelegram(t, pillFilters)) && (!pillQuick || pillQuick(t));
-  const isPausedAnchor = (t: Telegram) =>
-    windowOn && (flaggedSet.has(anchorKey(t)) || (contextForAll && primaryMatch(t)));
-  const keepPaused = (t: Telegram, anchors: readonly number[]) => {
-    const key = anchorKey(t);
-    if (hiddenKeySet.has(key)) return false;
-    if (pinnedKeySet.has(key)) return true;
-    if (focusAddressSet) {
-      if (sourceFocusOnly && !focusAddressSet.has(t.source_address)) return false;
-      if (targetFocusOnly && !focusAddressSet.has(t.target_address)) return false;
-    }
-    if (primaryMatch(t)) return true;
-    if (activeFilters.deltaContextEnabled && flaggedSet.has(key)) return true;
-    if (windowOn && coveredByAnchors(anchors, timeMs(t.timestamp), deltaBeforeMs, deltaAfterMs)) {
-      return true;
-    }
-    return false;
-  };
-  const visiblePausedCount = syncPausedVisibility(pauseVisRef.current, {
-    epoch: pauseVisEpoch,
-    backlog: pausedTelegrams,
-    pausedCount,
-    beforeMs: deltaBeforeMs,
-    afterMs: deltaAfterMs,
-    isAnchor: isPausedAnchor,
-    keep: keepPaused,
-    collectAnchors: (backlog) => {
-      if (!windowOn) return [];
-      const out: number[] = [];
-      for (const t of listForcePool) if (isPausedAnchor(t)) out.push(timeMs(t.timestamp));
-      for (const t of backlog) if (isPausedAnchor(t)) out.push(timeMs(t.timestamp));
-      return out;
-    },
-  });
+  const visiblePausedCount = useMemo(() => {
+    if (pausedTelegrams.length === 0) return 0;
+    const combined = listForcePool.concat(pausedTelegrams);
+    const matches = combined.map(t => {
+      const key = anchorKey(t);
+      if (hiddenKeySet.has(key)) return false;
+      if (focusAddressSet) {
+        if (sourceFocusOnly && !focusAddressSet.has(t.source_address)) return false;
+        if (targetFocusOnly && !focusAddressSet.has(t.target_address)) return false;
+      }
+      return primaryMatch(t);
+    });
+    const pinned = new Set<string>();
+    for (const key of pinnedKeySet) if (!hiddenKeySet.has(key)) pinned.add(key);
+    const expanded = expandWithDeltaContext(
+      combined, matches, anchorKey, flaggedSet, deltaBeforeMs, deltaAfterMs, contextForAll, {
+        contextEnabled: activeFilters.deltaContextEnabled,
+        individualWindows,
+        pinnedKeys: pinned,
+      },
+    );
+    const poolKeys = new Set(listForcePool.map(anchorKey));
+    let count = 0;
+    for (const t of expanded.items) if (!poolKeys.has(anchorKey(t))) count++;
+    return count;
+  }, [
+    pausedTelegrams, pausedCount, listForcePool, hiddenKeySet, focusAddressSet,
+    sourceFocusOnly, targetFocusOnly, noMainFilter, pillFilters, pillQuick, pinnedKeySet,
+    flaggedSet, deltaBeforeMs, deltaAfterMs, contextForAll, activeFilters.deltaContextEnabled,
+    individualWindows,
+  ]);
   const visiblePausedCountRef = useRef(0);
   visiblePausedCountRef.current = visiblePausedCount;
 
@@ -1147,16 +1497,22 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     return keys;
   })();
 
-  // Timestamps of rows that currently anchor a context window (active context
-  // button / all-matches). Used for ∧/∨ rail signs on context-only rows.
-  const contextAnchorTimestamps = useMemo(() => {
-    if (!contextKeys?.size || (deltaBeforeMs <= 0 && deltaAfterMs <= 0)) return [] as number[];
+  const parentTimestampByKey = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const t of listForcePool) out.set(anchorKey(t), timeMs(t.timestamp));
+    return out;
+  }, [listForcePool]);
+  const selectedParentTimes = useCallback((key: string): number[] => {
+    const parents = contextParents?.get(key);
+    if (!parents || parents.length === 0) return [];
     const out: number[] = [];
-    for (const t of telegramRows) {
-      if (anchorsContext(anchorKey(t))) out.push(new Date(t.timestamp).getTime());
+    for (const parent of parents) {
+      if (!mouseKeySet.has(parent)) continue;
+      const ts = parentTimestampByKey.get(parent);
+      if (ts != null) out.push(ts);
     }
     return out;
-  }, [telegramRows, contextKeys, anchorsContext, deltaBeforeMs, deltaAfterMs]);
+  }, [contextParents, mouseKeySet, parentTimestampByKey]);
 
   // ── Global Time-Delta-Context tristate (#318, #319) ─────────────────────────
   // "all": every filter match anchors a window, including telegrams still to
@@ -2470,13 +2826,115 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     setFlaggedKeysList(flaggedKeysList.filter(k => !targets.has(k)));
   }, [anchorsContext, flaggedKeysList, targetsForSelectionAction, setFlaggedKeysList, contextForAll, setContextForAll, telegrams, contextKeys, flaggedSet]);
 
+  const openContextWindowPopup = useCallback((e: React.MouseEvent, key: string) => {
+    // Times + on/off always target the whole mouse selection (or the clicked row).
+    const targets = [...targetsForSelectionAction(key)];
+    const first = targets.length > 0 ? individualWindows[targets[0]] : undefined;
+    const shared = !!first && targets.every(k => {
+      const w = individualWindows[k];
+      return !!w && w.beforeMs === first.beforeMs && w.afterMs === first.afterMs && !!w.enabled === !!first.enabled;
+    });
+    const selectionHasTimes = targets.some(k => {
+      const w = individualWindows[k];
+      return !!w && (w.beforeMs > 0 || w.afterMs > 0);
+    });
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setContextWindowPopup({
+      trigger: {
+        top: rect.top,
+        left: rect.left,
+        right: rect.right,
+        bottom: rect.bottom,
+        width: rect.width,
+        height: rect.height,
+      },
+      targets,
+      before: shared && first.beforeMs > 0 ? String(first.beforeMs) : '',
+      after: shared && first.afterMs > 0 ? String(first.afterMs) : '',
+      on: shared ? individualWindowOn(first) : targets.some(k => individualWindowOn(individualWindows[k])),
+      selectionHasTimes,
+    });
+  }, [targetsForSelectionAction, individualWindows]);
+
+  const commitContextWindowPopup = useCallback(() => {
+    if (!contextWindowPopup) return;
+    const before = sanitizeSecondsInput(contextWindowPopup.before);
+    const after = sanitizeSecondsInput(contextWindowPopup.after);
+    let beforeMs = before === '' ? 0 : Number(before);
+    let afterMs = after === '' ? 0 : Number(after);
+    if (!Number.isFinite(beforeMs) || beforeMs < 0 || !Number.isFinite(afterMs) || afterMs < 0) return;
+    // Empty draft + selection already has times: reuse the first filled
+    // window so On/Off alone still applies one shared window to all.
+    if (beforeMs === 0 && afterMs === 0) {
+      for (const key of contextWindowPopup.targets) {
+        const w = individualWindows[key];
+        if (w && (w.beforeMs > 0 || w.afterMs > 0)) {
+          beforeMs = w.beforeMs;
+          afterMs = w.afterMs;
+          break;
+        }
+      }
+    }
+    const canOn = beforeMs > 0 || afterMs > 0;
+    const enabled = canOn && contextWindowPopup.on;
+    // Same before/after/on for every row in the selection.
+    const next = { ...individualWindows };
+    for (const key of contextWindowPopup.targets) {
+      next[key] = { beforeMs, afterMs, enabled };
+    }
+    setIndividualWindows(next);
+    if (enabled) {
+      setFlaggedKeysList([...new Set([...flaggedKeysList, ...contextWindowPopup.targets])]);
+    }
+    setContextWindowPopup(null);
+  }, [contextWindowPopup, individualWindows, flaggedKeysList, setIndividualWindows, setFlaggedKeysList]);
+
+  useEffect(() => {
+    if (!contextWindowPopup) return;
+    const discard = () => setContextWindowPopup(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        discard();
+        return;
+      }
+      // Enter anywhere while open applies settings to the selection.
+      if (e.key === 'Enter') {
+        if (document.querySelector('[data-portaled-menu]')) return;
+        e.preventDefault();
+        e.stopPropagation();
+        commitContextWindowPopup();
+      }
+    };
+    const onPointerDown = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (t?.closest?.('[data-testid="context-window-popup"]')) return;
+      // Ctrl-click on another flag opens a new popup; don't discard first.
+      if (t?.closest?.('button[title*="around this message"]') && (e.ctrlKey || e.metaKey)) return;
+      discard();
+    };
+    document.addEventListener('keydown', onKey, true);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    return () => {
+      document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('pointerdown', onPointerDown, true);
+    };
+  }, [contextWindowPopup, commitContextWindowPopup]);
+
   // Selection is applied on mousedown, after the clicked row is pinned, so the
   // new selection is visible while the button is still down. Shift/Ctrl cancel
   // a browser text selection before it starts. A click without this mousedown
   // still selects.
   const MARK_DRAG_THRESHOLD_PX = 4;
-  const rowClickIgnoredTarget = (target: EventTarget | null) =>
-    target instanceof Element && !!target.closest('button, [role="button"]');
+  const rowClickIgnoredTarget = (target: EventTarget | null) => {
+    if (!(target instanceof Element)) return false;
+    const btn = target.closest('button, [role="button"]');
+    if (!btn) return false;
+    // Context flag: let the row mouse-selection handlers run as well.
+    if (btn.hasAttribute('data-context-flag')) return false;
+    return true;
+  };
   const detachLiveFollow = () => {
     if (!(isTimeSort && atEdgeRef.current)) return;
     atEdgeRef.current = false;
@@ -3508,16 +3966,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // ── Per-cell body content (keyed switch keeps body aligned with header order) ──
   const renderCell = (id: ColId, t: TelegramRow, rowIndex: number, forceShow = false): React.ReactNode => {
     if (shouldHideRepeatedOnSortLevel(id, rowIndex, forceShow)) {
-      return <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }} className="filterable-cell" />;
+      return <div style={cellBox} className="tt-cell filterable-cell" />;
     }
     switch (id) {
       case 'time':
         return (
-          <div style={{ padding: cellPadding }}>
-            <div className="mono-addr" style={{ color: 'var(--text-main)', fontVariantNumeric: 'tabular-nums', fontWeight: 500 }}>
+          <div className="tt-cell" style={cellBox}>
+            <div className="mono-addr" style={{ color: 'var(--text-main)', fontVariantNumeric: 'tabular-nums', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {format(new Date(t.timestamp), 'HH:mm:ss.SS')}
             </div>
-            <div className="subtitle-name" style={{ fontSize: '0.65rem', color: 'var(--text-dim)', marginTop: '0.15rem', fontVariantNumeric: 'tabular-nums' }}>
+            <div className="subtitle-name" style={{ fontSize: '0.65rem', color: 'var(--text-dim)', marginTop: 0, fontVariantNumeric: 'tabular-nums', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {format(new Date(t.timestamp), 'yyyy-MM-dd')}
             </div>
           </div>
@@ -3536,41 +3994,70 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           else if (bottomSign === '+') plusOnTop = false;
           else plusOnTop = false;
         }
-        // Hide while QF is off, the ΔT column filter is disabled, delta-t is
-        // toggled off, or both before/after are empty.
+        // Hide while QF is off, the ΔT column filter is disabled, or
+        // Time-Delta-Context is globally off. A zero QF window still shows
+        // the button so an individual window can be set.
         const showContextControls = quickEnabled
           && isQuickColumnEnabled('delta')
-          && activeFilters.deltaContextEnabled
-          && (activeFilters.deltaBeforeMs > 0 || activeFilters.deltaAfterMs > 0);
+          && activeFilters.deltaContextEnabled;
         const rowKey = anchorKey(t);
         const flagged = anchorsContext(rowKey);
         const isContextRow = !!contextKeys?.has(rowKey);
         // Personal flag on a (former) context row — owns its own window even
         // while global "all" still covers filter matches.
         const personallyFlagged = flaggedSet.has(rowKey);
+        // Always highlight when this row has an individual window on.
+        const ownWindowOn = individualWindowOn(individualWindows[rowKey]);
+        // Circle only when a window can actually expand context (QF Δt or indiv).
+        const contextPossible = ownWindowOn
+          || activeFilters.deltaBeforeMs > 0
+          || activeFilters.deltaAfterMs > 0;
+        const showCircle = contextPossible && (flagged || ownWindowOn);
         const contextBtn = (
           <button
+            type="button"
+            data-context-flag=""
+            data-individual-window={ownWindowOn ? 'true' : undefined}
             style={{
-              background: 'transparent', border: 'none', cursor: 'pointer', padding: 0,
+              background: 'transparent',
+              // Circle: dim/blue by context on/off; thin without indiv, accent-thick with.
+              border: showCircle
+                ? `${ownWindowOn ? 2.5 : 1}px solid ${flagged ? 'var(--accent-primary)' : 'var(--text-dim)'}`
+                : '2.5px solid transparent',
+              borderRadius: '50%',
+              width: 16,
+              height: 16,
+              cursor: 'pointer',
+              padding: 0,
+              boxSizing: 'border-box',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              // Active: blue circle+plus; inactive: same glyph in the minus colour.
               color: flagged ? 'var(--accent-primary)' : 'var(--text-dim)',
             }}
             title={
-              isContextRow && !personallyFlagged
+              (isContextRow && !personallyFlagged
                 ? 'Show context around this message — give this context row its own window (applies to all selected rows)'
                 : flagged
                   ? 'Context is shown around this message — click to switch it off (applies to all selected rows)'
-                  : 'Show context around this message, regardless of the active filters (applies to all selected rows)'
+                  : 'Show context around this message, regardless of the active filters (applies to all selected rows)')
+              + ' Ctrl-click sets an individual before/after window.'
             }
+            // Plain click: pin + let row mousedown apply mouse selection.
+            // Ctrl/cmd-click: keep selection as-is (popup targets the selection).
             onMouseDown={e => {
               if (e.button !== 0) return;
-              e.stopPropagation();
               contextButtonPinRef.current(rowKey);
+              if (e.ctrlKey || e.metaKey) e.stopPropagation();
             }}
-            onClick={e => handleFlagClick(e, rowKey)}
+            onClick={e => {
+              if (e.ctrlKey || e.metaKey) {
+                e.stopPropagation();
+                openContextWindowPopup(e, rowKey);
+                return;
+              }
+              handleFlagClick(e, rowKey);
+            }}
           >
-            <PlusCircle size={12} />
+            <Plus size={12} strokeWidth={2.5} />
           </button>
         );
         const lineParts = (text: string) => ({
@@ -3579,40 +4066,39 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         });
         const top = lineParts(t.deltaStr ?? '');
         const bottom = lineParts(t.deltaNextStr ?? '');
-        // Keep both lines even when an edge row has only one neighbor, so that
-        // delta stays on the same line as in the rows between them.
-        const deltaLine: React.CSSProperties = { minHeight: '1em', lineHeight: 1 };
+        // Same two tracks as every other cell, so each Δt sits on that line
+        // even when an edge row has only one neighbor.
+        const deltaValue: React.CSSProperties = {
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0,
+        };
         const leading = (isPlusSlot: boolean, sign: string, hasValue: boolean) => {
           if (isPlusSlot && showContextControls) return contextBtn;
           const glyph = hasValue ? (isPlusSlot ? '+' : (sign === '-' ? '-' : '')) : '';
-          return <span style={{ ...deltaLine, justifySelf: 'center' }}>{glyph}</span>;
+          return <span style={{ justifySelf: 'center' }}>{glyph}</span>;
         };
         return (
           <div
-            className="mono-addr"
+            className="mono-addr tt-cell"
             style={{
-              padding: cellPadding,
-              display: 'grid',
+              ...cellBox,
               gridTemplateColumns: '12px 1fr',
               columnGap: '0.35rem',
-              rowGap: '0.18rem',
-              alignItems: 'center',
-              fontSize: '0.65rem',
+              fontSize: '0.75rem',
               color: 'var(--text-dim)',
               fontVariantNumeric: 'tabular-nums',
             }}
           >
             {leading(plusOnTop, top.sign, top.value !== '')}
-            <span style={deltaLine}>{top.value}</span>
+            <span style={deltaValue}>{top.value}</span>
             {leading(!plusOnTop, bottom.sign, bottom.value !== '')}
-            <span style={deltaLine}>{bottom.value}</span>
+            <span style={deltaValue}>{bottom.value}</span>
           </div>
         );
       }
 
       case 'source':
         return (
-          <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }} className="filterable-cell">
+          <div style={cellBox} className="tt-cell filterable-cell">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
               <div className="mono-addr highlight" style={{ color: 'var(--text-dim)', fontWeight: 400 }}>
                 {t.source_address}
@@ -3642,17 +4128,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 </button>
               )}
             </div>
-            {visibleColumns.sourceName && (
-              <div className="subtitle-name" title={t.source_name || undefined} style={SOURCE_NAME_TEXT_STYLE}>
-                {t.source_name || '-'}
-              </div>
-            )}
+            <div className="subtitle-name" title={visibleColumns.sourceName ? (t.source_name || undefined) : undefined} style={SOURCE_NAME_TEXT_STYLE}>
+              {visibleColumns.sourceName ? (t.source_name || '-') : '\u00a0'}
+            </div>
           </div>
         );
 
       case 'target':
         return (
-          <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }} className="filterable-cell">
+          <div style={cellBox} className="tt-cell filterable-cell">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
               <div className="mono-addr highlight-target" style={{ color: 'var(--accent-primary)', fontWeight: 500 }}>
                 {t.target_address}
@@ -3709,18 +4193,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 />
               )}
             </div>
-            {visibleColumns.targetName && (
-              <div className="subtitle-name" title={t.target_name || undefined} style={SOURCE_NAME_TEXT_STYLE}>
-                {t.target_name || '-'}
-              </div>
-            )}
+            <div className="subtitle-name" title={visibleColumns.targetName ? (t.target_name || undefined) : undefined} style={SOURCE_NAME_TEXT_STYLE}>
+              {visibleColumns.targetName ? (t.target_name || '-') : '\u00a0'}
+            </div>
           </div>
         );
 
       case 'type':
         return (
-          <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }} className="filterable-cell">
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
+          <div style={cellBox} className="tt-cell filterable-cell">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0, overflow: 'hidden' }}>
               <EventTypeLabel
                 kind={t.simplified_type || t.telegram_type || ''}
                 answered={t.simplified_type === 'Read' && answeredReads.has(`${t.timestamp}|${t.target_address}`)}
@@ -3730,55 +4212,55 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 )}
               />
             </div>
-            <div style={{ fontSize: '0.65rem', color: t.direction === 'Outgoing' ? 'var(--warning-text)' : 'var(--success)', marginTop: '0.1rem', opacity: 0.8 }}>
+            <div style={{ fontSize: '0.65rem', color: t.direction === 'Outgoing' ? 'var(--warning-text)' : 'var(--success)', opacity: 0.8, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {t.direction === 'Outgoing' ? 'Outgoing' : 'Incoming'}
             </div>
           </div>
         );
 
-      case 'dpt':
+      case 'dpt': {
+        const dptKey = t.dpt_main != null ? (dptKeyLabel(t.dpt_main, t.dpt_sub) ?? '-') : '-';
+        const dptDesc = t.dpt_main != null ? (dptDescriptionLabel(t.dpt_name, t.unit) ?? '-') : '';
         return (
-          <div style={{ padding: cellPadding, minWidth: 0, overflow: 'hidden' }} className="filterable-cell">
-            {t.dpt_main != null ? (
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.5rem', minWidth: 0 }}>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
-                    <div title={getDPTLabel(t.dpt_main)} style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: getDPTColor(t.dpt_main), flexShrink: 0 }} />
-                    <div
-                      title={dptKeyLabel(t.dpt_main, t.dpt_sub) ?? undefined}
-                      style={{ fontSize: '0.75rem', color: 'var(--text-main)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}
-                    >
-                      {dptKeyLabel(t.dpt_main, t.dpt_sub) ?? '-'}
-                    </div>
-                  </div>
-                  <div
-                    title={dptDescriptionLabel(t.dpt_name, t.unit) ?? undefined}
-                    style={{ fontSize: '0.68rem', color: 'var(--text-dim)', marginTop: '0.12rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                  >
-                    {dptDescriptionLabel(t.dpt_name, t.unit) ?? '-'}
-                  </div>
-                </div>
+          <div style={cellBox} className="tt-cell filterable-cell">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
+              {t.dpt_main != null && (
+                <div title={getDPTLabel(t.dpt_main)} style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: getDPTColor(t.dpt_main), flexShrink: 0 }} />
+              )}
+              <div
+                title={t.dpt_main != null ? (dptKeyLabel(t.dpt_main, t.dpt_sub) ?? undefined) : undefined}
+                style={{ fontSize: '0.75rem', color: 'var(--text-main)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}
+              >
+                {dptKey}
               </div>
-            ) : '-'}
-          </div>
-        );
-
-      case 'value':
-        return (
-          <div style={{ padding: cellPadding }} className="filterable-cell">
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.35rem', flexWrap: 'wrap' }}>
-              <span style={{ fontWeight: 700, color: 'var(--accent-primary)', fontSize: '0.9375rem', wordBreak: 'break-all', whiteSpace: 'normal', lineHeight: 1.2 }}>
-                {t.value_formatted || (t.value_numeric !== null ? String(t.value_numeric) : '-')}
-              </span>
-              {t.unit && <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', fontWeight: 500 }}>{t.unit}</span>}
             </div>
-            {visibleColumns.data && t.raw_hex && (
-              <div style={{ marginTop: '0.18rem', fontSize: '0.65rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>
-                {t.raw_hex}
-              </div>
-            )}
+            <div
+              title={dptDesc || undefined}
+              style={{ fontSize: '0.68rem', color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            >
+              {dptDesc || '\u00a0'}
+            </div>
           </div>
         );
+      }
+
+      case 'value': {
+        const valueText = t.value_formatted || (t.value_numeric !== null ? String(t.value_numeric) : '-');
+        const raw = visibleColumns.data && t.raw_hex ? t.raw_hex : '';
+        return (
+          <div style={cellBox} className="tt-cell filterable-cell">
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.35rem', minWidth: 0 }} title={t.unit ? `${valueText} ${t.unit}` : valueText}>
+              <span style={{ fontWeight: 700, color: 'var(--accent-primary)', fontSize: '0.9375rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
+                {valueText}
+              </span>
+              {t.unit && <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', fontWeight: 500, flexShrink: 0 }}>{t.unit}</span>}
+            </div>
+            <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={raw || undefined}>
+              {raw || '\u00a0'}
+            </div>
+          </div>
+        );
+      }
     }
   };
 
@@ -3937,6 +4419,35 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     };
   }, []);
 
+  const captureListScroll = useCallback((): ListScrollSnapshot | null => {
+    const el = parentRef.current;
+    if (!el) return null;
+    const key = anchorRef.current?.key ?? selectedKeyRef.current ?? null;
+    const offset = key != null ? (rowOffset(key) ?? 0) : 0;
+    if (key != null && anchorRef.current?.key !== key) {
+      anchorRef.current = { key, offset };
+      anchorRowsRef.current = telegramRowsRef.current;
+    }
+    return { scrollTop: el.scrollTop, key, offset };
+  }, []);
+
+  const restoreListScroll = useCallback((snap: ListScrollSnapshot) => {
+    const el = parentRef.current;
+    if (!el) return;
+    if (snap.key) {
+      anchorRef.current = { key: snap.key, offset: snap.offset };
+      anchorRowsRef.current = telegramRowsRef.current;
+      atEdgeRef.current = false;
+      detachedFromEdgeRef.current = true;
+      setFollowingLive(false);
+      onListFollowChange?.(false);
+      pinAnchor();
+      return;
+    }
+    markProgrammatic();
+    el.scrollTop = snap.scrollTop;
+  }, [onListFollowChange]);
+
   return (
     <SendToGaHost
       latestTelegram={latestTelegram}
@@ -3950,9 +4461,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       onClearLinked={onClearLinked}
       onAltSend={onAltSend}
       onCtrlSend={onCtrlSend}
+      captureListScroll={captureListScroll}
+      restoreListScroll={restoreListScroll}
     >
     <div
       ref={tableRootRef}
+      data-telegram-table=""
       tabIndex={-1}
       onKeyDown={handleTableKeyDown}
       onPointerDown={e => {
@@ -4392,21 +4906,39 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', minWidth: 0, flex: 1 }}>
                 {c.id === 'delta' ? (
                   <>
-                    <input
-                      className={qfInputClass(String(activeFilters.deltaBeforeMs || ''))}
-                      type="number" min={0} step={10}
-                      value={activeFilters.deltaBeforeMs || ''}
-                      placeholder="before ms"
-                      aria-label="Time-Delta-Context before (ms)"
-                      onChange={e => setDeltaContextCell(Math.max(0, Number(e.target.value) || 0), activeFilters.deltaAfterMs)}
+                    <SecondsField
+                      col="qf-delta"
+                      placeholder="before"
+                      unit="ms"
+                      value={activeFilters.deltaBeforeMs > 0 ? String(activeFilters.deltaBeforeMs) : ''}
+                      ariaLabel="Time-Delta-Context before (ms)"
+                      title="Context before"
+                      onChange={v => {
+                        const n = v.trim() === '' ? 0 : Number(v);
+                        if (!Number.isFinite(n) || n < 0) return;
+                        setDeltaContextCell(Math.floor(n), activeFilters.deltaAfterMs);
+                      }}
+                      onBlur={sanitized => {
+                        const n = sanitized === '' ? 0 : Number(sanitized);
+                        setDeltaContextCell(Number.isFinite(n) ? n : 0, activeFilters.deltaAfterMs);
+                      }}
                     />
-                    <input
-                      className={qfInputClass(String(activeFilters.deltaAfterMs || ''))}
-                      type="number" min={0} step={10}
-                      value={activeFilters.deltaAfterMs || ''}
-                      placeholder="after ms"
-                      aria-label="Time-Delta-Context after (ms)"
-                      onChange={e => setDeltaContextCell(activeFilters.deltaBeforeMs, Math.max(0, Number(e.target.value) || 0))}
+                    <SecondsField
+                      col="qf-delta"
+                      placeholder="after"
+                      unit="ms"
+                      value={activeFilters.deltaAfterMs > 0 ? String(activeFilters.deltaAfterMs) : ''}
+                      ariaLabel="Time-Delta-Context after (ms)"
+                      title="Context after"
+                      onChange={v => {
+                        const n = v.trim() === '' ? 0 : Number(v);
+                        if (!Number.isFinite(n) || n < 0) return;
+                        setDeltaContextCell(activeFilters.deltaBeforeMs, Math.floor(n));
+                      }}
+                      onBlur={sanitized => {
+                        const n = sanitized === '' ? 0 : Number(sanitized);
+                        setDeltaContextCell(activeFilters.deltaBeforeMs, Number.isFinite(n) ? n : 0);
+                      }}
                     />
                   </>
                 ) : c.id === 'type' ? (
@@ -4430,19 +4962,19 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   </>
                 ) : c.id === 'time' ? (
                   <>
-                    <input
+                    <ThemedDatetimePicker
                       className={qfInputClass(currentPatterns.time?.top ?? '')}
-                      type="datetime-local" step="1"
                       value={currentPatterns.time?.top ?? ''}
                       aria-label="Quick filter TIME from"
-                      onChange={e => setQuickCell('time', 'top', e.target.value)}
+                      withSeconds
+                      onChange={v => setQuickCell('time', 'top', v)}
                     />
-                    <input
+                    <ThemedDatetimePicker
                       className={qfInputClass(currentPatterns.time?.bottom ?? '')}
-                      type="datetime-local" step="1"
                       value={currentPatterns.time?.bottom ?? ''}
                       aria-label="Quick filter TIME to"
-                      onChange={e => setQuickCell('time', 'bottom', e.target.value)}
+                      withSeconds
+                      onChange={v => setQuickCell('time', 'bottom', v)}
                     />
                   </>
                 ) : c.id === 'value' ? (
@@ -4501,6 +5033,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         <button
           onClick={e => jumpToLive(e.ctrlKey, !e.ctrlKey)}
           className="jump-to-live-pill"
+          data-jump-to-live-pill=""
           ref={attachPillWheel}
           data-edge={liveEdge}
           style={{
@@ -4547,6 +5080,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       {(actionableMarkedKeys.length > 0 || hiddenKeyList.length > 0) && (
         <div
           className="marks-pill"
+          data-marks-pill=""
           ref={attachPillWheel}
           style={{
             position: 'absolute',
@@ -4658,6 +5192,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       {/* Virtualized Body */}
       <div
         ref={parentRef}
+        data-telegram-scroll=""
         onScroll={handleScroll}
         onWheel={e => handleScrollGesture(e.deltaY)}
         onTouchMove={noteUserScroll}
@@ -4710,13 +5245,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               const latest = mouseSelected && key === lastSelected;
               // Context wash stays for every row whose context flag is set.
               const isContext = !mouseSelected && inContext;
-              const railSigns = inContext && contextAnchorTimestamps.length > 0
-                ? contextRailSigns(
-                  new Date(t.timestamp).getTime(),
-                  contextAnchorTimestamps,
-                  deltaBeforeMs,
-                  deltaAfterMs,
-                )
+              const railSigns = inContext
+                ? contextRailSigns(timeMs(t.timestamp), selectedParentTimes(key))
                 : { before: false, after: false };
               // Row colour index (if set) takes precedence over address-based colours.
               const markColor = markColorFromIndex(markColorIndices[key]);
@@ -4765,7 +5295,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     fontSize: '0.8125rem',
                     background: zebra,
                     alignItems: 'start',
-                    minHeight: '60px', // Ensure a minimum touch/visual target
                     userSelect: 'text',
                   }}
                   title={inContext ? 'Unfiltered Time-Delta-Context — this telegram did not match the active filters' : undefined}
@@ -4799,7 +5328,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     }}
                   >
                     <div
-                      aria-label={railSigns.before ? 'Context before an anchored telegram' : undefined}
+                      aria-label={railSigns.before ? 'Selected context anchor is after this row' : undefined}
                       data-context-rail={railSigns.before ? 'before' : undefined}
                       style={{
                         minHeight: 0,
@@ -4846,7 +5375,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       />
                     </div>
                     <div
-                      aria-label={railSigns.after ? 'Context after an anchored telegram' : undefined}
+                      aria-label={railSigns.after ? 'Selected context anchor is before this row' : undefined}
                       data-context-rail={railSigns.after ? 'after' : undefined}
                       style={{
                         minHeight: 0,
@@ -4914,6 +5443,29 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       </div>
       </div>
     </div>
+    {contextWindowPopup && createPortal(
+      <ContextWindowPopup
+        popup={contextWindowPopup}
+        captureListScroll={captureListScroll}
+        restoreListScroll={restoreListScroll}
+        onChange={(before, after, on) => {
+          // Draft only — Enter commits; Esc / outside click discards.
+          const draftCan = (contextMs(before) > 0 || contextMs(after) > 0)
+            && Number.isFinite(contextMs(before)) && Number.isFinite(contextMs(after));
+          setContextWindowPopup(pop => {
+            if (!pop) return null;
+            const wasDraftCan = contextMs(pop.before) > 0 || contextMs(pop.after) > 0;
+            const can = draftCan || pop.selectionHasTimes;
+            let nextOn = on;
+            if (!can) nextOn = false;
+            else if (draftCan && !wasDraftCan) nextOn = true;
+            return { ...pop, before, after, on: nextOn };
+          });
+        }}
+        onCommit={commitContextWindowPopup}
+      />,
+      document.body,
+    )}
     </SendToGaHost>
   );
 };
@@ -5199,6 +5751,13 @@ style.textContent = `
     font-family: var(--font-mono, monospace);
     outline: none;
     transition: border-color 0.15s;
+  }
+
+  .quick-filter-bar-input::placeholder {
+    color: var(--text-dim);
+    opacity: 0.32;
+    font-style: italic;
+    font-weight: 400;
   }
 
   .quick-filter-bar-input:focus {

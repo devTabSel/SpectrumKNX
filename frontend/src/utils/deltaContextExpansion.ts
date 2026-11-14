@@ -1,34 +1,111 @@
 // Time-Delta-Context expansion (#309/#318/#319): given which telegrams
 // already match the active filters, pull in every other telegram within a
-// before/after window around each matching (or per-message-flagged) telegram
-// — even though it wouldn't otherwise pass the filter. Shared by the live
-// Group Monitor and History Search views so the algorithm can't drift.
+// before/after window around each active context button. A button may use an
+// individual window; otherwise the effective quick-filter window applies.
+// Shared by the live Group Monitor and History Search views.
 
 interface Timestamped {
   timestamp: string;
 }
 
+/** Per-row window in milliseconds, independent of the quick-filter before/after. */
+export interface IndividualContextWindow {
+  beforeMs: number;
+  afterMs: number;
+  /**
+   * Explicit on/off. Absent counts as on. Both sides at 0 are off either way,
+   * and then the quick-filter window applies.
+   */
+  enabled?: boolean;
+}
+
+/** True when this window replaces the quick-filter window. */
+export function individualWindowOn(window: IndividualContextWindow | undefined): boolean {
+  if (!window || window.enabled === false) return false;
+  return window.beforeMs > 0 || window.afterMs > 0;
+}
+
+export type IndividualContextWindows = Record<string, IndividualContextWindow>;
+
+export interface DeltaExpansionOptions {
+  /**
+   * Global Time-Delta-Context switch. When false, individual windows stay
+   * stored by the caller but every context list is empty.
+   */
+  contextEnabled?: boolean;
+  individualWindows?: IndividualContextWindows;
+  /** Filter misses that stay visible (mouse selection, marks, last selected). */
+  pinnedKeys?: ReadonlySet<string>;
+}
+
 export interface DeltaExpansionResult<T> {
-  /** The full visible set: filter matches, flagged anchors, and pulled-in context rows. */
+  /** Filter matches, pinned rows, and context rows reachable from them. */
   items: T[];
   /**
-   * Identity keys of visible rows that do **not** match the primary filter.
-   * Independent of per-row context flags: flagging anchors a window around a
-   * row but must not change whether that row is classified as context (#343).
+   * Identity keys of visible rows that do not match the primary filter and
+   * were pulled in as context. A context button alone is not a member.
    */
   contextKeys: Set<string>;
+  /**
+   * Anchor key → context telegram keys, excluding the anchor itself.
+   * Present for every active button (possibly empty). Inactive buttons are absent.
+   */
+  contextMembers: Map<string, readonly string[]>;
+  /** Context telegram key → anchor keys whose context includes it. */
+  contextParents: Map<string, readonly string[]>;
+}
+
+export interface ContextRailSigns {
+  /** A selected parent telegram is later than this row → rail ∧. */
+  before: boolean;
+  /** A selected parent telegram is earlier than this row → rail ∨. */
+  after: boolean;
+}
+
+const EMPTY_WINDOWS: IndividualContextWindows = {};
+
+function windowOf(
+  key: string,
+  windows: IndividualContextWindows,
+  beforeMs: number,
+  afterMs: number,
+): { beforeMs: number; afterMs: number } {
+  const individual = windows[key];
+  if (individualWindowOn(individual)) {
+    return { beforeMs: individual!.beforeMs, afterMs: individual!.afterMs };
+  }
+  return { beforeMs, afterMs };
+}
+
+function lowerBoundTime(order: readonly number[], times: readonly number[], target: number): number {
+  let lo = 0;
+  let hi = order.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[order[mid]] < target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function upperBoundTime(order: readonly number[], times: readonly number[], target: number): number {
+  let lo = 0;
+  let hi = order.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[order[mid]] <= target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 /**
- * @param items The full (already sorted) buffer.
- * @param matches Per-item result of the primary filter match, same order as `items`.
- * @param anchorKeyOf Stable per-item identity, for testing `flaggedKeys` membership.
- * @param flaggedKeys Keys of telegrams individually flagged to always anchor a
- *   context window around themselves (#319), regardless of the primary filter.
- * @param beforeMs / @param afterMs The effective (already #318-gated) window.
- * @param anchorMatches Whether every filter match anchors a window (the global
- *   "all" state). When false only the flagged telegrams do, so the context can
- *   be limited to single messages (#319); matches are shown either way.
+ * @param items The full buffer. Display order is preserved in the result.
+ * @param matches Per-item primary-filter result, same order as `items`.
+ * @param anchorKeyOf Stable per-item identity.
+ * @param flaggedKeys Keys whose context button is on.
+ * @param beforeMs / @param afterMs Effective quick-filter window (0 when that window is off).
+ * @param anchorMatches Whether every filter match anchors a window (global "all").
  */
 export function expandWithDeltaContext<T extends Timestamped>(
   items: readonly T[],
@@ -38,87 +115,111 @@ export function expandWithDeltaContext<T extends Timestamped>(
   beforeMs: number,
   afterMs: number,
   anchorMatches = true,
+  options?: DeltaExpansionOptions,
 ): DeltaExpansionResult<T> {
-  // A flagged telegram is always shown and always anchors its own window,
-  // independent of whether it passes the primary filter.
-  const flagged = items.map(t => flaggedKeys.has(anchorKeyOf(t)));
-  const effectiveMatch = (i: number) => matches[i] || flagged[i];
+  const contextEnabled = options?.contextEnabled !== false;
+  const windows = options?.individualWindows ?? EMPTY_WINDOWS;
+  const pinned = options?.pinnedKeys;
 
-  if (beforeMs <= 0 && afterMs <= 0) {
-    return { items: items.filter((_, i) => effectiveMatch(i)), contextKeys: new Set() };
-  }
-
-  const anchorTimestamps: number[] = [];
+  const keys = new Array<string>(items.length);
   const times = new Array<number>(items.length);
+  const visible = new Uint8Array(items.length);
   for (let i = 0; i < items.length; i++) {
-    const ts = new Date(items[i].timestamp).getTime();
-    times[i] = ts;
-    if (flagged[i] || (anchorMatches && matches[i])) anchorTimestamps.push(ts);
+    keys[i] = anchorKeyOf(items[i]);
+    times[i] = new Date(items[i].timestamp).getTime();
+    if (matches[i] || (pinned?.has(keys[i]) ?? false)) visible[i] = 1;
   }
 
-  if (anchorTimestamps.length === 0) {
-    return { items: items.filter((_, i) => effectiveMatch(i)), contextKeys: new Set() };
+  const contextMembers = new Map<string, readonly string[]>();
+  const contextParents = new Map<string, string[]>();
+  if (!contextEnabled) {
+    const kept: T[] = [];
+    for (let i = 0; i < items.length; i++) if (visible[i]) kept.push(items[i]);
+    return { items: kept, contextKeys: new Set(), contextMembers, contextParents };
   }
 
-  // One sweep over time order. Display order is not always chronological.
-  anchorTimestamps.sort((a, b) => a - b);
   const order = items.map((_, i) => i);
   order.sort((i, j) => times[i] - times[j] || i - j);
-  const covered = new Uint8Array(items.length);
-  let left = 0;
-  let right = 0;
-  for (const i of order) {
-    const t = times[i];
-    const hi = t + beforeMs;
-    const lo = t - afterMs;
-    while (right < anchorTimestamps.length && anchorTimestamps[right] <= hi) right++;
-    while (left < right && anchorTimestamps[left] < lo) left++;
-    if (left < right) covered[i] = 1;
+  const indexByKey = new Map<string, number>();
+  for (let i = 0; i < items.length; i++) indexByKey.set(keys[i], i);
+
+  const active = (i: number) => flaggedKeys.has(keys[i]) || (anchorMatches && matches[i]);
+
+  for (let i = 0; i < items.length; i++) {
+    if (!active(i)) continue;
+    const span = windowOf(keys[i], windows, beforeMs, afterMs);
+    const members: string[] = [];
+    if ((span.beforeMs > 0 || span.afterMs > 0) && Number.isFinite(times[i])) {
+      const lo = times[i] - span.beforeMs;
+      const hi = times[i] + span.afterMs;
+      const from = lowerBoundTime(order, times, lo);
+      const to = upperBoundTime(order, times, hi);
+      for (let k = from; k < to; k++) {
+        const j = order[k];
+        if (j === i || matches[j] || keys[j] === keys[i]) continue;
+        const tj = times[j];
+        const older = span.beforeMs > 0 && tj < times[i] && tj >= times[i] - span.beforeMs;
+        const newer = span.afterMs > 0 && tj > times[i] && tj <= times[i] + span.afterMs;
+        if (older || newer) members.push(keys[j]);
+      }
+    }
+    contextMembers.set(keys[i], members);
+    for (const member of members) {
+      const parents = contextParents.get(member);
+      if (parents) parents.push(keys[i]);
+      else contextParents.set(member, [keys[i]]);
+    }
+  }
+
+  // An active button keeps its member list even when the row is hidden.
+  // Only a visible row contributes that list to the display.
+  const queue: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    if (visible[i] && contextMembers.has(keys[i])) queue.push(i);
+  }
+  const expanded = new Uint8Array(items.length);
+  for (let q = 0; q < queue.length; q++) {
+    const i = queue[q];
+    if (expanded[i]) continue;
+    expanded[i] = 1;
+    const members = contextMembers.get(keys[i]);
+    if (!members) continue;
+    for (const member of members) {
+      const j = indexByKey.get(member);
+      if (j == null) continue;
+      if (!visible[j]) {
+        visible[j] = 1;
+        queue.push(j);
+      } else if (!expanded[j] && contextMembers.has(keys[j])) {
+        queue.push(j);
+      }
+    }
   }
 
   const contextKeys = new Set<string>();
-  const kept = items.filter((t, i) => {
-    // Filter matches are never context rows.
-    if (matches[i]) return true;
-    // Flagged non-matches stay visible and still count as context — the flag
-    // only adds an anchor window, it does not clear context classification.
-    if (flagged[i]) {
-      contextKeys.add(anchorKeyOf(t));
-      return true;
-    }
-    if (covered[i]) {
-      contextKeys.add(anchorKeyOf(t));
-      return true;
-    }
-    return false;
-  });
-  return { items: kept, contextKeys };
-}
-
-/** Whether a context row sits before (∧) and/or after (∨) active context anchors. */
-export interface ContextRailSigns {
-  /** Row is older than an anchor and inside that anchor's before-window → rail ∧. */
-  before: boolean;
-  /** Row is newer than an anchor and inside that anchor's after-window → rail ∨. */
-  after: boolean;
+  const kept: T[] = [];
+  for (let i = 0; i < items.length; i++) {
+    if (!visible[i]) continue;
+    kept.push(items[i]);
+    if (!matches[i] && contextParents.has(keys[i])) contextKeys.add(keys[i]);
+  }
+  return { items: kept, contextKeys, contextMembers, contextParents };
 }
 
 /**
- * Rail ∧/∨ for a context-only row relative to telegrams that currently anchor
- * a context window (active context button / all-matches). A row can be before
- * one anchor and after another at the same time.
+ * Rail ∧/∨ for a context row from the selected telegrams whose context
+ * includes it. Window size is not consulted; membership already applied it.
+ * ∨ (`after`) when a selected parent is earlier. ∧ (`before`) when one is later.
  */
 export function contextRailSigns(
   rowTs: number,
-  anchorTimestamps: readonly number[],
-  beforeMs: number,
-  afterMs: number,
+  selectedParentTimestamps: readonly number[],
 ): ContextRailSigns {
   let before = false;
   let after = false;
-  for (const ats of anchorTimestamps) {
-    if (beforeMs > 0 && rowTs < ats && rowTs >= ats - beforeMs) before = true;
-    if (afterMs > 0 && rowTs > ats && rowTs <= ats + afterMs) after = true;
+  for (const pts of selectedParentTimestamps) {
+    if (pts < rowTs) after = true;
+    else if (pts > rowTs) before = true;
     if (before && after) break;
   }
   return { before, after };

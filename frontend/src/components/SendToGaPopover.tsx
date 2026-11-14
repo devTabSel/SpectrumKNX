@@ -1246,6 +1246,7 @@ function SendToGaPopoverPanel({
       {open && pos && createPortal(
         <div
           ref={cardRef}
+          data-send-popover-panel=""
           onMouseDown={e => e.stopPropagation()}
           onClick={e => e.stopPropagation()}
           style={{
@@ -1265,25 +1266,33 @@ function SendToGaPopoverPanel({
             onPointerUp={onDragHandlePointerUp}
             onPointerCancel={onDragHandlePointerUp}
             style={{
-              display: 'flex', alignItems: 'baseline', gap: '0.4rem', flexWrap: 'wrap',
+              display: 'flex', flexDirection: 'column', gap: '0.35rem',
               cursor: 'grab', touchAction: 'none', userSelect: 'none',
             }}
             title="Drag to move"
           >
-            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.82rem', fontWeight: 600, color: 'var(--accent-primary)' }}>{address}</span>
-            {name && <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>{name}</span>}
-            {(listScrollAway || posAway) && (
-              <button
-                type="button"
-                className="quick-filter-bar-toggle"
-                title="Restore list position"
-                aria-label="Restore list position"
-                onClick={restoreOpenScroll}
-                style={{ flexShrink: 0, margin: 0, cursor: 'pointer' }}
-              >
-                <ChevronLeft size={13} />
-              </button>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+              <Send size={16} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} aria-hidden />
+              <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)', flex: 1, minWidth: 0 }}>
+                Send
+              </span>
+              {(listScrollAway || posAway) && (
+                <button
+                  type="button"
+                  className="quick-filter-bar-toggle"
+                  title="Restore list and popover position"
+                  aria-label="Restore list and popover position"
+                  onClick={restoreOpenScroll}
+                  style={{ flexShrink: 0, margin: 0, cursor: 'pointer' }}
+                >
+                  <ChevronLeft size={13} />
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.4rem', flexWrap: 'wrap' }}>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.82rem', fontWeight: 600, color: 'var(--accent-primary)' }}>{address}</span>
+              {name && <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>{name}</span>}
+            </div>
           </div>
 
           {lastHasValue && (

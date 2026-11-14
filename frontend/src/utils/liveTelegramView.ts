@@ -14,6 +14,7 @@ export interface LiveTelegramView {
   sorted: Telegram[];
   items: Telegram[];
   contextKeys: Set<string>;
+  contextParents: Map<string, readonly string[]>;
   counts: FilterCounts;
   opts: SelectVisibleOpts;
   sortConfig: SortConfig;
@@ -54,7 +55,7 @@ export function deriveLiveTelegramView(
     const mode = visibleSelectionMode(opts);
     if (mode === 'full') {
       const visible = selectVisibleTelegrams(sorted, opts);
-      return { source, sorted, items: visible.items, contextKeys: visible.contextKeys, counts, opts, sortConfig, direction };
+      return { source, sorted, items: visible.items, contextKeys: visible.contextKeys, contextParents: visible.contextParents, counts, opts, sortConfig, direction };
     }
     if (mode === 'identity') {
       return {
@@ -62,6 +63,7 @@ export function deriveLiveTelegramView(
         sorted,
         items: sorted,
         contextKeys: prev.contextKeys,
+        contextParents: prev.contextParents,
         counts,
         opts,
         sortConfig,
@@ -75,6 +77,7 @@ export function deriveLiveTelegramView(
         sorted,
         items: filtered,
         contextKeys: prev.contextKeys,
+        contextParents: prev.contextParents,
         counts,
         opts,
         sortConfig,
@@ -82,7 +85,7 @@ export function deriveLiveTelegramView(
       };
     }
     const visible = selectVisibleTelegrams(sorted, opts);
-    return { source, sorted, items: visible.items, contextKeys: visible.contextKeys, counts, opts, sortConfig, direction };
+    return { source, sorted, items: visible.items, contextKeys: visible.contextKeys, contextParents: visible.contextParents, counts, opts, sortConfig, direction };
   }
 
   const visible = selectVisibleTelegrams(sorted, opts);
@@ -94,6 +97,7 @@ export function deriveLiveTelegramView(
     sorted,
     items: visible.items,
     contextKeys: visible.contextKeys,
+    contextParents: visible.contextParents,
     counts,
     opts,
     sortConfig,

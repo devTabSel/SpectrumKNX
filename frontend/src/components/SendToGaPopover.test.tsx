@@ -168,16 +168,16 @@ test('restore-list jump returns scrollTop from when the popover opened', async (
   fireEvent.click(screen.getByRole('button', { name: /Send to this GA/ }));
   await waitFor(() => expect(screen.getByText('1/1/1')).toBeInTheDocument());
   // Hidden while still at the open snapshot.
-  expect(screen.queryByRole('button', { name: 'Restore list position' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Restore list and popover position' })).not.toBeInTheDocument();
 
   scrollEl.scrollTop = 40;
   fireEvent.scroll(scrollEl);
-  const restoreBtn = screen.getByRole('button', { name: 'Restore list position' });
+  const restoreBtn = screen.getByRole('button', { name: 'Restore list and popover position' });
   expect(restoreBtn.querySelector('.lucide-chevron-left')).not.toBeNull();
 
   fireEvent.click(restoreBtn);
   expect(scrollEl.scrollTop).toBe(120);
-  expect(screen.queryByRole('button', { name: 'Restore list position' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Restore list and popover position' })).not.toBeInTheDocument();
   expect(screen.getByText('1/1/1')).toBeInTheDocument();
 });
 
@@ -209,21 +209,21 @@ test('dragging the popover shows restore and puts the card back on the row', asy
   const handle = await screen.findByTitle('Drag to move');
   const card = handle.parentElement as HTMLElement;
   const opened = { top: card.style.top, left: card.style.left };
-  expect(screen.queryByRole('button', { name: 'Restore list position' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Restore list and popover position' })).not.toBeInTheDocument();
 
   fireEvent.pointerDown(handle, { button: 0, pointerId: 1, clientX: 0, clientY: 0 });
   fireEvent.pointerMove(handle, { button: 0, pointerId: 1, clientX: 48, clientY: 36 });
   fireEvent.pointerUp(handle, { button: 0, pointerId: 1, clientX: 48, clientY: 36 });
   expect(card.style.left).not.toBe(opened.left);
 
-  expect(await screen.findByRole('button', { name: 'Restore list position' })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole('button', { name: 'Restore list position' }));
+  expect(await screen.findByRole('button', { name: 'Restore list and popover position' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Restore list and popover position' }));
   await waitFor(() => {
     expect(card.style.top).toBe(opened.top);
     expect(card.style.left).toBe(opened.left);
   });
   expect(scrollEl.scrollTop).toBe(40);
-  expect(screen.queryByRole('button', { name: 'Restore list position' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Restore list and popover position' })).not.toBeInTheDocument();
 });
 
 test('hosted restore-list jump uses capture/restore callbacks', async () => {
@@ -253,15 +253,15 @@ test('hosted restore-list jump uses capture/restore callbacks', async () => {
   fireEvent.click(trigger);
   await waitFor(() => expect(screen.getByText('1/1/1')).toBeInTheDocument());
   expect(captureListScroll).toHaveBeenCalled();
-  expect(screen.queryByRole('button', { name: 'Restore list position' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Restore list and popover position' })).not.toBeInTheDocument();
 
   scrollEl.scrollTop = 40;
   fireEvent.scroll(scrollEl);
-  const restoreBtn = screen.getByRole('button', { name: 'Restore list position' });
+  const restoreBtn = screen.getByRole('button', { name: 'Restore list and popover position' });
   expect(restoreBtn.querySelector('.lucide-chevron-left')).not.toBeNull();
   fireEvent.click(restoreBtn);
   expect(restoreListScroll).toHaveBeenCalledWith(snap);
-  expect(screen.queryByRole('button', { name: 'Restore list position' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Restore list and popover position' })).not.toBeInTheDocument();
   expect(screen.getByText('1/1/1')).toBeInTheDocument();
 });
 
@@ -282,15 +282,15 @@ test('restore-list button stays hidden while list scroll matches the open snapsh
   fireEvent.click(screen.getByRole('button', { name: /Send to this GA/ }));
   await waitFor(() => expect(screen.getByText('1/1/1')).toBeInTheDocument());
   fireEvent.scroll(scrollEl);
-  expect(screen.queryByRole('button', { name: 'Restore list position' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Restore list and popover position' })).not.toBeInTheDocument();
 
   scrollEl.scrollTop = 81;
   fireEvent.scroll(scrollEl);
-  expect(screen.getByRole('button', { name: 'Restore list position' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Restore list and popover position' })).toBeInTheDocument();
 
   scrollEl.scrollTop = 80;
   fireEvent.scroll(scrollEl);
-  expect(screen.queryByRole('button', { name: 'Restore list position' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Restore list and popover position' })).not.toBeInTheDocument();
 });
 
 test('hosted popover stays open after the row trigger unmounts', async () => {
@@ -327,7 +327,7 @@ test('restore-list jump is absent outside the telegram table', async () => {
   fireEvent.click(screen.getByRole('button', { name: /Send to this GA/ }));
   await waitFor(() => expect(screen.getByText('1/1/1')).toBeInTheDocument());
   expect(screen.getByText('Kitchen')).toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Restore list position' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Restore list and popover position' })).not.toBeInTheDocument();
 });
 
 test('triggers a GroupValueRead from the Read button', async () => {
@@ -646,7 +646,7 @@ test('nudges the card away from the jump-to-live pill', async () => {
 
   fireEvent.click(trigger);
   const card = await waitFor(() => {
-    const el = screen.getByText('1/1/1').parentElement?.parentElement as HTMLElement | null;
+    const el = screen.getByText('1/1/1').closest('[data-send-popover-panel]') as HTMLElement | null;
     expect(el?.style.position).toBe('fixed');
     return el!;
   });
@@ -684,7 +684,7 @@ test('opens right-below the send button when space allows', async () => {
 
   fireEvent.click(trigger);
   const card = await waitFor(() => {
-    const el = screen.getByText('1/1/1').parentElement?.parentElement as HTMLElement | null;
+    const el = screen.getByText('1/1/1').closest('[data-send-popover-panel]') as HTMLElement | null;
     expect(el?.style.position).toBe('fixed');
     return el!;
   });
@@ -721,7 +721,7 @@ test('list scroll does not move the open popover when nothing overlaps', async (
 
   fireEvent.click(trigger);
   const card = await waitFor(() => {
-    const el = screen.getByText('1/1/1').parentElement?.parentElement as HTMLElement | null;
+    const el = screen.getByText('1/1/1').closest('[data-send-popover-panel]') as HTMLElement | null;
     expect(el?.style.position).toBe('fixed');
     return el!;
   });
@@ -774,7 +774,7 @@ test('status-line growth nudges the card up inside the table boundary', async ()
 
   fireEvent.click(trigger);
   const card = await waitFor(() => {
-    const el = screen.getByText('1/1/1').parentElement?.parentElement as HTMLElement | null;
+    const el = screen.getByText('1/1/1').closest('[data-send-popover-panel]') as HTMLElement | null;
     expect(el?.style.position).toBe('fixed');
     return el!;
   });
@@ -1374,7 +1374,7 @@ test('header drag moves the popover inside the TT and clears the marks pill', as
 
   fireEvent.click(trigger);
   const card = await waitFor(() => {
-    const el = screen.getByText('1/1/1').parentElement?.parentElement as HTMLElement | null;
+    const el = screen.getByText('1/1/1').closest('[data-send-popover-panel]') as HTMLElement | null;
     expect(el?.style.position).toBe('fixed');
     return el!;
   });

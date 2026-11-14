@@ -38,35 +38,45 @@ test('opens a glass Chromium-style popover', () => {
   expect(within(dialog).getByRole('button', { name: 'Clear' })).toBeInTheDocument();
 });
 
-test('clicking a disabled day does not close the picker', () => {
+test('clicking a disabled day does not close the picker or click through', () => {
+  const other = vi.fn();
   render(
-    <ThemedDatetimePicker
-      mode="date"
-      value="2026-07-15"
-      onChange={() => {}}
-      aria-label="Day"
-      minDate="2026-07-10"
-      maxDate="2026-07-20"
-      openOnFocus={false}
-    />,
+    <>
+      <ThemedDatetimePicker
+        mode="date"
+        value="2026-07-15"
+        onChange={() => {}}
+        aria-label="Day"
+        minDate="2026-07-10"
+        maxDate="2026-07-20"
+        openOnFocus={false}
+      />
+      <input aria-label="Other" onFocus={other} />
+    </>,
   );
   openPicker('Day');
   const dialog = screen.getByRole('dialog', { name: 'Date and time picker' });
   const disabledDay = within(dialog).getByRole('button', { name: '2026-07-09' });
-  expect(disabledDay).toBeDisabled();
-  expect(disabledDay.style.pointerEvents).toBe('none');
-  fireEvent.mouseDown(dialog);
+  expect(disabledDay).toHaveAttribute('aria-disabled', 'true');
+  expect(disabledDay.style.pointerEvents).not.toBe('none');
+  fireEvent.mouseDown(disabledDay);
+  fireEvent.click(disabledDay);
   expect(screen.getByRole('dialog', { name: 'Date and time picker' })).toBeInTheDocument();
+  expect(other).not.toHaveBeenCalled();
+  expect(screen.getByLabelText('Day')).toHaveFocus();
 });
 
-test('Tab cycles year → month → day segments in the field', () => {
+test('ArrowLeft/Right cycle segments; Tab leaves the field', () => {
   render(
-    <ThemedDatetimePicker
-      value="2026-07-18T12:30:00"
-      onChange={() => {}}
-      aria-label="When"
-      openOnFocus={false}
-    />,
+    <>
+      <ThemedDatetimePicker
+        value="2026-07-18T12:30:00"
+        onChange={() => {}}
+        aria-label="When"
+        openOnFocus={false}
+      />
+      <input aria-label="Next" />
+    </>,
   );
   const input = openPicker() as HTMLInputElement;
   const dialog = screen.getByRole('dialog', { name: 'Date and time picker' });
@@ -74,8 +84,11 @@ test('Tab cycles year → month → day segments in the field', () => {
   expect(input.selectionStart).toBe(0);
   expect(input.selectionEnd).toBe(4);
 
-  fireEvent.keyDown(input, { key: 'Tab' });
+  fireEvent.keyDown(input, { key: 'ArrowRight' });
   expect(dialog).toHaveAttribute('data-active-seg', 'month');
+  fireEvent.keyDown(input, { key: 'ArrowRight' });
+  expect(dialog).toHaveAttribute('data-active-seg', 'day');
+
   fireEvent.keyDown(input, { key: 'Tab' });
   expect(dialog).toHaveAttribute('data-active-seg', 'day');
 });
@@ -97,6 +110,37 @@ test('typing digits edits the focused segment and advances when full', () => {
   fireEvent.keyDown(input, { key: '7' });
   expect(input).toHaveValue('2027-07-18');
   expect(screen.getByRole('dialog')).toHaveAttribute('data-active-seg', 'month');
+});
+
+test('mouse wheel rolls the focused time segment and wraps', () => {
+  const onChange = vi.fn();
+  render(
+    <ThemedDatetimePicker
+      value="2026-07-18T23:59:59"
+      onChange={onChange}
+      aria-label="When"
+      openOnFocus={false}
+    />,
+  );
+  const input = openPicker() as HTMLInputElement;
+  fireEvent.keyDown(input, { key: 'ArrowRight' });
+  fireEvent.keyDown(input, { key: 'ArrowRight' });
+  fireEvent.keyDown(input, { key: 'ArrowRight' });
+  expect(screen.getByRole('dialog')).toHaveAttribute('data-active-seg', 'h');
+  fireEvent.wheel(input, { deltaY: -1 });
+  expect(input).toHaveValue('2026-07-18T00:59:59');
+
+  fireEvent.keyDown(input, { key: 'ArrowRight' });
+  fireEvent.wheel(input, { deltaY: -1 });
+  expect(input).toHaveValue('2026-07-18T00:00:59');
+
+  fireEvent.keyDown(input, { key: 'ArrowRight' });
+  fireEvent.wheel(input, { deltaY: -1 });
+  expect(input).toHaveValue('2026-07-18T00:00:00');
+  expect(onChange).not.toHaveBeenCalled();
+  fireEvent.blur(input);
+  expect(onChange).toHaveBeenCalledWith('2026-07-18T00:00:00');
+  expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
 });
 
 test('ArrowUp/Down bump the active field segment; OK commits', () => {
@@ -197,7 +241,7 @@ test('mouse: picking a day drafts; OK commits', () => {
   expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
 });
 
-test('Now sets current time into draft without committing; OK commits', () => {
+test('Now applies current time and closes', () => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(2026, 6, 18, 15, 45, 12));
   const onChange = vi.fn();
@@ -209,12 +253,10 @@ test('Now sets current time into draft without committing; OK commits', () => {
       openOnFocus={false}
     />,
   );
-  const input = openPicker() as HTMLInputElement;
+  openPicker();
   fireEvent.click(screen.getByRole('button', { name: 'Now' }));
-  expect(onChange).not.toHaveBeenCalled();
-  expect(input).toHaveValue('2026-07-18T15:45:12');
-  fireEvent.click(screen.getByRole('button', { name: 'OK' }));
   expect(onChange).toHaveBeenCalledWith('2026-07-18T15:45:12');
+  expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
 });
 
 test('Clear clears the field', () => {
@@ -248,6 +290,25 @@ test('month chevrons navigate the calendar view', () => {
   expect(within(dialog).getByText('August 2026')).toBeInTheDocument();
 });
 
+test('mouse wheel on month/year scrolls the calendar month', () => {
+  render(
+    <ThemedDatetimePicker
+      mode="date"
+      value="2026-07-18"
+      onChange={() => {}}
+      aria-label="Day"
+      openOnFocus={false}
+    />,
+  );
+  openPicker('Day');
+  const dialog = screen.getByRole('dialog', { name: 'Date and time picker' });
+  const heading = dialog.querySelector('[data-cal-heading]') as HTMLElement;
+  fireEvent.wheel(heading, { deltaY: -1 });
+  expect(within(dialog).getByText('August 2026')).toBeInTheDocument();
+  fireEvent.wheel(heading, { deltaY: 1 });
+  expect(within(dialog).getByText('July 2026')).toBeInTheDocument();
+});
+
 test('Escape discards draft without committing', () => {
   const onChange = vi.fn();
   render(
@@ -265,18 +326,21 @@ test('Escape discards draft without committing', () => {
   expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
 });
 
-test('standard actions: Clear / Now / OK in one row under time', () => {
+test('standard actions: Now left and Clear right above time, OK below', () => {
   render(
     <ThemedDatetimePicker value="2026-07-18T12:30:00" onChange={() => {}} aria-label="When" />,
   );
   openPicker();
   const dialog = screen.getByRole('dialog', { name: 'Date and time picker' });
   const side = dialog.querySelector('[data-side-block]') as HTMLElement;
-  expect(side.style.justifyContent).toBe('flex-end');
+  const row = side.querySelector('[data-action-row="now-clear"]') as HTMLElement;
+  expect(row.style.justifyContent).toBe('space-between');
+  expect(within(row).getByRole('button', { name: 'Now' })).toBeInTheDocument();
+  expect(within(row).getByRole('button', { name: 'Clear' })).toBeInTheDocument();
   const labels = within(side).getAllByRole('button')
     .map(b => b.getAttribute('aria-label'))
     .filter(n => n === 'Clear' || n === 'Now' || n === 'OK');
-  expect(labels).toEqual(['Clear', 'Now', 'OK']);
+  expect(labels).toEqual(['Now', 'Clear', 'OK']);
 });
 
 test('since actions (TIME von): Since… and Clear', () => {
@@ -361,8 +425,8 @@ test('days outside minDate/maxDate are disabled in the calendar', () => {
   );
   openPicker('Day');
   const dialog = screen.getByRole('dialog', { name: 'Date and time picker' });
-  expect(within(dialog).getByRole('button', { name: '2026-07-09' })).toBeDisabled();
-  expect(within(dialog).getByRole('button', { name: '2026-07-10' })).not.toBeDisabled();
+  expect(within(dialog).getByRole('button', { name: '2026-07-09' })).toHaveAttribute('aria-disabled', 'true');
+  expect(within(dialog).getByRole('button', { name: '2026-07-10' })).toHaveAttribute('aria-disabled', 'false');
 });
 
 test('popover controls are not keyboard-focusable', () => {

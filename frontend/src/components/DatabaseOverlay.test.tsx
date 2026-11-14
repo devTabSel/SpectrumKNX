@@ -47,7 +47,7 @@ test('purge-before-date uses local midnight, not UTC midnight, as the cutoff (#4
   render(<DatabaseOverlay onClose={() => {}} />);
   await waitFor(() => expect(screen.getByText('postgresql')).toBeInTheDocument());
 
-  const dateInput = document.querySelector('input[type="date"]') as HTMLInputElement;
+  const dateInput = screen.getByLabelText('Cutoff date');
   fireEvent.change(dateInput, { target: { value: '2026-08-05' } });
   fireEvent.click(screen.getByRole('button', { name: /Preview/ }));
 

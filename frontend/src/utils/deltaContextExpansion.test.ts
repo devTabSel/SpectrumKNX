@@ -28,15 +28,24 @@ describe('expandWithDeltaContext', () => {
     expect(out.contextKeys).toEqual(new Set(['b']));
   });
 
-  it('a flagged non-match anchors its own window but is not shown itself', () => {
+  it('a flagged non-match keeps its member list and stays hidden until it is visible', () => {
     const items = [
       item('a', '2024-01-01T10:00:00.000Z'), // flagged, doesn't match
       item('b', '2024-01-01T10:00:00.500Z'), // near the flagged item
       item('c', '2024-01-01T10:00:10.000Z'), // far from everything
     ];
     const out = expandWithDeltaContext(items, [false, false, false], keyOf, new Set(['a']), 0, 1000);
-    expect(out.items.map(keyOf)).toEqual(['b']);
-    expect(out.contextKeys).toEqual(new Set(['b']));
+    expect(out.items).toEqual([]);
+    expect(out.contextKeys).toEqual(new Set());
+    expect(out.contextMembers.get('a')).toEqual(['b']);
+    expect(out.contextParents.get('b')).toEqual(['a']);
+
+    const pinned = expandWithDeltaContext(
+      items, [false, false, false], keyOf, new Set(['a']), 0, 1000, true,
+      { pinnedKeys: new Set(['a']) },
+    );
+    expect(pinned.items.map(keyOf)).toEqual(['a', 'b']);
+    expect(pinned.contextKeys).toEqual(new Set(['b']));
   });
 
   it('flagging a pulled-in context row keeps it in contextKeys', () => {
@@ -95,6 +104,74 @@ describe('expandWithDeltaContext', () => {
     expect(unflagged.contextKeys).toEqual(new Set());
   });
 
+  it('uses an individual window in seconds instead of the quick-filter window', () => {
+    const items = [
+      item('a', '2024-01-01T10:00:00.000Z'),
+      item('b', '2024-01-01T10:00:01.500Z'),
+    ];
+    const qf = expandWithDeltaContext(items, [true, false], keyOf, new Set(), 1000, 1000);
+    expect(qf.items.map(keyOf)).toEqual(['a']);
+
+    const individual = expandWithDeltaContext(items, [true, false], keyOf, new Set(), 1000, 1000, true, {
+      individualWindows: { a: { beforeMs: 0, afterMs: 2000 } },
+    });
+    expect(individual.items.map(keyOf)).toEqual(['a', 'b']);
+    expect(individual.contextMembers.get('a')).toEqual(['b']);
+    expect(individual.contextParents.get('b')).toEqual(['a']);
+  });
+
+  it('an off individual window leaves the quick-filter window in effect', () => {
+    const items = [
+      item('a', '2024-01-01T10:00:00.000Z'),
+      item('b', '2024-01-01T10:00:00.500Z'),
+    ];
+    const zero = expandWithDeltaContext(items, [true, false], keyOf, new Set(), 5000, 5000, true, {
+      individualWindows: { a: { beforeMs: 0, afterMs: 0, enabled: true } },
+    });
+    expect(zero.items.map(keyOf)).toEqual(['a', 'b']);
+
+    const switchedOff = expandWithDeltaContext(items, [true, false], keyOf, new Set(), 0, 0, true, {
+      individualWindows: { a: { beforeMs: 0, afterMs: 2000, enabled: false } },
+    });
+    expect(switchedOff.items.map(keyOf)).toEqual(['a']);
+  });
+
+  it('ignores individual windows while Time-Delta-Context is globally off', () => {
+    const items = [
+      item('a', '2024-01-01T10:00:00.000Z'),
+      item('b', '2024-01-01T10:00:00.500Z'),
+    ];
+    const out = expandWithDeltaContext(items, [true, false], keyOf, new Set(['a']), 5000, 5000, true, {
+      contextEnabled: false,
+      individualWindows: { a: { beforeMs: 10_000, afterMs: 10_000 } },
+    });
+    expect(out.items.map(keyOf)).toEqual(['a']);
+    expect(out.contextMembers.size).toBe(0);
+    expect(out.contextParents.size).toBe(0);
+  });
+
+  it('an inactive button has an empty member list and hides its hierarchy', () => {
+    const items = [
+      item('a', '2024-01-01T10:00:00.000Z'),
+      item('b', '2024-01-01T10:00:00.500Z'),
+      item('c', '2024-01-01T10:00:01.000Z'),
+    ];
+    const on = expandWithDeltaContext(items, [true, false, false], keyOf, new Set(['b']), 0, 600, true, {
+      individualWindows: { b: { beforeMs: 0, afterMs: 1000 } },
+    });
+    expect(on.items.map(keyOf)).toEqual(['a', 'b', 'c']);
+    expect(on.contextMembers.get('b')).toEqual(['c']);
+    expect(on.contextParents.get('c')).toEqual(['b']);
+
+    const off = expandWithDeltaContext(items, [true, false, false], keyOf, new Set(['b']), 0, 0, false, {
+      individualWindows: { b: { beforeMs: 0, afterMs: 1000 } },
+    });
+    expect(off.items.map(keyOf)).toEqual(['a']);
+    expect(off.contextMembers.has('a')).toBe(false);
+    expect(off.contextMembers.get('b')).toEqual(['c']);
+    expect(off.contextKeys).toEqual(new Set());
+  });
+
   it('covers rows inside an anchor window when the list is not time-sorted', () => {
     const items = [
       item('c', '2024-01-01T10:00:05.000Z'), // far
@@ -108,30 +185,17 @@ describe('expandWithDeltaContext', () => {
 });
 
 describe('contextRailSigns', () => {
-  const anchor = Date.parse('2024-01-01T10:00:00.000Z');
+  const row = Date.parse('2024-01-01T10:00:30.000Z');
 
-  it('marks a row before an anchor (rail ∧) only', () => {
-    const older = Date.parse('2024-01-01T09:59:59.500Z');
-    expect(contextRailSigns(older, [anchor], 1000, 1000)).toEqual({ before: true, after: false });
+  it('shows ∨ when a selected parent is earlier and ∧ when one is later', () => {
+    const earlier = Date.parse('2024-01-01T10:00:00.000Z');
+    const later = Date.parse('2024-01-01T10:01:00.000Z');
+    expect(contextRailSigns(row, [earlier])).toEqual({ before: false, after: true });
+    expect(contextRailSigns(row, [later])).toEqual({ before: true, after: false });
+    expect(contextRailSigns(row, [earlier, later])).toEqual({ before: true, after: true });
   });
 
-  it('marks a row after an anchor (rail ∨) only', () => {
-    const newer = Date.parse('2024-01-01T10:00:00.500Z');
-    expect(contextRailSigns(newer, [anchor], 1000, 1000)).toEqual({ before: false, after: true });
-  });
-
-  it('respects asymmetric windows and can be before one anchor and after another', () => {
-    const early = Date.parse('2024-01-01T10:00:00.000Z');
-    const late = Date.parse('2024-01-01T10:01:00.000Z');
-    const between = Date.parse('2024-01-01T10:00:30.000Z');
-    // after early (within 60s), before late (within 60s)
-    expect(contextRailSigns(between, [early, late], 60_000, 60_000)).toEqual({ before: true, after: true });
-    // only-after window: before late is ignored
-    expect(contextRailSigns(between, [early, late], 0, 60_000)).toEqual({ before: false, after: true });
-  });
-
-  it('ignores rows outside every anchor window', () => {
-    const far = Date.parse('2024-01-01T10:00:05.000Z');
-    expect(contextRailSigns(far, [anchor], 1000, 1000)).toEqual({ before: false, after: false });
+  it('shows nothing without a selected parent', () => {
+    expect(contextRailSigns(row, [])).toEqual({ before: false, after: false });
   });
 });

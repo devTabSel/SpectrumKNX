@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { X, RefreshCw, Database, Trash2, HardDrive, AlertTriangle } from 'lucide-react';
 import { apiUrl } from '../utils/basePath';
+import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 
 interface DatabaseInfo {
   backend: string;
@@ -230,12 +231,13 @@ export const DatabaseOverlay: React.FC<DatabaseOverlayProps> = ({ onClose }) => 
                       </button>
                     ))}
                     <span style={{ color: 'var(--text-dim)', fontSize: '0.8rem' }}>or before</span>
-                    <input
-                      type="date"
+                    <ThemedDatetimePicker
+                      mode="date"
                       value={cutoffDate}
-                      onChange={e => setCutoffDate(e.target.value)}
+                      onChange={setCutoffDate}
+                      aria-label="Cutoff date"
                       className="glass-input"
-                      style={{ padding: '0.35rem 0.6rem', fontSize: '0.8rem', borderRadius: 6 }}
+                      style={{ padding: '0.35rem 0.6rem', fontSize: '0.8rem', borderRadius: 6, width: '11rem' }}
                     />
                     <button
                       className="glass-button"

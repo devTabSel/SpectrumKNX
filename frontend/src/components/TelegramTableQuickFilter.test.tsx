@@ -7,8 +7,8 @@ import type { Telegram } from '../hooks/useWebSocket';
 import { DEFAULT_FILTERS } from '../types/filters';
 import { anchorKey } from '../utils/anchorKey';
 
-// The <input type="datetime-local"> quick-filter rows are interpreted as
-// local time (matching the datetime-local semantics used elsewhere in the
+// The quick-filter time rows are local datetime strings (same shape as
+// datetime-local, matching the semantics used elsewhere in the
 // app, e.g. GotoTimeControl) — derive the input value from a telegram's own
 // UTC timestamp so the test doesn't depend on the runner's timezone.
 const localInputValue = (isoUtc: string) => format(new Date(isoUtc), "yyyy-MM-dd'T'HH:mm:ss");
@@ -215,9 +215,9 @@ test('ctrl/cmd-click on the DELTA TIME toggle disables/enables the window withou
   );
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
 
-  // Values are shown regardless of enabled state.
-  expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveValue(500);
-  expect(screen.getByLabelText('Time-Delta-Context after (ms)')).toHaveValue(250);
+  // Values are shown regardless of enabled state (SecondsField text inputs).
+  expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveValue('500');
+  expect(screen.getByLabelText('Time-Delta-Context after (ms)')).toHaveValue('250');
 
   const toggleBtn = screen.getByTitle(/Time-Delta-Context: on/);
   fireEvent.click(toggleBtn, { ctrlKey: true });
@@ -325,21 +325,24 @@ test('context-row button flags that row as its own anchor without leaving all-mo
   expect(onContextForAllMatchesChange).not.toHaveBeenCalled();
 });
 
-test('mousedown on a context button pins that row, not the previous selection', async () => {
+test('mousedown on a context button pins that row and passes through mouse selection', async () => {
   const onListAnchorKeyChange = vi.fn();
+  const onMouseSelectedKeysChange = vi.fn();
   const { container } = renderTable({
     activeFilters: FILTERS_WITH_DELTA,
     onListAnchorKeyChange,
+    onMouseSelectedKeysChange,
   });
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
   fireEvent.click(screen.getByTitle(/around all messages/));
 
   const rows = [...container.querySelectorAll('.log-row')];
   fireEvent.click(rows[0]);
+  const selected = rows[0].getAttribute('data-akey')!;
   const other = rows.find(r => r.textContent?.includes('Licht Flur'))!;
   const key = other.getAttribute('data-akey')!;
-  const selected = rows[0].getAttribute('data-akey')!;
   onListAnchorKeyChange.mockClear();
+  onMouseSelectedKeysChange.mockClear();
   fireEvent.mouseDown(flagButton(other));
   fireEvent.click(flagButton(other));
 
@@ -347,6 +350,10 @@ test('mousedown on a context button pins that row, not the previous selection', 
     expect(onListAnchorKeyChange).toHaveBeenCalledWith(key);
   });
   expect(onListAnchorKeyChange).not.toHaveBeenCalledWith(selected);
+  // Context-button click also selects that row (same as clicking the row).
+  expect(onMouseSelectedKeysChange).toHaveBeenCalled();
+  expect(onMouseSelectedKeysChange.mock.lastCall![0]).toEqual([key]);
+  expect(other.classList.contains('marked')).toBe(true);
 });
 
 test('toggling a row context button pins the preferred row as the scroll anchor', async () => {
@@ -511,11 +518,21 @@ test('empty quick-filter cells that do not filter use a dark background', () => 
   const name = screen.getByLabelText('Quick filter TARGET name');
   expect(pattern).toHaveClass('idle');
   expect(name).toHaveClass('idle');
-  expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveClass('idle');
+  // Delta uses SecondsField (send-panel style); empty shows placeholder, not idle class.
+  expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveValue('');
+  expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveAttribute('placeholder', 'before');
+  expect(screen.getByLabelText('Time-Delta-Context after (ms)')).toHaveAttribute('placeholder', 'after');
+  // QF delta fields fill the Δt column width.
+  expect(screen.getByLabelText('Time-Delta-Context before (ms)').closest('[data-wtb-col="qf-delta"]')).toBeTruthy();
 
   fireEvent.change(pattern, { target: { value: '1/2/*' } });
   expect(pattern).not.toHaveClass('idle');
   expect(name).toHaveClass('idle');
+
+  // Whitespace-only still counts as input — not the dark idle inset.
+  fireEvent.change(name, { target: { value: '   ' } });
+  expect(name).not.toHaveClass('idle');
+  expect(name).toHaveValue('   ');
   unmount();
 
   renderTable({
@@ -523,7 +540,7 @@ test('empty quick-filter cells that do not filter use a dark background', () => 
     quickFilterEnabled: true,
     activeFilters: FILTERS_WITH_DELTA,
   });
-  expect(screen.getByLabelText('Time-Delta-Context before (ms)')).not.toHaveClass('idle');
+  expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveValue('100');
 });
 
 test('the DELTA filter toggle is active only when before or after is set', () => {
@@ -598,4 +615,90 @@ test('a quick filter hides a flagged non-context row and keeps selection, marks,
   expect(keys).toContain(markedKey);
   expect(keys).toContain(contextKey);
   expect(keys).toContain(anchorKey(match));
+});
+
+test('ctrl-click drafts an individual context window; Enter commits, Esc/outside discards', () => {
+  const onFlaggedKeysChange = vi.fn();
+  const onIndividualContextWindowsChange = vi.fn();
+  const { container } = renderTable({
+    activeFilters: FILTERS_WITH_DELTA,
+    quickFilterOpen: true,
+    quickFilterEnabled: true,
+    onFlaggedKeysChange,
+    onIndividualContextWindowsChange,
+  });
+  const logRows = () => [...container.querySelectorAll('.log-row')];
+  fireEvent.click(logRows()[0]);
+  fireEvent.click(logRows()[1], { ctrlKey: true });
+  const selected = logRows().slice(0, 2).map(r => r.getAttribute('data-akey')!);
+
+  onFlaggedKeysChange.mockClear();
+  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  expect(onFlaggedKeysChange).not.toHaveBeenCalled();
+  const popup = screen.getByTestId('context-window-popup');
+  const before = screen.getByLabelText('Individual context before (ms)');
+  const after = screen.getByLabelText('Individual context after (ms)');
+  expect(before).toHaveAttribute('placeholder', 'before');
+  expect(after).toHaveAttribute('placeholder', 'after');
+  const toggle = screen.getByRole('button', { name: 'Off' });
+  expect(toggle).toBeDisabled();
+  expect(toggle.querySelector('svg')).toBeTruthy();
+
+  // Typing stays in the draft — nothing persisted yet.
+  fireEvent.change(before, { target: { value: '200' } });
+  fireEvent.change(after, { target: { value: '300' } });
+  expect(onIndividualContextWindowsChange).not.toHaveBeenCalled();
+  expect(screen.getByRole('button', { name: 'On' }).querySelector('svg')).toBeTruthy();
+  expect(flagButton(logRows()[0]).hasAttribute('data-individual-window')).toBe(false);
+
+  // Esc discards the draft (document capture listener).
+  expect(popup).toBeInTheDocument();
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(screen.queryByTestId('context-window-popup')).not.toBeInTheDocument();
+  expect(onIndividualContextWindowsChange).not.toHaveBeenCalled();
+
+  // Re-open, edit, click outside → discard.
+  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '200' } });
+  fireEvent.pointerDown(document.body);
+  expect(screen.queryByTestId('context-window-popup')).not.toBeInTheDocument();
+  expect(onIndividualContextWindowsChange).not.toHaveBeenCalled();
+
+  // Enter commits values (auto-on when first valid), activates context buttons, and closes.
+  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '150' } });
+  fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '250' } });
+  expect(screen.getByRole('button', { name: 'On' })).toBeInTheDocument();
+  onFlaggedKeysChange.mockClear();
+  fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({
+    [selected[0]]: { beforeMs: 150, afterMs: 250, enabled: true },
+    [selected[1]]: { beforeMs: 150, afterMs: 250, enabled: true },
+  });
+  expect(onFlaggedKeysChange).toHaveBeenCalled();
+  expect(onFlaggedKeysChange.mock.lastCall![0]).toEqual(expect.arrayContaining(selected));
+  expect(screen.queryByTestId('context-window-popup')).not.toBeInTheDocument();
+  // Individual window on → context button always highlighted.
+  expect(flagButton(logRows()[0]).getAttribute('data-individual-window')).toBe('true');
+  expect(isFlagged(logRows()[0])).toBe(true);
+
+  // Re-open and turn off via toggle + Enter — window off clears the highlight.
+  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  fireEvent.click(screen.getByRole('button', { name: 'On' }));
+  fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({
+    [selected[0]]: { beforeMs: 150, afterMs: 250, enabled: false },
+    [selected[1]]: { beforeMs: 150, afterMs: 250, enabled: false },
+  });
+  expect(flagButton(logRows()[0]).hasAttribute('data-individual-window')).toBe(false);
+
+  // On/off stays adjustable while the selection already has before/after values.
+  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  expect(screen.getByRole('button', { name: 'Off' })).not.toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Off' }));
+  fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({
+    [selected[0]]: { beforeMs: 150, afterMs: 250, enabled: true },
+    [selected[1]]: { beforeMs: 150, afterMs: 250, enabled: true },
+  });
 });

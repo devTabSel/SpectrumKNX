@@ -36,6 +36,7 @@ test('round-trip save/load works correctly', () => {
     markColorIndices: { 'k-1': 2 },
     flaggedKeys: ['flag-a'],
     contextForAllMatches: false,
+    individualContextWindows: { 'flag-a': { beforeMs: 1000, afterMs: 2000, enabled: true } },
   };
 
   saveUiState(state);
@@ -55,6 +56,12 @@ test('sanitize keeps marked and mouse flags and drops goto/auto/context', () => 
       markColorIndices: { a: 1, bad: 99 },
       flaggedKeys: ['x', 'x', 3, ''],
       contextForAllMatches: false,
+      individualContextWindows: {
+        ok: { beforeMs: 1500, afterMs: 0 },
+        legacy: { beforeSec: 1, afterSec: 2 },
+        bad: { beforeMs: -1, afterMs: 2 },
+        nope: { beforeMs: '1', afterMs: 2 },
+      },
     }),
   );
   const loaded = loadUiState();
@@ -64,6 +71,10 @@ test('sanitize keeps marked and mouse flags and drops goto/auto/context', () => 
   expect(loaded?.markColorIndices).toEqual({ a: 1 });
   expect(loaded?.flaggedKeys).toEqual(['x']);
   expect(loaded?.contextForAllMatches).toBe(false);
+  expect(loaded?.individualContextWindows).toEqual({
+    ok: { beforeMs: 1500, afterMs: 0, enabled: true },
+    legacy: { beforeMs: 1000, afterMs: 2000, enabled: true },
+  });
 });
 
 test('returns null when storage is empty', () => {

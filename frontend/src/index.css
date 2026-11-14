@@ -44,7 +44,7 @@
   --dpt-unknown: #64748b;
 
   /* Telegram table cell tokens (--tt-*). Override later for user prefs. */
-  --tt-cell-padding: 0.75rem 1rem;
+  --tt-cell-padding: 0.25rem 1rem;
   --tt-mono-size: 0.8125rem;
   --tt-time-color: var(--text-main);
   --tt-time-weight: 500;
@@ -229,7 +229,7 @@ code, pre {
 .glass-input::placeholder,
 .glass-input input::placeholder {
   color: var(--text-dim);
-  opacity: 0.55;
+  opacity: 0.32;
   font-style: italic;
   font-weight: 400;
 }

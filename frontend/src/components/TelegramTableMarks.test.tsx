@@ -775,13 +775,20 @@ test('injected styles define a scheme-aware row-flash fade', () => {
   expect(css).toContain('inset 0 0 0 1px var(--row-flash-border)');
 });
 
-test('context rail shows ∧ above older and ∨ below newer relative to an active context anchor', () => {
-  // Desc list: [0]=10:00:05 … [2]=10:00:03 (flagged anchor) … [4]=10:00:01.
-  // [1]=10:00:04 is after the anchor → ∨; [3]=10:00:02 is before → ∧.
+test('context rail shows ∧ and ∨ only for selected parent telegrams', () => {
+  // Desc list: [0]=10:00:05 … [2]=10:00:03 (parent) … [4]=10:00:01.
+  // [1]=10:00:04 is after the parent → ∨; [3]=10:00:02 is before → ∧.
   const anchorKey2 = anchorKey(TELEGRAMS[2]);
-  const { container } = renderTable({
+  const newerKey = anchorKey(TELEGRAMS[1]);
+  const olderKey = anchorKey(TELEGRAMS[3]);
+  const parents = new Map<string, readonly string[]>([
+    [newerKey, [anchorKey2]],
+    [olderKey, [anchorKey2]],
+  ]);
+  const props = {
     flaggedKeys: [anchorKey2],
-    contextKeys: new Set([anchorKey(TELEGRAMS[1]), anchorKey(TELEGRAMS[3])]),
+    contextKeys: new Set([newerKey, olderKey]),
+    contextParents: parents,
     contextForAllMatches: false,
     activeFilters: {
       ...DEFAULT_FILTERS,
@@ -789,13 +796,17 @@ test('context rail shows ∧ above older and ∨ below newer relative to an acti
       deltaAfterMs: 5000,
       deltaContextEnabled: true,
     },
-  });
+  };
+  const hidden = renderTable(props);
+  expect(rows(hidden.container)[1].querySelector('[data-context-rail]')).toBeNull();
+  expect(rows(hidden.container)[3].querySelector('[data-context-rail]')).toBeNull();
+  hidden.unmount();
 
+  const { container } = renderTable({ ...props, mouseSelectedKeys: [anchorKey2] });
   expect(rows(container)[3].querySelector('[data-context-rail="before"]')).toHaveTextContent('∧');
   expect(rows(container)[3].querySelector('[data-context-rail="after"]')).toBeNull();
   expect(rows(container)[1].querySelector('[data-context-rail="after"]')).toHaveTextContent('∨');
   expect(rows(container)[1].querySelector('[data-context-rail="before"]')).toBeNull();
-  // Anchor itself is not a context row — no signs.
   expect(rows(container)[2].querySelector('[data-context-rail]')).toBeNull();
 });
 

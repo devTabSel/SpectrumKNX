@@ -719,10 +719,13 @@ function App() {
   const [listGoto, setListGoto] = useState<ListGotoRequest | null>(null);
 
   // ── Per-message Time-Delta-Context flags (#319) ─────────────────────────────
-  // Same lifting rationale as marks; each flagged telegram always anchors a
-  // context window around itself regardless of the active filters.
+  // Same lifting rationale as marks. A flagged button anchors a window; the
+  // row itself stays visible only when it matches, is pinned, or is context.
   const [flaggedTelegramKeys, setFlaggedTelegramKeys] = useState<string[]>(
     () => initialUiState.flaggedKeys,
+  );
+  const [individualContextWindows, setIndividualContextWindows] = useState(
+    () => initialUiState.individualContextWindows,
   );
   // Global "all" state: every filter match anchors a window. Off, only the
   // flagged telegrams do.
@@ -756,6 +759,7 @@ function App() {
         markColorIndices: telegramMarkColorIndices,
         flaggedKeys: flaggedTelegramKeys,
         contextForAllMatches,
+        individualContextWindows,
       });
     }, 500);
     return () => clearTimeout(handle);
@@ -780,6 +784,7 @@ function App() {
     telegramMarkColorIndices,
     flaggedTelegramKeys,
     contextForAllMatches,
+    individualContextWindows,
   ]);
 
   // ── Sorting (#311: multi-level, ctrl/cmd-click adds a level) ─────────────────
@@ -1024,12 +1029,13 @@ function App() {
     quickColumnEnabled,
     flaggedKeys: flaggedTelegramKeys,
     contextForAllMatches,
+    individualContextWindows,
     markedKeys: telegramMarkedKeys,
     mouseSelectedKeys: telegramMouseSelectedKeys,
     lastSelectedKey: lastSelectedTelegramKey,
   }), [
     appliedFilters, filtersEnabled, quickFilterOpen, quickFilterEnabled, quickPatterns, quickColumnEnabled,
-    flaggedTelegramKeys, contextForAllMatches, telegramMarkedKeys, telegramMouseSelectedKeys,
+    flaggedTelegramKeys, contextForAllMatches, individualContextWindows, telegramMarkedKeys, telegramMouseSelectedKeys,
     lastSelectedTelegramKey,
   ]);
 
@@ -1045,6 +1051,7 @@ function App() {
   const filteredLiveTelegrams = liveView.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = liveView.contextKeys;
+  const contextTelegramParents = liveView.contextParents;
   const filterCounts = liveView.counts;
 
   const activeFilterCount = countSelections(appliedFilters);
@@ -1718,7 +1725,10 @@ function App() {
                     onFlaggedKeysChange={setFlaggedTelegramKeys}
                     contextForAllMatches={contextForAllMatches}
                     onContextForAllMatchesChange={setContextForAllMatches}
+                    individualContextWindows={individualContextWindows}
+                    onIndividualContextWindowsChange={setIndividualContextWindows}
                     contextKeys={contextTelegramKeys}
+                    contextParents={contextTelegramParents}
                     infoBarOpen={infoBarOpen}
                     onInfoBarOpenChange={setInfoBarOpen}
                     gotoRequest={listGoto}

@@ -1757,10 +1757,10 @@ export function WriteToBusPanel({
         const started = await startScheduled(row, null, delaySeconds, intervalSeconds, nextAt, true);
         if (!started) updateRow(row.id, { statusWatch: null, readBaseline: null });
       } else {
-        await readTelegram(row.address.trim());
-        updateRow(row.id, {
-          feedback: { ok: true, msg: `Read request sent to ${row.address.trim()}` },
-        });
+      await readTelegram(row.address.trim());
+      updateRow(row.id, {
+        feedback: { ok: true, msg: `Read request sent to ${row.address.trim()}` },
+      });
       }
       rememberGa(row.address);
     } catch (err) {
@@ -1963,15 +1963,15 @@ export function WriteToBusPanel({
         }}
       >
         {rows.map((row, rowIndex) => {
-          const known = byAddress.get(row.address.trim());
-          // The write widget follows the row's *effective* (possibly overridden)
-          // DPT, not the project default (#342).
-          const dptMain = parseDptMain(row.dpt);
-          const projectDpt = known && known.main != null ? formatDpt(known.main, known.sub) : '';
-          const overridden = projectDpt !== '' && row.dpt.trim() !== projectDpt;
-          const addressValid = GA_RE.test(row.address.trim());
-          const lastTelegram = addressValid ? lastValues[row.address.trim()] : undefined;
-          const scheduledDisabled = row.busy || !addressValid;
+        const known = byAddress.get(row.address.trim());
+        // The write widget follows the row's *effective* (possibly overridden)
+        // DPT, not the project default (#342).
+        const dptMain = parseDptMain(row.dpt);
+        const projectDpt = known && known.main != null ? formatDpt(known.main, known.sub) : '';
+        const overridden = projectDpt !== '' && row.dpt.trim() !== projectDpt;
+        const addressValid = GA_RE.test(row.address.trim());
+        const lastTelegram = addressValid ? lastValues[row.address.trim()] : undefined;
+        const scheduledDisabled = row.busy || !addressValid;
           const rowJob = jobsByRowId[row.id] ?? null;
           const showJob = isLiveJob(rowJob);
           const statusTelegram = visibleStatusTelegram(row, showJob ? rowJob : null, lastTelegram);
@@ -1995,7 +1995,7 @@ export function WriteToBusPanel({
                 background: 'linear-gradient(var(--bg-panel), var(--bg-panel)), var(--bg-dark)',
               }
             : undefined;
-          return (
+        return (
             <WriteControls
               key={row.id}
               dptMain={dptMain}
@@ -2074,27 +2074,27 @@ export function WriteToBusPanel({
                   }}
                 >
                   <div data-wtb-col="1" style={{ minWidth: 0, width: '100%' }}>
-                    <GaCombobox
-                      display="name"
-                      value={row.name}
-                      onChange={(next, option) => onNameChange(row.id, next, option)}
-                      onCommit={text => onNameCommit(row.id, text)}
+                  <GaCombobox
+                    display="name"
+                    value={row.name}
+                    onChange={(next, option) => onNameChange(row.id, next, option)}
+                    onCommit={text => onNameCommit(row.id, text)}
                       onFocus={() => snapshotNameFocus(row.id)}
-                      options={targets}
-                      recentAddresses={recentGas}
-                      placeholder="Group name"
-                      width="100%"
+                    options={targets}
+                    recentAddresses={recentGas}
+                    placeholder="Group name"
+                    width="100%"
                       disabled={showJob}
                       title={showJob ? 'Group name (locked while this job is running)' : undefined}
-                    />
-                  </div>
+                  />
+                </div>
                   <div data-wtb-col="2">
                     {addressValid ? (
                       <LastValue telegram={lastTelegram} dpt={row.dpt} />
                     ) : (
                       <span aria-hidden style={{ display: 'inline-block', height: 18 }} />
-                    )}
-                  </div>
+                )}
+              </div>
                   <div data-wtb-col="3" style={{ minWidth: 0, width: '100%', overflow: 'hidden' }}>
                     <EventCell
                       telegram={addressValid ? lastTelegram : undefined}
@@ -2135,26 +2135,26 @@ export function WriteToBusPanel({
                     disabled={showJob || !addressValid}
                   />
                   <div data-wtb-col="6" style={{ width: '100%', minWidth: 0, overflow: 'hidden' }}>
-                    <DptField
-                      value={row.dpt}
-                      options={allowedDpts}
+                  <DptField
+                    value={row.dpt}
+                    options={allowedDpts}
                       disabled={!addressValid || showJob}
-                      overridden={overridden}
-                      title={
+                    overridden={overridden}
+                    title={
                         showJob
                           ? 'Datapoint type (locked while this job is running)'
                           : !addressValid
-                            ? 'Enter a group address first'
-                            : overridden
-                              ? `Overriding project DPT ${projectDpt}`
-                              : 'Datapoint type, e.g. 5.010 (defaults to the project DPT)'
-                      }
-                      onChange={next => onDptChange(row.id, next)}
+                        ? 'Enter a group address first'
+                        : overridden
+                          ? `Overriding project DPT ${projectDpt}`
+                          : 'Datapoint type, e.g. 5.010 (defaults to the project DPT)'
+                    }
+                    onChange={next => onDptChange(row.id, next)}
                       onReset={() => updateRow(row.id, { dpt: projectDpt, value: '', ...clearStatusPatch() })}
                       resetValue={projectDpt}
                       resetTitle={`Reset to project DPT ${projectDpt}`}
                     />
-                  </div>
+                </div>
                   {valueSlot}
                 </div>
               </div>
@@ -2283,9 +2283,9 @@ export function WriteToBusPanel({
             </>
               )}
             />
-          );
-        })}
-      </div>
+        );
+      })}
+        </div>
         </div>
         {/* H-scrollbar only under the mid pane (name … value). */}
         <div
@@ -2415,8 +2415,8 @@ export function WriteToBusPanel({
         read ? undefined : payload,
         read ? undefined : (row.dpt.trim() || undefined),
         {
-          delaySeconds: delaySeconds > 0 ? delaySeconds : undefined,
-          intervalSeconds: intervalSeconds > 0 ? intervalSeconds : undefined,
+      delaySeconds: delaySeconds > 0 ? delaySeconds : undefined,
+      intervalSeconds: intervalSeconds > 0 ? intervalSeconds : undefined,
           read,
           response,
         },
@@ -2453,7 +2453,7 @@ export function WriteToBusPanel({
       }));
       // Bind this row to the server UUID (not the GA) for remount / poll remap.
       updateRow(row.id, { scheduledJobId: status.id ?? null });
-      startPolling();
+    startPolling();
       return true;
     } catch (err) {
       cancelWhenStartedRef.current.delete(row.id);
@@ -2583,7 +2583,7 @@ export function WriteToBusPanel({
     } else if (cancelled?.id) {
       try {
         await cancelScheduledSend(cancelled.id);
-      } catch {
+    } catch {
         // ignore — refreshJobs reflects the real state
       }
     }
@@ -2965,7 +2965,7 @@ export function SendJobStatusField({
       data-status-field
       title={tooltip || undefined}
       aria-label={tooltip || undefined}
-      style={{
+        style={{
         display: 'flex',
         alignItems: 'center',
         gap: '0.55rem',
@@ -3049,7 +3049,7 @@ export function SendJobStatusField({
               flex: '0 0 auto',
               minWidth: 0,
               height: '100%',
-              fontSize: '0.72rem',
+          fontSize: '0.72rem',
               fontWeight: 400,
               fontFamily: "'JetBrains Mono', monospace",
               lineHeight: 1,
@@ -3113,7 +3113,7 @@ export function SendJobStatusField({
         ) : null}
         {!showEventCols ? (
           <div
-            style={{
+          style={{
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'flex-end',
@@ -3136,7 +3136,7 @@ export function SendJobStatusField({
               // contributing the full message to intrinsic / max-content width.
               <span
                 data-status-error
-                style={{
+              style={{
                   width: 0,
                   minWidth: '100%',
                   flex: 1,
