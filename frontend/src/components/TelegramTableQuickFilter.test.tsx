@@ -383,7 +383,13 @@ test('toggling a row context button pins the preferred row as the scroll anchor'
 });
 
 test("a selected row's context flag applies to every selected row, not rail marks (#319)", () => {
-  const { container } = renderTable({ activeFilters: FILTERS_WITH_DELTA });
+  const onMouseSelectedKeysChange = vi.fn();
+  const onFlaggedKeysChange = vi.fn();
+  const { container } = renderTable({
+    activeFilters: FILTERS_WITH_DELTA,
+    onMouseSelectedKeysChange,
+    onFlaggedKeysChange,
+  });
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
   fireEvent.click(screen.getByTitle(/around all messages/));
   const rows = [...container.querySelectorAll('.log-row')];
@@ -391,10 +397,18 @@ test("a selected row's context flag applies to every selected row, not rail mark
   // Select two rows, rail-mark a third (manual only), then flag one selected row.
   fireEvent.click(rows[0]);
   fireEvent.click(rows[1], { ctrlKey: true });
+  const selected = rows.slice(0, 2).map(r => r.getAttribute('data-akey')!);
   const rail = rows[2].querySelector('[title="Mark this message"]') as HTMLElement;
   fireEvent.click(rail);
+  onMouseSelectedKeysChange.mockClear();
+  onFlaggedKeysChange.mockClear();
+  // Real click: mousedown must not collapse the multi-selection.
+  fireEvent.mouseDown(flagButton(rows[0]), { button: 0 });
   fireEvent.click(flagButton(rows[0]));
 
+  expect(onMouseSelectedKeysChange).not.toHaveBeenCalled();
+  expect(onFlaggedKeysChange).toHaveBeenLastCalledWith(expect.arrayContaining(selected));
+  expect(onFlaggedKeysChange.mock.lastCall![0]).toHaveLength(2);
   expect(isFlagged(rows[0])).toBe(true);
   expect(isFlagged(rows[1])).toBe(true);
   // Rail-marked but not selected → context indicator does not follow.
@@ -620,54 +634,77 @@ test('a quick filter hides a flagged non-context row and keeps selection, marks,
 test('ctrl-click drafts an individual context window; Enter commits, Esc/outside discards', () => {
   const onFlaggedKeysChange = vi.fn();
   const onIndividualContextWindowsChange = vi.fn();
+  const onMouseSelectedKeysChange = vi.fn();
   const { container } = renderTable({
     activeFilters: FILTERS_WITH_DELTA,
     quickFilterOpen: true,
     quickFilterEnabled: true,
     onFlaggedKeysChange,
     onIndividualContextWindowsChange,
+    onMouseSelectedKeysChange,
   });
   const logRows = () => [...container.querySelectorAll('.log-row')];
+  // Select row 0, then ctrl-click the context button on row 1: selection gets
+  // the ctrl-click (adds row 1) and the popup opens for the multi-selection.
   fireEvent.click(logRows()[0]);
-  fireEvent.click(logRows()[1], { ctrlKey: true });
+  const flag1 = flagButton(logRows()[1]);
+  fireEvent.mouseDown(flag1, { ctrlKey: true, button: 0 });
+  fireEvent.click(flag1, { ctrlKey: true });
   const selected = logRows().slice(0, 2).map(r => r.getAttribute('data-akey')!);
+  expect(onMouseSelectedKeysChange).toHaveBeenCalled();
+  expect(onMouseSelectedKeysChange.mock.lastCall![0]).toEqual(expect.arrayContaining(selected));
+  expect(onMouseSelectedKeysChange.mock.lastCall![0]).toHaveLength(2);
 
   onFlaggedKeysChange.mockClear();
-  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
   expect(onFlaggedKeysChange).not.toHaveBeenCalled();
   const popup = screen.getByTestId('context-window-popup');
   const before = screen.getByLabelText('Individual context before (ms)');
   const after = screen.getByLabelText('Individual context after (ms)');
   expect(before).toHaveAttribute('placeholder', 'before');
   expect(after).toHaveAttribute('placeholder', 'after');
+  // Multi-selection without individual times opens prefilled from the QF window.
+  expect(before).toHaveValue('100');
+  expect(after).toHaveValue('100');
   const toggle = screen.getByRole('button', { name: 'Off' });
-  expect(toggle).toBeDisabled();
+  expect(toggle).not.toBeDisabled();
   expect(toggle.querySelector('svg')).toBeTruthy();
 
-  // Typing stays in the draft — nothing persisted yet.
-  fireEvent.change(before, { target: { value: '200' } });
-  fireEvent.change(after, { target: { value: '300' } });
-  expect(onIndividualContextWindowsChange).not.toHaveBeenCalled();
-  expect(screen.getByRole('button', { name: 'On' }).querySelector('svg')).toBeTruthy();
+  // Enter with QF times clears any individual override (nothing stored).
+  onIndividualContextWindowsChange.mockClear();
+  fireEvent.keyDown(after, { key: 'Enter' });
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({});
+  expect(screen.queryByTestId('context-window-popup')).not.toBeInTheDocument();
+
+  // Re-open, typing stays in the draft — nothing persisted yet.
+  // Prefill already has times, so On stays Off until toggled (no empty→valid auto-on).
+  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
+  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '200' } });
+  fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '300' } });
+  expect(onIndividualContextWindowsChange).toHaveBeenCalledTimes(1); // only the QF-clear above
+  expect(screen.getByRole('button', { name: 'Off' }).querySelector('svg')).toBeTruthy();
   expect(flagButton(logRows()[0]).hasAttribute('data-individual-window')).toBe(false);
 
   // Esc discards the draft (document capture listener).
-  expect(popup).toBeInTheDocument();
+  expect(screen.getByTestId('context-window-popup')).toBeInTheDocument();
   fireEvent.keyDown(document, { key: 'Escape' });
   expect(screen.queryByTestId('context-window-popup')).not.toBeInTheDocument();
-  expect(onIndividualContextWindowsChange).not.toHaveBeenCalled();
+  expect(onIndividualContextWindowsChange).toHaveBeenCalledTimes(1);
 
   // Re-open, edit, click outside → discard.
+  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
   fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
   fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '200' } });
   fireEvent.pointerDown(document.body);
   expect(screen.queryByTestId('context-window-popup')).not.toBeInTheDocument();
-  expect(onIndividualContextWindowsChange).not.toHaveBeenCalled();
+  expect(onIndividualContextWindowsChange).toHaveBeenCalledTimes(1);
 
-  // Enter commits values (auto-on when first valid), activates context buttons, and closes.
+  // Enter commits custom times with On, activates context buttons, and closes.
+  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
   fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
   fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '150' } });
   fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '250' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Off' }));
   expect(screen.getByRole('button', { name: 'On' })).toBeInTheDocument();
   onFlaggedKeysChange.mockClear();
   fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
@@ -682,8 +719,11 @@ test('ctrl-click drafts an individual context window; Enter commits, Esc/outside
   expect(flagButton(logRows()[0]).getAttribute('data-individual-window')).toBe('true');
   expect(isFlagged(logRows()[0])).toBe(true);
 
-  // Re-open and turn off via toggle + Enter — window off clears the highlight.
+  // Re-open shows the individual times (not QF), turn off via toggle + Enter.
+  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
   fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  expect(screen.getByLabelText('Individual context before (ms)')).toHaveValue('150');
+  expect(screen.getByLabelText('Individual context after (ms)')).toHaveValue('250');
   fireEvent.click(screen.getByRole('button', { name: 'On' }));
   fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
   expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({
@@ -693,6 +733,7 @@ test('ctrl-click drafts an individual context window; Enter commits, Esc/outside
   expect(flagButton(logRows()[0]).hasAttribute('data-individual-window')).toBe(false);
 
   // On/off stays adjustable while the selection already has before/after values.
+  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
   fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
   expect(screen.getByRole('button', { name: 'Off' })).not.toBeDisabled();
   fireEvent.click(screen.getByRole('button', { name: 'Off' }));
@@ -701,4 +742,32 @@ test('ctrl-click drafts an individual context window; Enter commits, Esc/outside
     [selected[0]]: { beforeMs: 150, afterMs: 250, enabled: true },
     [selected[1]]: { beforeMs: 150, afterMs: 250, enabled: true },
   });
+
+  // Commit back to QF times → individual overrides are removed.
+  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
+  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '100' } });
+  fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '100' } });
+  fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({});
+  expect(flagButton(logRows()[0]).hasAttribute('data-individual-window')).toBe(false);
+
+  // Custom times again, then empty fields on commit also clear individuals.
+  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
+  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '150' } });
+  fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '250' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Off' }));
+  fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({
+    [selected[0]]: { beforeMs: 150, afterMs: 250, enabled: true },
+    [selected[1]]: { beforeMs: 150, afterMs: 250, enabled: true },
+  });
+  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
+  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '' } });
+  fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '' } });
+  fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({});
+  expect(flagButton(logRows()[0]).hasAttribute('data-individual-window')).toBe(false);
 });

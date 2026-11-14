@@ -2801,7 +2801,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     requestDisplayPinRef.current(key);
 
     const nextOn = !anchorsContext(key);
-    const targets = targetsForSelectionAction(key);
+    // Use the post-mousedown selection (ref is sync). Same rule as rail actions:
+    // click inside the selection → every selected row; otherwise just this row.
+    const selected = mouseKeyListRef.current;
+    const targets = new Set(selected.includes(key) ? selected : [key]);
     if (nextOn) {
       // Context rows and matches alike: personal flag → own context window.
       setFlaggedKeysList([...new Set([...flaggedKeysList, ...targets])]);
@@ -2824,11 +2827,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       return;
     }
     setFlaggedKeysList(flaggedKeysList.filter(k => !targets.has(k)));
-  }, [anchorsContext, flaggedKeysList, targetsForSelectionAction, setFlaggedKeysList, contextForAll, setContextForAll, telegrams, contextKeys, flaggedSet]);
+  }, [anchorsContext, flaggedKeysList, setFlaggedKeysList, contextForAll, setContextForAll, telegrams, contextKeys, flaggedSet]);
 
   const openContextWindowPopup = useCallback((e: React.MouseEvent, key: string) => {
-    // Times + on/off always target the whole mouse selection (or the clicked row).
-    const targets = [...targetsForSelectionAction(key)];
+    // Mousedown already updated the mouse selection (ref is sync). Always
+    // include the clicked row so a ctrl-toggle-off still keeps it in scope.
+    const targets = [...new Set([...mouseKeyListRef.current, key])];
     const first = targets.length > 0 ? individualWindows[targets[0]] : undefined;
     const shared = !!first && targets.every(k => {
       const w = individualWindows[k];
@@ -2838,6 +2842,18 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       const w = individualWindows[k];
       return !!w && (w.beforeMs > 0 || w.afterMs > 0);
     });
+    // No individual times yet → prefill the draft from the quick-filter window.
+    const qfBefore = activeFilters.deltaBeforeMs;
+    const qfAfter = activeFilters.deltaAfterMs;
+    let before = '';
+    let after = '';
+    if (shared) {
+      if (first.beforeMs > 0) before = String(first.beforeMs);
+      if (first.afterMs > 0) after = String(first.afterMs);
+    } else if (!selectionHasTimes) {
+      if (qfBefore > 0) before = String(qfBefore);
+      if (qfAfter > 0) after = String(qfAfter);
+    }
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     setContextWindowPopup({
       trigger: {
@@ -2849,45 +2865,41 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         height: rect.height,
       },
       targets,
-      before: shared && first.beforeMs > 0 ? String(first.beforeMs) : '',
-      after: shared && first.afterMs > 0 ? String(first.afterMs) : '',
+      before,
+      after,
       on: shared ? individualWindowOn(first) : targets.some(k => individualWindowOn(individualWindows[k])),
       selectionHasTimes,
     });
-  }, [targetsForSelectionAction, individualWindows]);
+  }, [individualWindows, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs]);
 
   const commitContextWindowPopup = useCallback(() => {
     if (!contextWindowPopup) return;
     const before = sanitizeSecondsInput(contextWindowPopup.before);
     const after = sanitizeSecondsInput(contextWindowPopup.after);
-    let beforeMs = before === '' ? 0 : Number(before);
-    let afterMs = after === '' ? 0 : Number(after);
+    const beforeMs = before === '' ? 0 : Number(before);
+    const afterMs = after === '' ? 0 : Number(after);
     if (!Number.isFinite(beforeMs) || beforeMs < 0 || !Number.isFinite(afterMs) || afterMs < 0) return;
-    // Empty draft + selection already has times: reuse the first filled
-    // window so On/Off alone still applies one shared window to all.
-    if (beforeMs === 0 && afterMs === 0) {
-      for (const key of contextWindowPopup.targets) {
-        const w = individualWindows[key];
-        if (w && (w.beforeMs > 0 || w.afterMs > 0)) {
-          beforeMs = w.beforeMs;
-          afterMs = w.afterMs;
-          break;
-        }
-      }
-    }
-    const canOn = beforeMs > 0 || afterMs > 0;
+    const empty = beforeMs === 0 && afterMs === 0;
+    // Empty fields or same as QF → drop individual overrides (QF window applies).
+    const matchesQf = beforeMs === activeFilters.deltaBeforeMs
+      && afterMs === activeFilters.deltaAfterMs;
+    const clearIndividual = empty || matchesQf;
+    const canOn = !clearIndividual && (beforeMs > 0 || afterMs > 0);
     const enabled = canOn && contextWindowPopup.on;
-    // Same before/after/on for every row in the selection.
     const next = { ...individualWindows };
     for (const key of contextWindowPopup.targets) {
-      next[key] = { beforeMs, afterMs, enabled };
+      if (clearIndividual) delete next[key];
+      else next[key] = { beforeMs, afterMs, enabled };
     }
     setIndividualWindows(next);
     if (enabled) {
       setFlaggedKeysList([...new Set([...flaggedKeysList, ...contextWindowPopup.targets])]);
     }
     setContextWindowPopup(null);
-  }, [contextWindowPopup, individualWindows, flaggedKeysList, setIndividualWindows, setFlaggedKeysList]);
+  }, [
+    contextWindowPopup, individualWindows, flaggedKeysList, setIndividualWindows, setFlaggedKeysList,
+    activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs,
+  ]);
 
   useEffect(() => {
     if (!contextWindowPopup) return;
@@ -4041,12 +4053,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                   : 'Show context around this message, regardless of the active filters (applies to all selected rows)')
               + ' Ctrl-click sets an individual before/after window.'
             }
-            // Plain click: pin + let row mousedown apply mouse selection.
-            // Ctrl/cmd-click: keep selection as-is (popup targets the selection).
+            // Pin this row. Plain click inside an existing selection keeps that
+            // selection so the flag applies to every selected row; outside (or
+            // ctrl/cmd) the row mousedown updates selection as usual. Ctrl/cmd
+            // then opens the individual-window popup for that selection.
             onMouseDown={e => {
               if (e.button !== 0) return;
               contextButtonPinRef.current(rowKey);
-              if (e.ctrlKey || e.metaKey) e.stopPropagation();
+              if (!e.ctrlKey && !e.metaKey && mouseKeyListRef.current.includes(rowKey)) {
+                e.stopPropagation();
+              }
             }}
             onClick={e => {
               if (e.ctrlKey || e.metaKey) {
