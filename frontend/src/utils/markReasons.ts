@@ -1,170 +1,64 @@
-/** Why a telegram list row is marked. Extensible — more reasons may follow. */
-export type MarkReason = 'mouse' | 'goto' | 'context' | 'manual' | 'auto' | 'hidden';
+/** Row flags that used to be mark reasons. A row is marked or mouse-selected independently. */
 
-/** Time-Delta-Context mark reason (implicit from the soft context window; actionable). */
-export const CONTEXT_MARK_REASONS: readonly MarkReason[] = ['context'];
-
-/** Per-telegram mark reasons (anchorKey → non-empty reason list). */
-export type MarkReasonsMap = Record<string, MarkReason[]>;
-
-export const MARK_REASONS: readonly MarkReason[] = ['mouse', 'goto', 'context', 'manual', 'auto', 'hidden'];
-
-export function isContextMarkReason(reason: MarkReason): boolean {
-  return reason === 'context';
+export function addKeys(keys: readonly string[], extra: Iterable<string>): string[] {
+  const have = new Set(keys);
+  let next: string[] | null = null;
+  for (const key of extra) {
+    if (!key || have.has(key)) continue;
+    have.add(key);
+    if (!next) next = keys.slice();
+    next.push(key);
+  }
+  return next ?? (keys as string[]);
 }
 
-export function isHiddenMarkReason(reason: MarkReason): boolean {
-  return reason === 'hidden';
+export function removeKeys(keys: readonly string[], drop: Iterable<string>): string[] {
+  const gone = drop instanceof Set ? drop : new Set(drop);
+  if (gone.size === 0) return keys as string[];
+  const next = keys.filter(key => !gone.has(key));
+  return next.length === keys.length ? (keys as string[]) : next;
 }
 
-export function isMarked(map: MarkReasonsMap, key: string): boolean {
-  return (map[key]?.length ?? 0) > 0;
+export function toggleKey(keys: readonly string[], key: string): string[] {
+  return keys.includes(key) ? keys.filter(k => k !== key) : [...keys, key];
 }
 
-export function hasMarkReason(map: MarkReasonsMap, key: string, reason: MarkReason): boolean {
-  return !!map[key]?.includes(reason);
+/** The list is exactly `next`, in that order, without duplicates. */
+export function soleKeys(next: Iterable<string>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const key of next) {
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
 }
 
-export function markedKeysFrom(map: MarkReasonsMap): string[] {
-  return Object.keys(map).filter(k => (map[k]?.length ?? 0) > 0);
-}
-
-/** Keys with the `hidden` reason — always omitted from the list. */
-export function hiddenKeysFrom(map: MarkReasonsMap): string[] {
-  return Object.keys(map).filter(k => hasMarkReason(map, k, 'hidden'));
+export interface LegacyMarkFlags {
+  markedKeys: string[];
+  mouseSelectedKeys: string[];
+  hiddenKeys: string[];
 }
 
 /**
- * Marked keys that are not hidden — always kept in the list, and what the
- * top marks-pill / prev-next act on.
+ * Split a stored reason map. `manual` becomes the marked flag, `mouse` the
+ * selection flag, `hidden` the hide flag. `goto`, `auto`, and `context` are
+ * not reasons anymore and are dropped.
  */
-export function visibleMarkedKeysFrom(map: MarkReasonsMap): string[] {
-  return Object.keys(map).filter(
-    k => (map[k]?.length ?? 0) > 0 && !hasMarkReason(map, k, 'hidden'),
-  );
-}
-
-/** @deprecated alias — visible (non-hidden) marked keys. */
-export function actionableMarkedKeysFrom(map: MarkReasonsMap): string[] {
-  return visibleMarkedKeysFrom(map);
-}
-
-export function isOnlyContextMark(map: MarkReasonsMap, key: string): boolean {
-  const reasons = map[key];
-  return !!reasons && reasons.length > 0 && reasons.every(isContextMarkReason);
-}
-
-function withReasons(map: MarkReasonsMap, key: string, reasons: MarkReason[]): MarkReasonsMap {
-  const next = { ...map };
-  if (reasons.length === 0) delete next[key];
-  else next[key] = reasons;
-  return next;
-}
-
-/** Add `reason` to `key` (no-op if already present). */
-export function addMarkReason(map: MarkReasonsMap, key: string, reason: MarkReason): MarkReasonsMap {
-  const cur = map[key] ?? [];
-  if (cur.includes(reason)) return map;
-  return withReasons(map, key, [...cur, reason]);
-}
-
-/** Remove `reason` from `key`; drops the entry when no reasons remain. */
-export function removeMarkReason(map: MarkReasonsMap, key: string, reason: MarkReason): MarkReasonsMap {
-  const cur = map[key];
-  if (!cur?.includes(reason)) return map;
-  return withReasons(map, key, cur.filter(r => r !== reason));
-}
-
-/** Toggle `reason` on `key`. */
-export function toggleMarkReason(map: MarkReasonsMap, key: string, reason: MarkReason): MarkReasonsMap {
-  return hasMarkReason(map, key, reason)
-    ? removeMarkReason(map, key, reason)
-    : addMarkReason(map, key, reason);
-}
-
-/**
- * Give `reason` only to `keys` (clears that reason everywhere else).
- * Other reasons on those keys are preserved.
- */
-export function setSoleMarkReason(
-  map: MarkReasonsMap,
-  reason: MarkReason,
-  keys: Iterable<string>,
-): MarkReasonsMap {
-  const want = new Set(keys);
-  let next: MarkReasonsMap = { ...map };
-  for (const key of Object.keys(next)) {
-    if (want.has(key)) continue;
-    next = removeMarkReason(next, key, reason);
+export function splitLegacyMarkReasons(raw: unknown): LegacyMarkFlags {
+  const markedKeys: string[] = [];
+  const mouseSelectedKeys: string[] = [];
+  const hiddenKeys: string[] = [];
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { markedKeys, mouseSelectedKeys, hiddenKeys };
   }
-  for (const key of want) {
-    next = addMarkReason(next, key, reason);
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (!key || !Array.isArray(val)) continue;
+    const reasons = val.filter((r): r is string => typeof r === 'string');
+    if (reasons.includes('manual')) markedKeys.push(key);
+    if (reasons.includes('mouse')) mouseSelectedKeys.push(key);
+    if (reasons.includes('hidden')) hiddenKeys.push(key);
   }
-  return next;
-}
-
-/** Drop every reason from every key. */
-export function clearAllMarks(map: MarkReasonsMap): MarkReasonsMap {
-  return Object.keys(map).length === 0 ? map : {};
-}
-
-/** Keep only `hidden` on each key (for Clear marks). */
-export function clearNonHiddenReasons(map: MarkReasonsMap): MarkReasonsMap {
-  const next: MarkReasonsMap = {};
-  for (const [key, reasons] of Object.entries(map)) {
-    if (reasons.includes('hidden')) next[key] = ['hidden'];
-  }
-  return next;
-}
-
-/** Remove `hidden` everywhere (for Clear hidden). */
-export function clearHiddenReasons(map: MarkReasonsMap): MarkReasonsMap {
-  let next = map;
-  for (const key of Object.keys(map)) {
-    next = removeMarkReason(next, key, 'hidden');
-  }
-  return next;
-}
-
-/**
- * Sync the `context` reason to match `contextKeys`: add for members,
- * remove for keys that left the window.
- */
-export function syncContextMarkReasons(
-  map: MarkReasonsMap,
-  contextKeys: ReadonlySet<string> | undefined | null,
-): MarkReasonsMap {
-  const want = contextKeys ?? new Set<string>();
-  let next = map;
-  for (const key of Object.keys(next)) {
-    if (!want.has(key) && hasMarkReason(next, key, 'context')) {
-      next = removeMarkReason(next, key, 'context');
-    }
-  }
-  for (const key of want) {
-    next = addMarkReason(next, key, 'context');
-  }
-  return next;
-}
-
-/**
- * Keep `auto` only on the latest selected key (or nowhere if null).
- * Skips keys that already have a user `manual` mark; never keeps both.
- */
-export function syncAutoMarkReason(
-  map: MarkReasonsMap,
-  latestKey: string | null,
-): MarkReasonsMap {
-  let next = map;
-  for (const key of Object.keys(next)) {
-    if (key === latestKey) continue;
-    if (hasMarkReason(next, key, 'auto')) {
-      next = removeMarkReason(next, key, 'auto');
-    }
-  }
-  if (!latestKey) return next;
-  if (hasMarkReason(next, latestKey, 'manual')) {
-    return removeMarkReason(next, latestKey, 'auto');
-  }
-  return addMarkReason(next, latestKey, 'auto');
+  return { markedKeys, mouseSelectedKeys, hiddenKeys };
 }

@@ -31,7 +31,7 @@ export interface DeltaExpansionResult<T> {
  *   be limited to single messages (#319); matches are shown either way.
  */
 export function expandWithDeltaContext<T extends Timestamped>(
-  items: T[],
+  items: readonly T[],
   matches: boolean[],
   anchorKeyOf: (t: T) => string,
   flaggedKeys: ReadonlySet<string>,

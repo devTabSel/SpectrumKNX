@@ -22,7 +22,6 @@ import {
 import { DeviceStatusOverlay } from './components/DeviceStatusOverlay';
 import { TelegramTable, type SortConfig, type SortKey, type ListGotoRequest } from './components/TelegramTable';
 import { anchorKey } from './utils/anchorKey';
-import type { MarkReasonsMap } from './utils/markReasons';
 import type { MarkColorIndexMap } from './utils/markColors';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel } from './utils/sortConfig';
 import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTelegramView';
@@ -51,7 +50,19 @@ import { LastSeenOverlay } from './components/LastSeenOverlay';
 import { StatisticsOverlay } from './components/StatisticsOverlay';
 import { BuildingOverlay, type DeviceNode } from './components/BuildingOverlay';
 import { DatabaseOverlay } from './components/DatabaseOverlay';
-import { WriteToBusPanel } from './components/WriteToBusPanel';
+import {
+  WriteToBusPanel,
+  type CtrlSendRequest,
+  type SendPanelCommand,
+  type LinkedRowStatus,
+} from './components/WriteToBusPanel';
+import {
+  correspondenceKeyFromDraft,
+  type SendCorrespondenceKey,
+} from './utils/sendCorrespondence';
+import type { BusPayload } from './utils/dptValues';
+import { DptCatalogProvider } from './components/DptCatalogContext';
+import { GaReadPhaseProvider } from './components/GaReadPhase';
 import { UpdateNotification } from './components/UpdateNotification';
 import { LegacyTimestampBanner } from './components/LegacyTimestampBanner';
 import { LoginScreen } from './components/LoginScreen';
@@ -240,6 +251,7 @@ function App() {
   const [quickFilterOpen, setQuickFilterOpen] = useState(initialUiState.quickFilter.open);
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(initialUiState.quickFilter.enabled);
   const [quickPatterns, setQuickPatterns] = useState(initialUiState.quickFilter.patterns);
+  const [quickColumnEnabled, setQuickColumnEnabled] = useState(initialUiState.quickFilter.columnEnabled);
   const [listFollow, setListFollow] = useState(initialUiState.listFollow);
   const [listAnchorKey, setListAnchorKey] = useState<string | null>(initialUiState.listAnchorKey);
   const [infoBarOpen, setInfoBarOpen] = useState(initialUiState.infoBarOpen);
@@ -278,6 +290,27 @@ function App() {
   const [latestTelegram, setLatestTelegram] = useState<Telegram | null>(null);
   const [isDatabaseOpen, setIsDatabaseOpen] = useState(initialWorkspace?.view === 'database');
   const [isSendOpen, setIsSendOpen] = useState(false);
+  /** GAs currently present in the send panel (TT send-icon opaque/blue; panel visibility irrelevant). */
+  const [sendPanelAddresses, setSendPanelAddresses] = useState<ReadonlySet<string>>(() => new Set());
+  /** Ctrl-click send-icon request consumed by WriteToBusPanel (clear or insert top row). */
+  const [ctrlSendRequest, setCtrlSendRequest] = useState<CtrlSendRequest | null>(null);
+  const ctrlSendNonceRef = useRef(0);
+  /** Popover ↔ panel schedule correspondence. */
+  const [sendPanelCommand, setSendPanelCommand] = useState<SendPanelCommand | null>(null);
+  const sendPanelCmdNonceRef = useRef(0);
+  const [popoverLinkedRowId, setPopoverLinkedRowId] = useState<string | null>(null);
+  const [linkedRowStatuses, setLinkedRowStatuses] = useState<Record<string, LinkedRowStatus>>({});
+  const [gaJobStatuses, setGaJobStatuses] = useState<Record<string, LinkedRowStatus>>({});
+  const activeSendJobAddresses = useMemo(
+    () => new Set(Object.keys(gaJobStatuses)),
+    [gaJobStatuses],
+  );
+  const pendingEnsureRef = useRef<{
+    nonce: number;
+    kind: 'write' | 'read';
+    payload?: BusPayload;
+    response?: boolean;
+  } | null>(null);
   const [backendVersion, setBackendVersion] = useState<string>('loading...');
   const [projectStatus, setProjectStatus] = useState<{
     upload_feature_active: boolean;
@@ -328,6 +361,7 @@ function App() {
   // reappear instantly after a reload and only the gaps are fetched (#211).
   const {
     telegrams: liveTelegrams,
+    ingested: ingestedTelegrams,
     addLive,
     setConnected: setCacheConnected,
     setPaused: setCachePaused,
@@ -343,6 +377,8 @@ function App() {
   // Snapshot frozen in auto/manual; flush moves mode to playing without
   // necessarily enabling live-follow (edge flush keeps the viewport + pill).
   const isPaused = cachePausedForMode(pauseMode);
+  // Popover, send panel, and list READ color follow the full buffer, including
+  // telegrams still sitting in the pause backlog.
 
   // ── Rate Estimation ─────────────────────────────────────────────────────────
   const [busRate, setBusRate] = useState(0);
@@ -585,8 +621,9 @@ function App() {
   // Playing → Pause latches as manual. While paused, the Pause icon toggles
   // auto ↔ manual (stays frozen). Manual→Auto keeps the backlog in the pause
   // buffer; the table fills the fill-spacer with its oldest row and feeds the
-  // rest in as the user scrolls toward the live edge. Empty buffer ("No data
-  // available") locks Paused manually. Resume via the newer pill while
+  // rest in as the user scrolls toward the live edge. An empty buffer disables
+  // the pause toggle; a plain clear leaves play/pause as it was, Ctrl-click
+  // switches to automatic pause. Resume via the newer pill while
   // auto-paused, Ctrl-click on that pill while manually paused, or an auto
   // edge-flush / follow-while-auto. A plain pill click keeps manual pause and
   // publishes the backlog so the view can land on the newest telegram.
@@ -659,19 +696,25 @@ function App() {
   const toggleColumn = (col: string) =>
     setVisibleColumns(prev => ({ ...prev, [col]: !prev[col] }));
 
-  // ── Telegram list marks (#310) ──────────────────────────────────────────────
-  // Lifted above the conditionally-rendered panels so marked rows survive
-  // main-panel navigation. Keys carry mark reasons (mouse / goto / context /
-  // manual); keyed by the table's anchorKey identity. Restored from ui session.
-  const [telegramMarkReasons, setTelegramMarkReasons] = useState<MarkReasonsMap>(
-    () => initialUiState.markReasons,
+  // ── Telegram list flags (#310) ─────────────────────────────────────────────
+  // Lifted above the conditionally-rendered panels so they survive main-panel
+  // navigation. Marked and mouse selection restore from the ui session. Goto
+  // and last-selected are live only.
+  const [telegramMarkedKeys, setTelegramMarkedKeys] = useState<string[]>(
+    () => initialUiState.markedKeys,
+  );
+  const [telegramMouseSelectedKeys, setTelegramMouseSelectedKeys] = useState<string[]>(
+    () => initialUiState.mouseSelectedKeys,
+  );
+  const [telegramHiddenKeys, setTelegramHiddenKeys] = useState<string[]>(
+    () => initialUiState.hiddenKeys,
   );
   const [telegramMarkColorIndices, setTelegramMarkColorIndices] = useState<MarkColorIndexMap>(
     () => initialUiState.markColorIndices,
   );
-  const [lastMarkedTelegramKey, setLastMarkedTelegramKey] = useState<string | null>(null);
-  // Write-to-bus "go to": center this telegram in the list. The table marks it
-  // only when the current filters still show that exact telegram.
+  const [lastSelectedTelegramKey, setLastSelectedTelegramKey] = useState<string | null>(null);
+  // Write-to-bus "go to": center this telegram in the list. The table selects
+  // it when that exact telegram is in the buffer.
   const listGotoSeq = useRef(0);
   const [listGoto, setListGoto] = useState<ListGotoRequest | null>(null);
 
@@ -695,6 +738,7 @@ function App() {
           open: quickFilterOpen,
           enabled: quickFilterEnabled,
           patterns: quickPatterns,
+          columnEnabled: quickColumnEnabled,
         },
         listFollow,
         listAnchorKey,
@@ -706,7 +750,9 @@ function App() {
         lastSeenLive,
         lastSeenSearch,
         filtersEnabled,
-        markReasons: telegramMarkReasons,
+        markedKeys: telegramMarkedKeys,
+        mouseSelectedKeys: telegramMouseSelectedKeys,
+        hiddenKeys: telegramHiddenKeys,
         markColorIndices: telegramMarkColorIndices,
         flaggedKeys: flaggedTelegramKeys,
         contextForAllMatches,
@@ -717,6 +763,7 @@ function App() {
     quickFilterOpen,
     quickFilterEnabled,
     quickPatterns,
+    quickColumnEnabled,
     listFollow,
     listAnchorKey,
     infoBarOpen,
@@ -727,7 +774,9 @@ function App() {
     lastSeenLive,
     lastSeenSearch,
     filtersEnabled,
-    telegramMarkReasons,
+    telegramMarkedKeys,
+    telegramMouseSelectedKeys,
+    telegramHiddenKeys,
     telegramMarkColorIndices,
     flaggedTelegramKeys,
     contextForAllMatches,
@@ -789,9 +838,10 @@ function App() {
     setActivePanel('list');
   }, [liveTelegrams, handleListFollowChange]);
 
-  // Last value in a write row: open the telegram list and center that telegram.
-  // Marking happens in the table, and only if the telegram is not filtered out.
-  const handleGotoTelegram = useCallback((telegram: Telegram) => {
+  // Last value in a write row: open the telegram list on that telegram.
+  // Ctrl/Cmd and Shift are the same selection modifiers as a row click.
+  // The table selects it once the row is visible, and only if it is in the buffer.
+  const handleGotoTelegram = useCallback((telegram: Telegram, mods?: { additive?: boolean; range?: boolean }) => {
     handleListFollowChange(false);
     // Drop a restored anchor so mounting the list does not pin a different row
     // after this jump. The table captures a new anchor once it has centered.
@@ -799,8 +849,134 @@ function App() {
     setIsDatabaseOpen(false);
     setActivePanel('list');
     listGotoSeq.current += 1;
-    setListGoto({ id: listGotoSeq.current, telegram });
+    setListGoto({
+      id: listGotoSeq.current,
+      telegram,
+      additive: mods?.additive,
+      range: mods?.range,
+    });
   }, [handleListFollowChange]);
+
+  const handleAltSend = useCallback(() => {
+    setIsSendOpen(o => {
+      if (o) setCtrlSendRequest(null);
+      return !o;
+    });
+  }, []);
+
+  const handleCtrlSend = useCallback((info: {
+    address: string;
+    name?: string | null;
+    dptMain?: number | null;
+    dptSub?: number | null;
+  }) => {
+    setIsSendOpen(true);
+    ctrlSendNonceRef.current += 1;
+    setCtrlSendRequest({ ...info, nonce: ctrlSendNonceRef.current });
+  }, []);
+
+  const handleCtrlSendHandled = useCallback(() => {
+    setCtrlSendRequest(null);
+  }, []);
+
+  const handlePanelAddressesChange = useCallback((addresses: string[]) => {
+    setSendPanelAddresses(prev => {
+      if (prev.size === addresses.length && addresses.every(a => prev.has(a))) return prev;
+      return new Set(addresses);
+    });
+  }, []);
+
+  const handleLinkedRowStatusesChange = useCallback((statuses: Record<string, LinkedRowStatus>) => {
+    setLinkedRowStatuses(statuses);
+  }, []);
+
+  const handleGaJobStatusesChange = useCallback((byAddress: Record<string, LinkedRowStatus>) => {
+    setGaJobStatuses(byAddress);
+  }, []);
+
+  // Delay/every commit only drops the link. The panel row is created when Write/Read starts the job.
+  const handleScheduleCommit = useCallback((draft: SendCorrespondenceKey & { name?: string | null }) => {
+    const key = correspondenceKeyFromDraft(draft);
+    if (!key.delay && !key.every) setPopoverLinkedRowId(null);
+  }, []);
+
+  const handleWriteWithSchedule = useCallback((
+    draft: SendCorrespondenceKey & { name?: string | null },
+    payload: BusPayload,
+    opts?: { response?: boolean },
+  ) => {
+    const key = correspondenceKeyFromDraft(draft);
+    sendPanelCmdNonceRef.current += 1;
+    const nonce = sendPanelCmdNonceRef.current;
+    pendingEnsureRef.current = { nonce, kind: 'write', payload, response: opts?.response };
+    setSendPanelCommand({ type: 'ensureRow', nonce, key, name: draft.name });
+  }, []);
+
+  const handleReadWithSchedule = useCallback((
+    draft: SendCorrespondenceKey & { name?: string | null },
+  ) => {
+    const key = correspondenceKeyFromDraft(draft);
+    sendPanelCmdNonceRef.current += 1;
+    const nonce = sendPanelCmdNonceRef.current;
+    pendingEnsureRef.current = { nonce, kind: 'read' };
+    setSendPanelCommand({ type: 'ensureRow', nonce, key, name: draft.name });
+  }, []);
+
+  const handleCancelLinked = useCallback((rowId?: string) => {
+    const id = rowId ?? popoverLinkedRowId;
+    if (!id) return;
+    sendPanelCmdNonceRef.current += 1;
+    setSendPanelCommand({
+      type: 'cancelRow',
+      nonce: sendPanelCmdNonceRef.current,
+      rowId: id,
+    });
+  }, [popoverLinkedRowId]);
+
+  const handleClearLinked = useCallback((rowId?: string) => {
+    const id = rowId ?? popoverLinkedRowId;
+    if (!id) return;
+    sendPanelCmdNonceRef.current += 1;
+    setSendPanelCommand({
+      type: 'clearRow',
+      nonce: sendPanelCmdNonceRef.current,
+      rowId: id,
+    });
+  }, [popoverLinkedRowId]);
+
+  const handleSendPanelCommandHandled = useCallback((result: {
+    nonce: number;
+    rowId: string | null;
+    created: boolean;
+    matched: boolean;
+  }) => {
+    const pending = pendingEnsureRef.current;
+    if (pending && pending.nonce === result.nonce) {
+      pendingEnsureRef.current = null;
+      if (result.rowId) setPopoverLinkedRowId(result.rowId);
+      if (pending.kind === 'write' && result.rowId && pending.payload) {
+        sendPanelCmdNonceRef.current += 1;
+        setSendPanelCommand({
+          type: 'writeViaRow',
+          nonce: sendPanelCmdNonceRef.current,
+          rowId: result.rowId,
+          payload: pending.payload,
+          response: pending.response,
+        });
+        return;
+      }
+      if (pending.kind === 'read' && result.rowId) {
+        sendPanelCmdNonceRef.current += 1;
+        setSendPanelCommand({
+          type: 'readViaRow',
+          nonce: sendPanelCmdNonceRef.current,
+          rowId: result.rowId,
+        });
+        return;
+      }
+    }
+    setSendPanelCommand(null);
+  }, []);
 
   const handleQuickLastSeen = useCallback((address: string | string[], mode: 'ga' | 'pa') => {
     setLastSeenAddresses(Array.isArray(address) ? address : [address]);
@@ -845,12 +1021,16 @@ function App() {
     quickFilterOpen,
     quickFilterEnabled,
     quickPatterns,
+    quickColumnEnabled,
     flaggedKeys: flaggedTelegramKeys,
     contextForAllMatches,
-    markReasons: telegramMarkReasons,
+    markedKeys: telegramMarkedKeys,
+    mouseSelectedKeys: telegramMouseSelectedKeys,
+    lastSelectedKey: lastSelectedTelegramKey,
   }), [
-    appliedFilters, filtersEnabled, quickFilterOpen, quickFilterEnabled, quickPatterns,
-    flaggedTelegramKeys, contextForAllMatches, telegramMarkReasons,
+    appliedFilters, filtersEnabled, quickFilterOpen, quickFilterEnabled, quickPatterns, quickColumnEnabled,
+    flaggedTelegramKeys, contextForAllMatches, telegramMarkedKeys, telegramMouseSelectedKeys,
+    lastSelectedTelegramKey,
   ]);
 
   const liveViewRef = useRef<LiveTelegramView | null>(null);
@@ -896,6 +1076,8 @@ function App() {
   }
 
   return (
+    <DptCatalogProvider value={filterOptions.dpts}>
+    <GaReadPhaseProvider rows={ingestedTelegrams}>
     <div className="container dashboard-grid" style={{ padding: '1.5rem', gap: '1.5rem' }}>
 
       {/* ── Main area (Full Width) ─── */}
@@ -951,13 +1133,15 @@ function App() {
                     {/* Buffer-related actions live with the count (#284): clear + load history */}
                     <button
                       className="icon-button"
-                      onClick={() => {
-                        setPauseMode('manual');
-                        setCachePaused(true);
+                      onClick={e => {
                         setListFollow(false);
+                        if (e.ctrlKey || e.metaKey) {
+                          setPauseMode('auto');
+                          setCachePaused(true);
+                        }
                         void clearTelegrams();
                       }}
-                      title="Clear (also wipes the local telegram cache)"
+                      title="Clear (also wipes the local telegram cache). Ctrl-click pauses automatically."
                       style={{ color: 'var(--text-dim)', padding: '0.15rem' }}
                     >
                       <Trash2 size={15} />
@@ -1040,7 +1224,12 @@ function App() {
                   }}>
                     <button
                       className="icon-button"
-                      onClick={() => setIsSendOpen(o => !o)}
+                      onClick={() => {
+                        setIsSendOpen(o => {
+                          if (o) setCtrlSendRequest(null);
+                          return !o;
+                        });
+                      }}
                       title="Send / read telegrams"
                       aria-pressed={isSendOpen}
                       style={{
@@ -1324,14 +1513,25 @@ function App() {
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             {/* Full width of main, above the filter column so the bar is not
                 inset beside the filter pane. */}
-            {isSendOpen && serverConfig?.status?.write_enabled && (
-              <WriteToBusPanel
-                targets={filterOptions.targets}
-                dptCatalog={filterOptions.dpts}
-                onClose={() => setIsSendOpen(false)}
-                latestTelegram={latestTelegram}
-                onGotoTelegram={handleGotoTelegram}
-              />
+            {serverConfig?.status?.write_enabled && (
+              <div
+                style={{ display: isSendOpen ? undefined : 'none' }}
+                aria-hidden={!isSendOpen}
+              >
+                <WriteToBusPanel
+                  targets={filterOptions.targets}
+                  dptCatalog={filterOptions.dpts}
+                  latestTelegram={latestTelegram}
+                  onGotoTelegram={handleGotoTelegram}
+                  onPanelAddressesChange={handlePanelAddressesChange}
+                  ctrlSendRequest={ctrlSendRequest}
+                  onCtrlSendHandled={handleCtrlSendHandled}
+                  sendPanelCommand={sendPanelCommand}
+                  onSendPanelCommandHandled={handleSendPanelCommandHandled}
+                  onLinkedRowStatusesChange={handleLinkedRowStatusesChange}
+                  onGaJobStatusesChange={handleGaJobStatusesChange}
+                />
+              </div>
             )}
             {/* Content row: filter panel + table */}
             <div style={{ flex: 1, overflow: 'hidden', display: 'flex' }}>
@@ -1348,6 +1548,7 @@ function App() {
                     projectLoaded={projectStatus?.project_loaded}
                     onUploadProject={() => setIsSettingsOpen(true)}
                     writeEnabled={serverConfig?.status?.write_enabled}
+                    onGotoTelegram={handleGotoTelegram}
                     filtersEnabled={filtersEnabled}
                     onFiltersEnabledChange={handleFiltersEnabledChange}
                   />
@@ -1370,6 +1571,7 @@ function App() {
                     onFilterGAs={handleFilterGAs}
                     onShowGaTelegrams={handleShowGaTelegrams}
                     onLastSeen={handleQuickLastSeen}
+                    onGotoTelegram={handleGotoTelegram}
                   />
                 ) : isLastSeenOpen ? (
                   <LastSeenOverlay
@@ -1392,6 +1594,7 @@ function App() {
                     onFilterDevice={(pa) => handleQuickFilter('sources', pa)}
                     onFilterGAs={handleFilterGAs}
                     onVisualizeGAs={handleVisualizeGAs}
+                    onGotoTelegram={handleGotoTelegram}
                   />
                 ) : isStatisticsOpen ? (
                   <StatisticsOverlay
@@ -1415,6 +1618,7 @@ function App() {
                     onLastSeen={handleQuickLastSeen}
                     onVisualizeGAs={handleVisualizeGAs}
                     onDeviceStatus={setStatusDevice}
+                    onGotoTelegram={handleGotoTelegram}
                     writeEnabled={serverConfig?.status?.write_enabled}
                     latestTelegram={latestTelegram}
                     searchQuery={buildingSearch}
@@ -1455,6 +1659,7 @@ function App() {
                     <TelegramTable
                     telegrams={filteredLiveTelegrams}
                     forceIncludeFrom={sortedLiveTelegrams}
+                    readPhaseTelegrams={ingestedTelegrams}
                     pausedTelegrams={pausedTelegrams}
                     filtersEnabled={filtersEnabled}
                     visibleColumns={visibleColumns}
@@ -1465,12 +1670,27 @@ function App() {
                     onQuickVisualize={handleQuickVisualize}
                     onQuickLastSeen={handleQuickLastSeen}
                     canSend={serverConfig?.status?.write_enabled}
+                    onGotoTelegram={handleGotoTelegram}
+                    onAltSend={handleAltSend}
+                    onCtrlSend={handleCtrlSend}
+                    sendPanelAddresses={sendPanelAddresses}
+                    activeSendJobAddresses={activeSendJobAddresses}
+                    gaJobStatuses={gaJobStatuses}
+                    linkedStatus={popoverLinkedRowId ? linkedRowStatuses[popoverLinkedRowId] ?? null : null}
+                    onScheduleCommit={handleScheduleCommit}
+                    onWriteWithSchedule={handleWriteWithSchedule}
+                    onReadWithSchedule={handleReadWithSchedule}
+                    onCancelLinked={handleCancelLinked}
+                    onClearLinked={handleClearLinked}
+                    latestTelegram={latestTelegram}
                     quickFilterOpen={quickFilterOpen}
                     onQuickFilterOpenChange={setQuickFilterOpen}
                     quickFilterEnabled={quickFilterEnabled}
                     onQuickFilterEnabledChange={setQuickFilterEnabled}
                     quickPatterns={quickPatterns}
                     onQuickPatternsChange={setQuickPatterns}
+                    quickColumnEnabled={quickColumnEnabled}
+                    onQuickColumnEnabledChange={setQuickColumnEnabled}
                     onDeltaContextChange={handleDeltaContextChange}
                     onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
                     listFollow={listFollow}
@@ -1484,12 +1704,16 @@ function App() {
                     listAnchorKey={listAnchorKey}
                     onListAnchorKeyChange={setListAnchorKey}
                     viewChangeToken={ttViewChangeToken}
-                    markReasons={telegramMarkReasons}
-                    onMarkReasonsChange={setTelegramMarkReasons}
+                    markedKeys={telegramMarkedKeys}
+                    onMarkedKeysChange={setTelegramMarkedKeys}
+                    mouseSelectedKeys={telegramMouseSelectedKeys}
+                    onMouseSelectedKeysChange={setTelegramMouseSelectedKeys}
+                    hiddenKeys={telegramHiddenKeys}
+                    onHiddenKeysChange={setTelegramHiddenKeys}
                     markColorIndices={telegramMarkColorIndices}
                     onMarkColorIndicesChange={setTelegramMarkColorIndices}
-                    lastMarkedKey={lastMarkedTelegramKey}
-                    onLastMarkedKeyChange={setLastMarkedTelegramKey}
+                    lastSelectedKey={lastSelectedTelegramKey}
+                    onLastSelectedKeyChange={setLastSelectedTelegramKey}
                     flaggedKeys={flaggedTelegramKeys}
                     onFlaggedKeysChange={setFlaggedTelegramKeys}
                     contextForAllMatches={contextForAllMatches}
@@ -1594,9 +1818,10 @@ function App() {
         .highlight { color: var(--text-dim); }
         .highlight-target { color: var(--accent-primary); font-weight: 500; }
         .subtitle-name { font-size: 0.7rem; color: var(--text-dim); margin-top: 0.15rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .raw-badge { background: var(--bg-tag); padding: 0.15rem 0.4rem; border-radius: 3px; font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: var(--text-dim); display: inline-block; border: 1px solid var(--border-subtle); }
       `}</style>
     </div>
+    </GaReadPhaseProvider>
+    </DptCatalogProvider>
   );
 }
 

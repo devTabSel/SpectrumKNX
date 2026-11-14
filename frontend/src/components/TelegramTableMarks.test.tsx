@@ -1,4 +1,4 @@
-import { render, fireEvent, screen } from '@testing-library/react';
+import { render, fireEvent, screen, act } from '@testing-library/react';
 import { expect, test, vi, beforeAll } from 'vitest';
 import { TelegramTable, type SortConfig } from './TelegramTable';
 import { makeTelegram } from '../test/telegramFactory';
@@ -95,93 +95,173 @@ test('mouse selection marks the row as latest; a second click replaces', () => {
   fireEvent.click(rows(container)[0]);
   expect(marked(container)).toEqual([true, false, false, false, false]);
   expect(latestIdx(container)).toBe(0);
-  // Latest selection applies an `auto` rail mark (selected-not-latest wash).
-  expect(railRoot(rows(container)[0]).style.background).toContain('16%');
+  // Selection does not set the marked flag, so the rail stays empty.
+  expect(railRoot(rows(container)[0]).style.background).toBe('');
 
   fireEvent.click(rows(container)[2]);
   expect(marked(container)).toEqual([false, false, true, false, false]);
   expect(latestIdx(container)).toBe(2);
-  // `auto` moves with latest; the previous row's rail clears.
   expect(railRoot(rows(container)[0]).style.background).toBe('');
-  expect(railRoot(rows(container)[2]).style.background).toContain('16%');
+  expect(railRoot(rows(container)[2]).style.background).toBe('');
 });
 
-test('plain mousedrag does not mark so text selection can stick', () => {
+test('mousedown selects the row immediately, and a following drag keeps that selection', () => {
   const { container } = renderTable();
   const row = rows(container)[1];
   fireEvent.mouseDown(row, { clientX: 20, clientY: 30 });
-  fireEvent.click(row, { clientX: 80, clientY: 30 });
-  expect(marked(container)).toEqual([false, false, false, false, false]);
-
-  // A click without meaningful movement still marks.
-  fireEvent.mouseDown(row, { clientX: 20, clientY: 30 });
-  fireEvent.click(row, { clientX: 22, clientY: 31 });
   expect(marked(container)).toEqual([false, true, false, false, false]);
+  expect(latestIdx(container)).toBe(1);
+
+  fireEvent.click(row, { clientX: 80, clientY: 30 });
+  expect(marked(container)).toEqual([false, true, false, false, false]);
+  expect(latestIdx(container)).toBe(1);
 });
 
-test('rail click toggles manual mark without changing mouse selection', () => {
-  const onMarkReasonsChange = vi.fn();
-  const onLastMarkedKeyChange = vi.fn();
-  const { container } = renderTable({ onMarkReasonsChange, onLastMarkedKeyChange });
+test('mousedown pins the clicked row and stops live-follow before selection', () => {
+  const order: string[] = [];
+  const onListFollowChange = vi.fn(() => { order.push('follow'); });
+  const onListAnchorKeyChange = vi.fn(() => { order.push('anchor'); });
+  const onMouseSelectedKeysChange = vi.fn(() => { order.push('select'); });
+  const { container } = renderTable({
+    listFollow: true,
+    onListFollowChange,
+    onListAnchorKeyChange,
+    onMouseSelectedKeysChange,
+  });
+  const row = rows(container)[2];
+  const key = row.getAttribute('data-akey')!;
+  fireEvent.mouseDown(row, { clientX: 12, clientY: 12, ctrlKey: true });
+
+  expect(onListFollowChange).toHaveBeenCalledWith(false);
+  expect(onListAnchorKeyChange).toHaveBeenCalledWith(key);
+  expect(onMouseSelectedKeysChange).toHaveBeenCalledWith([key]);
+  expect(order.indexOf('anchor')).toBeLessThan(order.indexOf('select'));
+  expect(order.indexOf('follow')).toBeLessThan(order.indexOf('select'));
+  fireEvent.mouseUp(row, { clientX: 12, clientY: 12, ctrlKey: true });
+});
+
+test('ctrl-mousedown adds to the selection; a click without mousedown still selects', () => {
+  const onMouseSelectedKeysChange = vi.fn();
+  const { container } = renderTable({ onMouseSelectedKeysChange });
+  fireEvent.click(rows(container)[0]);
+  const key0 = rows(container)[0].getAttribute('data-akey')!;
+  expect(onMouseSelectedKeysChange).toHaveBeenLastCalledWith([key0]);
+
+  fireEvent.mouseDown(rows(container)[2], { clientX: 8, clientY: 8, ctrlKey: true });
+  const key2 = rows(container)[2].getAttribute('data-akey')!;
+  expect(onMouseSelectedKeysChange).toHaveBeenLastCalledWith([key0, key2]);
+  fireEvent.mouseUp(rows(container)[2], { clientX: 8, clientY: 8, ctrlKey: true });
+});
+
+test('a plain mousedown selects before mouseup, and mouseup does not select again', () => {
+  const onMouseSelectedKeysChange = vi.fn();
+  const { container } = renderTable({ onMouseSelectedKeysChange });
+  const row = rows(container)[1];
+  const key = row.getAttribute('data-akey')!;
+  fireEvent.mouseDown(row, { clientX: 0, clientY: 0 });
+  expect(onMouseSelectedKeysChange).toHaveBeenCalledTimes(1);
+  expect(onMouseSelectedKeysChange).toHaveBeenCalledWith([key]);
+  expect(row.classList.contains('marked')).toBe(true);
+  fireEvent.mouseUp(row, { clientX: 30, clientY: 0 });
+  expect(onMouseSelectedKeysChange).toHaveBeenCalledTimes(1);
+});
+
+const box = (top: number, bottom: number): DOMRect =>
+  ({ width: 1000, height: bottom - top, top, bottom, left: 0, right: 1000, x: 0, y: top, toJSON: () => {} }) as DOMRect;
+
+test('mouseup leaves the scroll offset when the viewport is already full', () => {
+  const { container } = renderTable();
+  const scroller = container.querySelector('.custom-scrollbar') as HTMLElement;
+  const before = scroller.scrollTop;
+  const row = rows(container)[1];
+  fireEvent.mouseDown(row, { clientX: 6, clientY: 6 });
+  fireEvent.mouseUp(row, { clientX: 6, clientY: 6 });
+  expect(scroller.scrollTop).toBe(before);
+});
+
+test('mouseup scrolls to close a gap under the last row', async () => {
+  const { container } = renderTable();
+  const scroller = container.querySelector('.custom-scrollbar') as HTMLElement;
+  const row = rows(container)[1];
+  fireEvent.mouseDown(row, { clientX: 6, clientY: 6 });
+
+  const previous = Element.prototype.getBoundingClientRect;
+  const previousHeight = Object.getOwnPropertyDescriptor(scroller, 'scrollHeight');
+  Element.prototype.getBoundingClientRect = function (this: Element) {
+    if (this.classList?.contains('custom-scrollbar')) return box(0, 800);
+    if (this.classList?.contains('log-row')) return box(0, 40);
+    return previous.call(this);
+  };
+  Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => 4000 });
+  try {
+    fireEvent.mouseUp(row, { clientX: 6, clientY: 6 });
+    await vi.waitFor(() => expect(scroller.scrollTop).toBeGreaterThan(0));
+  } finally {
+    Element.prototype.getBoundingClientRect = previous;
+    if (previousHeight) Object.defineProperty(scroller, 'scrollHeight', previousHeight);
+    else delete (scroller as unknown as { scrollHeight?: number }).scrollHeight;
+  }
+});
+
+test('rail click toggles the marked flag without changing mouse selection', () => {
+  const onMarkedKeysChange = vi.fn();
+  const onMouseSelectedKeysChange = vi.fn();
+  const onLastSelectedKeyChange = vi.fn();
+  const { container } = renderTable({ onMarkedKeysChange, onMouseSelectedKeysChange, onLastSelectedKeyChange });
 
   fireEvent.click(rows(container)[0]);
   const key0 = rows(container)[0].getAttribute('data-akey')!;
-  expect(onLastMarkedKeyChange).toHaveBeenLastCalledWith(key0);
-  onMarkReasonsChange.mockClear();
-  onLastMarkedKeyChange.mockClear();
+  expect(onLastSelectedKeyChange).toHaveBeenLastCalledWith(key0);
+  expect(onMouseSelectedKeysChange).toHaveBeenLastCalledWith([key0]);
+  onMarkedKeysChange.mockClear();
+  onMouseSelectedKeysChange.mockClear();
+  onLastSelectedKeyChange.mockClear();
 
   fireEvent.click(markRail(rows(container)[2]));
   const key2 = rows(container)[2].getAttribute('data-akey')!;
   expect(markRail(rows(container)[2]).getAttribute('title')).toBe('Unmark this message');
-  expect(onLastMarkedKeyChange).not.toHaveBeenCalled();
-  const afterRail = onMarkReasonsChange.mock.calls.at(-1)![0] as Record<string, string[]>;
-  expect(afterRail[key0]).toEqual(['mouse', 'auto']);
-  expect(afterRail[key2]).toEqual(['manual']);
-  // Background / `.marked` follows mouse selection only — rail mark does not tint.
+  expect(onLastSelectedKeyChange).not.toHaveBeenCalled();
+  expect(onMouseSelectedKeysChange).not.toHaveBeenCalled();
+  expect(onMarkedKeysChange).toHaveBeenLastCalledWith([key2]);
+  // Background / `.marked` follows mouse selection only — the marked flag does not tint the row.
   expect(marked(container)).toEqual([true, false, false, false, false]);
   expect(latestIdx(container)).toBe(0);
-  // Manual/`auto` rail uses the selected-but-not-latest wash (not the latest body wash).
   expect(railRoot(rows(container)[2]).style.background).toContain('16%');
-  expect(railRoot(rows(container)[0]).style.background).toContain('16%');
+  expect(railRoot(rows(container)[0]).style.background).toBe('');
   expect(rowBody(rows(container)[0]).style.background).toContain('34%');
 
   fireEvent.click(markRail(rows(container)[2]));
-  const afterToggleOff = onMarkReasonsChange.mock.calls.at(-1)![0] as Record<string, string[]>;
-  expect(afterToggleOff[key2]).toBeUndefined();
-  expect(afterToggleOff[key0]).toEqual(['mouse', 'auto']);
+  expect(onMarkedKeysChange).toHaveBeenLastCalledWith([]);
   expect(marked(container)).toEqual([true, false, false, false, false]);
   expect(railRoot(rows(container)[2]).style.background).toBe('');
 });
 
-test('promoting auto on latest takes the latest wash; demote restores auto', () => {
-  const onMarkReasonsChange = vi.fn();
-  const { container } = renderTable({ onMarkReasonsChange });
+test('marked flag on the last-selected row uses the latest wash and survives a new selection', () => {
+  const onMarkedKeysChange = vi.fn();
+  const onMouseSelectedKeysChange = vi.fn();
+  const { container } = renderTable({ onMarkedKeysChange, onMouseSelectedKeysChange });
 
   fireEvent.click(rows(container)[0]);
   const key0 = rows(container)[0].getAttribute('data-akey')!;
-  expect(railRoot(rows(container)[0]).style.background).toContain('16%');
+  expect(railRoot(rows(container)[0]).style.background).toBe('');
 
-  // Promote auto → manual; rail matches latest body wash.
-  onMarkReasonsChange.mockClear();
   fireEvent.click(markRail(rows(container)[0]));
-  expect(onMarkReasonsChange).toHaveBeenLastCalledWith({ [key0]: ['mouse', 'manual'] });
+  expect(onMarkedKeysChange).toHaveBeenLastCalledWith([key0]);
   expect(railRoot(rows(container)[0]).style.background).toContain('34%');
   expect(railRoot(rows(container)[0]).style.background).toBe(rowBody(rows(container)[0]).style.background);
 
-  // Demote manual → auto again (mark stays, wash back to 16%).
   fireEvent.click(markRail(rows(container)[0]));
-  expect(onMarkReasonsChange).toHaveBeenLastCalledWith({ [key0]: ['mouse', 'auto'] });
-  expect(railRoot(rows(container)[0]).style.background).toContain('16%');
+  expect(onMarkedKeysChange).toHaveBeenLastCalledWith([]);
+  expect(railRoot(rows(container)[0]).style.background).toBe('');
 
-  // Promote again, then move latest away — user mark survives.
   fireEvent.click(markRail(rows(container)[0]));
   expect(railRoot(rows(container)[0]).style.background).toContain('34%');
   fireEvent.click(rows(container)[2]);
   const key2 = rows(container)[2].getAttribute('data-akey')!;
-  const after = onMarkReasonsChange.mock.calls.at(-1)![0] as Record<string, string[]>;
-  expect(after[key0]).toEqual(['manual']);
-  expect(after[key2]).toEqual(['mouse', 'auto']);
+  expect(onMarkedKeysChange).toHaveBeenLastCalledWith([key0]);
+  expect(onMouseSelectedKeysChange).toHaveBeenLastCalledWith([key2]);
   expect(railRoot(rows(container)[0]).style.background).toContain('16%');
+  expect(railRoot(rows(container)[2]).style.background).toBe('');
 });
 
 test('Ctrl/Cmd+click adds without clearing, and toggles a marked row off', () => {
@@ -197,18 +277,48 @@ test('Ctrl/Cmd+click adds without clearing, and toggles a marked row off', () =>
 });
 
 test('Escape clears the mouse selection while the table is focused', () => {
-  const onMarkReasonsChange = vi.fn();
-  const { container } = renderTable({ onMarkReasonsChange });
+  const onMouseSelectedKeysChange = vi.fn();
+  const onMarkedKeysChange = vi.fn();
+  const { container } = renderTable({ onMouseSelectedKeysChange, onMarkedKeysChange });
   fireEvent.click(rows(container)[0]);
+  fireEvent.click(markRail(rows(container)[0]));
   fireEvent.click(rows(container)[2], { ctrlKey: true });
   expect(marked(container)).toEqual([true, false, true, false, false]);
 
   const root = container.firstElementChild as HTMLElement;
   fireEvent.keyDown(root, { key: 'Escape' });
-  const after = onMarkReasonsChange.mock.calls.at(-1)![0] as Record<string, string[]>;
-  expect(Object.values(after).flat().includes('mouse')).toBe(false);
-  expect(Object.values(after).flat().includes('auto')).toBe(false);
+  expect(onMouseSelectedKeysChange).toHaveBeenLastCalledWith([]);
+  expect(onMarkedKeysChange).toHaveBeenLastCalledWith([rows(container)[0].getAttribute('data-akey')]);
   expect(marked(container)).toEqual([false, false, false, false, false]);
+  expect(markRail(rows(container)[0]).getAttribute('title')).toBe('Unmark this message');
+});
+
+test('Ctrl+A selects every visible row and does not select text', () => {
+  const onMouseSelectedKeysChange = vi.fn();
+  const onMarkedKeysChange = vi.fn();
+  const removeAllRanges = vi.spyOn(window.getSelection()!, 'removeAllRanges');
+  const { container } = renderTable({ onMouseSelectedKeysChange, onMarkedKeysChange });
+  fireEvent.click(rows(container)[2]);
+  fireEvent.click(markRail(rows(container)[0]));
+  const root = container.firstElementChild as HTMLElement;
+  root.focus();
+  const keys = rows(container).map(r => r.getAttribute('data-akey')!);
+
+  const keyEvent = new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, bubbles: true, cancelable: true });
+  const selectStart = new Event('selectstart', { bubbles: true, cancelable: true });
+  act(() => {
+    root.dispatchEvent(keyEvent);
+    root.dispatchEvent(selectStart);
+  });
+
+  expect(keyEvent.defaultPrevented).toBe(true);
+  expect(selectStart.defaultPrevented).toBe(true);
+  expect(onMouseSelectedKeysChange).toHaveBeenLastCalledWith(keys);
+  expect(marked(container)).toEqual([true, true, true, true, true]);
+  expect(latestIdx(container)).toBe(2);
+  expect(onMarkedKeysChange).toHaveBeenLastCalledWith([keys[0]]);
+  expect(removeAllRanges).toHaveBeenCalled();
+  removeAllRanges.mockRestore();
 });
 
 test('Escape moves OS focus off a rail control onto the table root', () => {
@@ -223,20 +333,17 @@ test('Escape moves OS focus off a rail control onto the table root', () => {
 });
 
 test('rail mark and colour actions apply to every mouse-selected row', () => {
-  const onMarkReasonsChange = vi.fn();
+  const onMarkedKeysChange = vi.fn();
   const onMarkColorIndicesChange = vi.fn();
-  const { container } = renderTable({ onMarkReasonsChange, onMarkColorIndicesChange });
+  const { container } = renderTable({ onMarkedKeysChange, onMarkColorIndicesChange });
   fireEvent.click(rows(container)[0]);
   fireEvent.click(rows(container)[2], { ctrlKey: true });
   const key0 = rows(container)[0].getAttribute('data-akey')!;
   const key2 = rows(container)[2].getAttribute('data-akey')!;
 
-  // Promote/mark via rail on one selected row → both get manual.
-  onMarkReasonsChange.mockClear();
+  onMarkedKeysChange.mockClear();
   fireEvent.click(markRail(rows(container)[0]));
-  const afterMark = onMarkReasonsChange.mock.calls.at(-1)![0] as Record<string, string[]>;
-  expect(afterMark[key0]).toEqual(expect.arrayContaining(['mouse', 'manual']));
-  expect(afterMark[key2]).toEqual(expect.arrayContaining(['mouse', 'manual']));
+  expect(onMarkedKeysChange).toHaveBeenLastCalledWith([key0, key2]);
 
   // Colour swatch on one selected row → both get the same colour.
   onMarkColorIndicesChange.mockClear();
@@ -272,9 +379,9 @@ test('Ctrl/Cmd+Shift+click adds the range to existing marks', () => {
 
 test('wheel over the marks pill scrolls the port and does not activate a button', () => {
   const { container } = renderTable();
-  fireEvent.click(rows(container)[0]);
-  fireEvent.click(rows(container)[2], { ctrlKey: true });
-  expect(marked(container).filter(Boolean)).toHaveLength(2);
+  fireEvent.click(markRail(rows(container)[0]));
+  fireEvent.click(markRail(rows(container)[2]));
+  expect(screen.getByTitle('Clear all marks')).toHaveTextContent('Clear 2 marks');
 
   const port = container.querySelector('.custom-scrollbar') as HTMLElement;
   // jsdom does not implement Element.scrollBy; the browser does.
@@ -283,25 +390,29 @@ test('wheel over the marks pill scrolls the port and does not activate a button'
   const pill = container.querySelector('.marks-pill') as HTMLElement;
   fireEvent.wheel(pill, { deltaY: 80, deltaX: 0 });
   expect(scrollBy).toHaveBeenCalledWith({ top: 80, left: 0 });
-  expect(marked(container).filter(Boolean)).toHaveLength(2);
+  expect(screen.getByTitle('Clear all marks')).toHaveTextContent('Clear 2 marks');
 
   scrollBy.mockClear();
   fireEvent.wheel(screen.getByTitle('Clear all marks'), { deltaY: -30, deltaX: 0 });
   expect(scrollBy).toHaveBeenCalledWith({ top: -30, left: 0 });
-  expect(marked(container).filter(Boolean)).toHaveLength(2);
-  expect(screen.getByTitle('Clear all marks')).toBeInTheDocument();
+  expect(screen.getByTitle('Clear all marks')).toHaveTextContent('Clear 2 marks');
 });
 
-test('clear-marks pill appears only when marked and removes every mark', () => {
+test('clear-marks pill appears only for the marked flag and clears it', () => {
   const { container } = renderTable();
   expect(screen.queryByTitle('Clear all marks')).not.toBeInTheDocument();
 
   fireEvent.click(rows(container)[0]);
   fireEvent.click(rows(container)[2], { ctrlKey: true });
+  expect(screen.queryByTitle('Clear all marks')).not.toBeInTheDocument();
   expect(marked(container).filter(Boolean)).toHaveLength(2);
 
+  fireEvent.click(markRail(rows(container)[0]));
+  expect(screen.getByTitle('Clear all marks')).toHaveTextContent('Clear 2 marks');
   fireEvent.click(screen.getByTitle('Clear all marks'));
-  expect(marked(container).filter(Boolean)).toHaveLength(0);
+  expect(markRail(rows(container)[0]).getAttribute('title')).toBe('Mark this message');
+  expect(markRail(rows(container)[2]).getAttribute('title')).toBe('Mark this message');
+  expect(marked(container).filter(Boolean)).toHaveLength(2);
   expect(screen.queryByTitle('Clear all marks')).not.toBeInTheDocument();
 });
 
@@ -313,14 +424,14 @@ test('clicking a row still pauses live-following (#266) while marking it', () =>
   expect(marked(container)[0]).toBe(true);
 });
 
-test('prev/next-mark arrows appear with the marks and stop live-following (#442)', async () => {
+test('prev/next-mark arrows appear with the marked flag and stop live-following (#442)', async () => {
   const onListFollowChange = vi.fn();
   const { container } = renderTable({ listFollow: true, onListFollowChange });
   expect(screen.queryByTitle('Jump to next mark')).not.toBeInTheDocument();
   expect(screen.queryByTitle('Jump to previous mark')).not.toBeInTheDocument();
 
-  fireEvent.click(rows(container)[1]);
-  fireEvent.click(rows(container)[3], { ctrlKey: true });
+  fireEvent.click(markRail(rows(container)[1]));
+  fireEvent.click(markRail(rows(container)[3]));
   onListFollowChange.mockClear();
 
   // Cursor is on row 3 (last mark) — next is inactive, previous jumps to row 1.
@@ -338,8 +449,22 @@ test('prev/next-mark arrows appear with the marks and stop live-following (#442)
   fireEvent.click(screen.getByTitle('Jump to next mark'));
   expect(onListFollowChange).toHaveBeenLastCalledWith(false);
 
-  // Jumping never changes what is marked.
-  expect(marked(container)).toEqual([false, true, false, true, false]);
+  // Jumping never changes the marked flag.
+  expect(markRail(rows(container)[1]).getAttribute('title')).toBe('Unmark this message');
+  expect(markRail(rows(container)[3]).getAttribute('title')).toBe('Unmark this message');
+});
+
+test('mark arrows skip hidden rows and stay on unhidden marks', () => {
+  const { container } = renderTable();
+  fireEvent.click(markRail(rows(container)[1]));
+  fireEvent.click(markRail(rows(container)[3]));
+  expect(screen.getByTitle('Jump to previous mark')).toHaveAttribute('aria-disabled', 'false');
+  expect(screen.getByTitle('Jump to next mark')).toHaveAttribute('aria-disabled', 'true');
+
+  fireEvent.click(colorSwatch(rows(container)[1]), { altKey: true });
+  expect(screen.getByTitle('Show hidden rows. Ctrl-click toggles hide on every row.')).toBeInTheDocument();
+  expect(screen.getByTitle('Jump to previous mark')).toHaveAttribute('aria-disabled', 'true');
+  expect(screen.getByTitle('Jump to next mark')).toHaveAttribute('aria-disabled', 'true');
 });
 
 test('the selected row becomes the scroll anchor while it is on screen (#435)', () => {
@@ -365,50 +490,104 @@ test('clicking a row at the live edge anchors that row, not the top one (#435)',
   expect(onListAnchorKeyChange).toHaveBeenLastCalledWith(rows(container)[3].getAttribute('data-akey'));
 });
 
-test('a goto request marks the telegram when it is in the list and stops live-following', () => {
+test('a goto request selects the telegram when it is in the list and stops live-following', async () => {
   const onListFollowChange = vi.fn();
-  const onMarkReasonsChange = vi.fn();
-  const onLastMarkedKeyChange = vi.fn();
-  renderTable({
+  const onMarkedKeysChange = vi.fn();
+  const onMouseSelectedKeysChange = vi.fn();
+  const onLastSelectedKeyChange = vi.fn();
+  const { container } = renderTable({
     listFollow: true,
     onListFollowChange,
-    onMarkReasonsChange,
-    onLastMarkedKeyChange,
+    onMarkedKeysChange,
+    onMouseSelectedKeysChange,
+    onLastSelectedKeyChange,
     gotoRequest: { id: 1, telegram: TELEGRAMS[2] },
   });
 
   const key = anchorKey(TELEGRAMS[2]);
-  expect(onMarkReasonsChange).toHaveBeenCalledWith({ [key]: ['goto', 'auto'] });
-  expect(onLastMarkedKeyChange).toHaveBeenCalledWith(key);
-  // gotoIndex pauses follow; that is the same path that centers the row.
+  expect(onMarkedKeysChange).not.toHaveBeenCalled();
+  expect(onMouseSelectedKeysChange).toHaveBeenCalledWith([key]);
+  expect(onLastSelectedKeyChange).toHaveBeenCalledWith(key);
+  expect(latestIdx(container)).toBe(2);
+  // Selection at the live edge pauses follow, the same way a row click does.
   expect(onListFollowChange).toHaveBeenCalledWith(false);
+  await vi.waitFor(() => {
+    expect(container.querySelector('.log-row.row-flash')?.getAttribute('data-akey')).toBe(key);
+  });
 });
 
-test('Alt-click on the colour swatch hides the row; pill can clear hidden', () => {
-  const onMarkReasonsChange = vi.fn();
-  const { container } = renderTable({ onMarkReasonsChange });
+test('Alt-click on the colour swatch sets the hide flag', () => {
+  const onMarkedKeysChange = vi.fn();
+  const onHiddenKeysChange = vi.fn();
+  const { container } = renderTable({ onMarkedKeysChange, onHiddenKeysChange });
   const key = rows(container)[1].getAttribute('data-akey')!;
   fireEvent.click(colorSwatch(rows(container)[1]), { altKey: true });
-  expect(onMarkReasonsChange).toHaveBeenCalledWith({ [key]: ['hidden'] });
-  // Hidden rows leave the list.
+  expect(onMarkedKeysChange).not.toHaveBeenCalled();
+  expect(onHiddenKeysChange).toHaveBeenCalledWith([key]);
   expect(rows(container).map(r => r.getAttribute('data-akey'))).not.toContain(key);
-  expect(screen.getByTitle('Clear all hidden')).toHaveTextContent('Clear 1 hidden');
+  expect(screen.getByTitle('Show hidden rows. Ctrl-click toggles hide on every row.')).toHaveTextContent('Show 1 hidden');
 
-  fireEvent.click(screen.getByTitle('Clear all hidden'));
-  expect(onMarkReasonsChange).toHaveBeenLastCalledWith({});
+  fireEvent.click(screen.getByTitle('Show hidden rows. Ctrl-click toggles hide on every row.'));
+  expect(onHiddenKeysChange).toHaveBeenLastCalledWith([]);
+  expect(rows(container).map(r => r.getAttribute('data-akey'))).toContain(key);
+});
+
+test('Clear marks only the visible rows; Show hidden restores hidden marks', () => {
+  const onHiddenKeysChange = vi.fn();
+  const { container } = renderTable({ onHiddenKeysChange });
+  fireEvent.click(markRail(rows(container)[1]));
+  const hiddenKey = rows(container)[1].getAttribute('data-akey')!;
+  fireEvent.click(screen.getByTitle('Clear all marks'), { ctrlKey: true });
+  expect(rows(container).map(r => r.getAttribute('data-akey'))).not.toContain(hiddenKey);
+
+  fireEvent.click(markRail(rows(container)[0]));
+  const visibleKey = rows(container)[0].getAttribute('data-akey')!;
+  expect(screen.getByTitle('Clear all marks')).toHaveTextContent('Clear 1 mark');
+  expect(screen.getByTitle('Show hidden rows. Ctrl-click toggles hide on every row.')).toHaveTextContent('Show 1 hidden');
+
+  fireEvent.click(screen.getByTitle('Clear all marks'));
+  expect(screen.queryByTitle('Clear all marks')).not.toBeInTheDocument();
+  expect(screen.getByTitle('Show hidden rows. Ctrl-click toggles hide on every row.')).toHaveTextContent('Show 1 hidden');
+
+  fireEvent.click(screen.getByTitle('Show hidden rows. Ctrl-click toggles hide on every row.'));
+  expect(onHiddenKeysChange).toHaveBeenLastCalledWith([]);
+  const restored = rows(container).find(r => r.getAttribute('data-akey') === hiddenKey);
+  expect(restored).toBeTruthy();
+  expect(markRail(restored!).getAttribute('title')).toBe('Unmark this message');
+  expect(screen.getByTitle('Clear all marks')).toHaveTextContent('Clear 1 mark');
+  expect(rows(container).find(r => r.getAttribute('data-akey') === visibleKey)?.classList.contains('marked')).toBe(false);
+});
+
+test('Ctrl-click on Show hidden toggles the hide flag of every row', () => {
+  const onHiddenKeysChange = vi.fn();
+  const { container } = renderTable({ onHiddenKeysChange });
+  const hiddenKey = rows(container)[1].getAttribute('data-akey')!;
+  const visibleKeys = rows(container).map(r => r.getAttribute('data-akey')!).filter(k => k !== hiddenKey);
+  fireEvent.click(colorSwatch(rows(container)[1]), { altKey: true });
+  expect(screen.getByTitle('Show hidden rows. Ctrl-click toggles hide on every row.')).toHaveTextContent('Show 1 hidden');
+
+  fireEvent.click(screen.getByTitle('Show hidden rows. Ctrl-click toggles hide on every row.'), { ctrlKey: true });
+  const inverted = onHiddenKeysChange.mock.calls.at(-1)![0] as string[];
+  expect(inverted).toEqual(visibleKeys);
+  expect(rows(container).map(r => r.getAttribute('data-akey'))).toEqual([hiddenKey]);
+  expect(screen.getByTitle('Show hidden rows. Ctrl-click toggles hide on every row.')).toHaveTextContent(`Show ${visibleKeys.length} hidden`);
+
+  fireEvent.click(screen.getByTitle('Show hidden rows. Ctrl-click toggles hide on every row.'), { ctrlKey: true });
+  expect(onHiddenKeysChange).toHaveBeenLastCalledWith([hiddenKey]);
+  expect(rows(container).map(r => r.getAttribute('data-akey'))).toEqual(visibleKeys);
 });
 
 test('middle rail swatch sets colour without marking; rail fill needs a mark', () => {
   const onMarkColorIndicesChange = vi.fn();
-  const onMarkReasonsChange = vi.fn();
-  const { container } = renderTable({ onMarkColorIndicesChange, onMarkReasonsChange });
+  const onMarkedKeysChange = vi.fn();
+  const { container } = renderTable({ onMarkColorIndicesChange, onMarkedKeysChange });
   const key = rows(container)[0].getAttribute('data-akey')!;
   const swatch = colorSwatch(rows(container)[0]);
   expect(swatch).toBeTruthy();
   expect(swatch.style.background).toBe('transparent');
 
   fireEvent.click(swatch);
-  expect(onMarkReasonsChange).not.toHaveBeenCalled();
+  expect(onMarkedKeysChange).not.toHaveBeenCalled();
   expect(onMarkColorIndicesChange).toHaveBeenCalledWith({ [key]: 0 });
   expect(colorSwatch(rows(container)[0]).style.background).toBeTruthy();
   expect(colorSwatch(rows(container)[0]).getAttribute('aria-label')).toBe('Row colour');
@@ -433,9 +612,39 @@ test('middle rail swatch sets colour without marking; rail fill needs a mark', (
   expect(colorSwatch(rows(container)[0]).style.opacity).toBe('0.45');
 });
 
+test('colour click repeats the last colour and steps only when the clicked row already has it', () => {
+  const onMarkColorIndicesChange = vi.fn();
+  const { container } = renderTable({ onMarkColorIndicesChange });
+  fireEvent.click(rows(container)[0]);
+  fireEvent.click(rows(container)[2], { ctrlKey: true });
+  const key0 = rows(container)[0].getAttribute('data-akey')!;
+  const key2 = rows(container)[2].getAttribute('data-akey')!;
+
+  fireEvent.click(colorSwatch(rows(container)[0]));
+  expect(onMarkColorIndicesChange).toHaveBeenLastCalledWith({ [key0]: 0, [key2]: 0 });
+
+  // Clicked row already has the last colour → one step, still on the selection.
+  fireEvent.click(colorSwatch(rows(container)[0]));
+  expect(onMarkColorIndicesChange).toHaveBeenLastCalledWith({ [key0]: 1, [key2]: 1 });
+
+  // A row without that colour receives the last colour. Other rows keep theirs.
+  const key1 = rows(container)[1].getAttribute('data-akey')!;
+  fireEvent.click(colorSwatch(rows(container)[1]));
+  expect(onMarkColorIndicesChange).toHaveBeenLastCalledWith({ [key0]: 1, [key1]: 1, [key2]: 1 });
+
+  // Only Ctrl-click clears the selection. A plain click restores the last colour.
+  fireEvent.click(rows(container)[0]);
+  fireEvent.click(rows(container)[1], { ctrlKey: true });
+  fireEvent.click(rows(container)[2], { ctrlKey: true });
+  fireEvent.click(colorSwatch(rows(container)[0]), { ctrlKey: true });
+  expect(onMarkColorIndicesChange).toHaveBeenLastCalledWith({});
+  fireEvent.click(colorSwatch(rows(container)[0]));
+  expect(onMarkColorIndicesChange).toHaveBeenLastCalledWith({ [key0]: 1, [key1]: 1, [key2]: 1 });
+});
+
 test('colour without a manual mark is shown dimmed on the swatch', () => {
   const { container } = renderTable({
-    markReasons: {},
+    markedKeys: [],
     markColorIndices: { [anchorKey(TELEGRAMS[0])]: 0 },
   });
   expect(colorSwatch(rows(container)[0]).style.background).toBeTruthy();
@@ -485,7 +694,7 @@ test('visible marks stay in the list when the quick filter would drop them', () 
   const key = anchorKey(keep);
   const { container } = renderTable({
     telegrams: TELEGRAMS,
-    markReasons: { [key]: ['manual'] },
+    markedKeys: [key],
     quickFilterOpen: true,
     quickFilterEnabled: true,
     quickPatterns: { target: { top: '', bottom: 'no-such-address' } },
@@ -497,18 +706,16 @@ test('visible marks stay in the list when the quick filter would drop them', () 
 
 test('enabling the quick filter keeps a mouse-selected row visible and pinned', async () => {
   const onListAnchorKeyChange = vi.fn();
-  const onMarkReasonsChange = vi.fn();
+  const onMouseSelectedKeysChange = vi.fn();
   const { container } = renderTable({
     onListAnchorKeyChange,
-    onMarkReasonsChange,
+    onMouseSelectedKeysChange,
     listFollow: false,
     forceIncludeFrom: TELEGRAMS,
   });
   fireEvent.click(rows(container)[2]);
   const key = rows(container)[2].getAttribute('data-akey')!;
-  expect(onMarkReasonsChange.mock.calls.at(-1)![0][key]).toEqual(
-    expect.arrayContaining(['mouse']),
-  );
+  expect(onMouseSelectedKeysChange).toHaveBeenLastCalledWith([key]);
   onListAnchorKeyChange.mockClear();
 
   // Exclude every address — only the selection must survive via force-include.
@@ -535,8 +742,8 @@ test('forceIncludeFrom restores a selected row the parent already filtered out',
   const { container } = renderTable({
     telegrams: [TELEGRAMS[0]],
     forceIncludeFrom: TELEGRAMS,
-    markReasons: { [key]: ['mouse', 'auto'] },
-    lastMarkedKey: key,
+    mouseSelectedKeys: [key],
+    lastSelectedKey: key,
     quickFilterOpen: true,
     quickFilterEnabled: true,
     quickPatterns: { target: { top: '', bottom: 'no-such-address' } },
@@ -592,52 +799,51 @@ test('context rail shows ∧ above older and ∨ below newer relative to an acti
   expect(rows(container)[2].querySelector('[data-context-rail]')).toBeNull();
 });
 
-test('context rows are implicitly marked; rail toggles manual; wash stays on body', () => {
-  const onMarkReasonsChange = vi.fn();
+test('context is a row flag, not a mark; rail toggles marked; wash stays on body', () => {
+  const onMarkedKeysChange = vi.fn();
   const contextKey = anchorKey(TELEGRAMS[1]);
   const { container } = renderTable({
-    onMarkReasonsChange,
+    onMarkedKeysChange,
     contextKeys: new Set([contextKey]),
   });
 
-  // Sync adds the implicit context reason — actionable, so the pill shows.
-  expect(onMarkReasonsChange).toHaveBeenCalledWith({ [contextKey]: ['context'] });
+  expect(onMarkedKeysChange).not.toHaveBeenCalled();
   expect(rows(container)[1].classList.contains('context')).toBe(true);
-  expect(screen.getByTitle('Clear all marks')).toHaveTextContent('Clear 1 mark');
+  expect(screen.queryByTitle('Clear all marks')).not.toBeInTheDocument();
   expect(markRail(rows(container)[1]).getAttribute('title')).toBe('Mark this message');
   expect(railRoot(rows(container)[1]).style.background).toBe('');
   // Wash is on the body only — never over the mark rail.
   expect(rowBody(rows(container)[1]).style.background).toContain('color-mix');
   expect(rows(container)[1].style.background).not.toContain('color-mix');
 
-  // Rail toggles manual on context rows; rail fill matches body wash.
-  onMarkReasonsChange.mockClear();
+  // Rail toggles marked beside the context flag; rail fill matches body wash.
   fireEvent.click(markRail(rows(container)[1]));
-  expect(onMarkReasonsChange).toHaveBeenCalledWith({ [contextKey]: ['context', 'manual'] });
+  expect(onMarkedKeysChange).toHaveBeenCalledWith([contextKey]);
   expect(rows(container)[1].classList.contains('context')).toBe(true);
   expect(markRail(rows(container)[1]).getAttribute('title')).toBe('Unmark this message');
   expect(railRoot(rows(container)[1]).style.background).toBe(rowBody(rows(container)[1]).style.background);
   expect(rows(container)[1].style.background).not.toContain('color-mix');
 
   fireEvent.click(markRail(rows(container)[1]));
-  expect(onMarkReasonsChange).toHaveBeenLastCalledWith({ [contextKey]: ['context'] });
+  expect(onMarkedKeysChange).toHaveBeenLastCalledWith([]);
   expect(railRoot(rows(container)[1]).style.background).toBe('');
+  expect(rows(container)[1].classList.contains('context')).toBe(true);
 
-  // Clear drops every mark, including context (dismissed until the window changes).
+  // Clear drops the marked flag only. The context flag stays.
   fireEvent.click(markRail(rows(container)[1]));
   fireEvent.click(markRail(rows(container)[0]));
   expect(screen.getByTitle('Clear all marks')).toHaveTextContent('Clear 2 marks');
-  fireEvent.click(rows(container)[2]);
+  fireEvent.click(markRail(rows(container)[2]));
   expect(screen.getByTitle('Clear all marks')).toHaveTextContent('Clear 3 marks');
   fireEvent.click(screen.getByTitle('Clear all marks'));
   expect(screen.queryByTitle('Clear all marks')).not.toBeInTheDocument();
-  const afterClear = onMarkReasonsChange.mock.calls.at(-1)![0] as Record<string, string[]>;
-  expect(afterClear).toEqual({});
+  expect(onMarkedKeysChange).toHaveBeenLastCalledWith([]);
+  expect(rows(container)[1].classList.contains('context')).toBe(true);
 });
 
-test('a goto request does not mark a telegram the current list has filtered out', () => {
-  const onMarkReasonsChange = vi.fn();
-  const onLastMarkedKeyChange = vi.fn();
+test('a goto request does not select a telegram the current list has filtered out', () => {
+  const onMouseSelectedKeysChange = vi.fn();
+  const onLastSelectedKeyChange = vi.fn();
   const onListFollowChange = vi.fn();
   const hidden = makeTelegram({
     timestamp: '2024-01-01T10:00:03.500Z',
@@ -645,14 +851,91 @@ test('a goto request does not mark a telegram the current list has filtered out'
     raw_hex: '0x99',
   });
   renderTable({
-    onMarkReasonsChange,
-    onLastMarkedKeyChange,
+    onMouseSelectedKeysChange,
+    onLastSelectedKeyChange,
     onListFollowChange,
     gotoRequest: { id: 1, telegram: hidden },
   });
 
-  expect(onMarkReasonsChange).not.toHaveBeenCalled();
-  expect(onLastMarkedKeyChange).not.toHaveBeenCalled();
+  expect(onMouseSelectedKeysChange).not.toHaveBeenCalled();
+  expect(onLastSelectedKeyChange).not.toHaveBeenCalled();
   // The list still moves to that time (nearest visible row) and stops following.
   expect(onListFollowChange).toHaveBeenCalledWith(false);
+});
+
+const tableElement = (props: Partial<React.ComponentProps<typeof TelegramTable>> = {}) => (
+  <TelegramTable
+    telegrams={TELEGRAMS}
+    visibleColumns={visibleColumns}
+    sortConfig={sortConfig}
+    onSort={vi.fn()}
+    activeFilters={DEFAULT_FILTERS}
+    onQuickFilter={vi.fn()}
+    onQuickVisualize={vi.fn()}
+    {...props}
+  />
+);
+
+test('a ctrl goto adds the target to the existing mouse selection', () => {
+  const onMouseSelectedKeysChange = vi.fn();
+  const onLastSelectedKeyChange = vi.fn();
+  const shared = { onMouseSelectedKeysChange, onLastSelectedKeyChange };
+  const { container, rerender } = render(tableElement(shared));
+  fireEvent.click(rows(container)[0]);
+  const key0 = anchorKey(TELEGRAMS[0]);
+  const key2 = anchorKey(TELEGRAMS[2]);
+
+  rerender(tableElement({
+    ...shared,
+    gotoRequest: { id: 1, telegram: TELEGRAMS[2], additive: true },
+  }));
+
+  expect(onMouseSelectedKeysChange).toHaveBeenLastCalledWith([key0, key2]);
+  expect(onLastSelectedKeyChange).toHaveBeenLastCalledWith(key2);
+  expect(marked(container)).toEqual([true, false, true, false, false]);
+  expect(latestIdx(container)).toBe(2);
+});
+
+test('a shift goto selects the range from the previous last selected row', () => {
+  const onMouseSelectedKeysChange = vi.fn();
+  const onLastSelectedKeyChange = vi.fn();
+  const shared = { onMouseSelectedKeysChange, onLastSelectedKeyChange };
+  const { container, rerender } = render(tableElement(shared));
+  fireEvent.click(rows(container)[1]);
+  const range = [TELEGRAMS[1], TELEGRAMS[2], TELEGRAMS[3]].map(anchorKey);
+
+  rerender(tableElement({
+    ...shared,
+    gotoRequest: { id: 1, telegram: TELEGRAMS[3], range: true },
+  }));
+
+  expect(onMouseSelectedKeysChange).toHaveBeenLastCalledWith(range);
+  expect(onLastSelectedKeyChange).toHaveBeenLastCalledWith(range[2]);
+  expect(marked(container)).toEqual([false, true, true, true, false]);
+  expect(latestIdx(container)).toBe(3);
+});
+
+test('a goto reveals a filtered-out telegram and makes it the last selected row', async () => {
+  const onMouseSelectedKeysChange = vi.fn();
+  const onLastSelectedKeyChange = vi.fn();
+  const target = TELEGRAMS[2];
+  const key = anchorKey(target);
+  const { container } = renderTable({
+    telegrams: [TELEGRAMS[0]],
+    forceIncludeFrom: TELEGRAMS,
+    onMouseSelectedKeysChange,
+    onLastSelectedKeyChange,
+    gotoRequest: { id: 1, telegram: target },
+  });
+
+  await vi.waitFor(() => {
+    expect(onMouseSelectedKeysChange).toHaveBeenCalledWith([key]);
+    expect(onLastSelectedKeyChange).toHaveBeenCalledWith(key);
+  });
+  await vi.waitFor(() => {
+    expect(rows(container).map(r => r.getAttribute('data-akey'))).toContain(key);
+  });
+  await vi.waitFor(() => {
+    expect(container.querySelector('.log-row.row-flash')?.getAttribute('data-akey')).toBe(key);
+  });
 });

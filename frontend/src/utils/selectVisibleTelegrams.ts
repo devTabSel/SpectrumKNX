@@ -2,8 +2,8 @@ import type { Telegram } from '../hooks/useWebSocket';
 import { anchorKey } from './anchorKey';
 import { expandWithDeltaContext } from './deltaContextExpansion';
 import { forceIncludeKeys } from './forceIncludeKeys';
-import { visibleMarkedKeysFrom, type MarkReasonsMap } from './markReasons';
-import { activeQuickFilter, type QuickPatterns } from './quickFilter';
+import { addKeys } from './markReasons';
+import { activeQuickFilter, type QuickFilterColumnEnabled, type QuickPatterns } from './quickFilter';
 import {
   effectiveDeltaContext,
   matchesTelegram,
@@ -20,9 +20,13 @@ export interface SelectVisibleOpts {
   quickFilterOpen: boolean;
   quickFilterEnabled: boolean;
   quickPatterns: QuickPatterns;
+  quickColumnEnabled?: QuickFilterColumnEnabled;
   flaggedKeys: readonly string[];
   contextForAllMatches: boolean;
-  markReasons: MarkReasonsMap;
+  /** Marked rows, the mouse selection, and the last selected row stay in the list. */
+  markedKeys: readonly string[];
+  mouseSelectedKeys: readonly string[];
+  lastSelectedKey: string | null;
 }
 
 function noMainFilter(opts: SelectVisibleOpts): boolean {
@@ -44,10 +48,10 @@ function noMainFilter(opts: SelectVisibleOpts): boolean {
  */
 export function visibleSelectionMode(opts: SelectVisibleOpts): 'identity' | 'incremental' | 'full' {
   const { before, after } = effectiveDeltaContext(opts.filters);
-  const marks = visibleMarkedKeysFrom(opts.markReasons).length > 0;
+  const marks = opts.markedKeys.length > 0 || opts.mouseSelectedKeys.length > 0 || opts.lastSelectedKey != null;
   const flags = opts.filters.deltaContextEnabled && opts.flaggedKeys.length > 0;
   if (before > 0 || after > 0 || marks || flags) return 'full';
-  const quick = activeQuickFilter(opts.quickFilterOpen, opts.quickFilterEnabled, opts.quickPatterns);
+  const quick = activeQuickFilter(opts.quickFilterOpen, opts.quickFilterEnabled, opts.quickPatterns, opts.quickColumnEnabled);
   if (noMainFilter(opts) && !quick) return 'identity';
   return 'incremental';
 }
@@ -56,14 +60,14 @@ export function visibleSelectionMode(opts: SelectVisibleOpts): 'identity' | 'inc
 export function matchVisibleTelegram(opts: SelectVisibleOpts): (t: Telegram) => boolean {
   const f = opts.filters;
   const noFilter = noMainFilter(opts);
-  const quick = activeQuickFilter(opts.quickFilterOpen, opts.quickFilterEnabled, opts.quickPatterns);
+  const quick = activeQuickFilter(opts.quickFilterOpen, opts.quickFilterEnabled, opts.quickPatterns, opts.quickColumnEnabled);
   if (noFilter && !quick) return () => true;
   return (t) => (noFilter || matchesTelegram(t, f)) && (!quick || quick(t));
 }
 
 /**
  * Main-filter + QF-anchor + Time-Delta-Context expand + force-include of
- * non-hidden marks. `sorted` must already be in display sort order.
+ * marked, mouse-selected, and last-selected rows. `sorted` must already be in display sort order.
  */
 export function selectVisibleTelegrams(
   sorted: readonly Telegram[],
@@ -77,7 +81,7 @@ export function selectVisibleTelegrams(
 
   const f = opts.filters;
   const noFilter = noMainFilter(opts);
-  const quick = activeQuickFilter(opts.quickFilterOpen, opts.quickFilterEnabled, opts.quickPatterns);
+  const quick = activeQuickFilter(opts.quickFilterOpen, opts.quickFilterEnabled, opts.quickPatterns, opts.quickColumnEnabled);
   const matches = sorted.map(t =>
     (noFilter || matchesTelegram(t, f)) && (!quick || quick(t)),
   );
@@ -88,7 +92,10 @@ export function selectVisibleTelegrams(
   const expanded = expandWithDeltaContext(
     sorted as Telegram[], matches, anchorKey, flags, before, after, opts.contextForAllMatches,
   );
-  const forcedMarks = new Set(visibleMarkedKeysFrom(opts.markReasons));
+  const forcedMarks = new Set(addKeys(
+    addKeys(opts.markedKeys, opts.mouseSelectedKeys),
+    opts.lastSelectedKey ? [opts.lastSelectedKey] : [],
+  ));
   return {
     items: forceIncludeKeys(sorted, expanded.items, anchorKey, forcedMarks),
     contextKeys: expanded.contextKeys,

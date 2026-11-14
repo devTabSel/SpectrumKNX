@@ -131,6 +131,186 @@ const stripesByKey = (container: HTMLElement): Map<string, string> => {
   return map;
 };
 
+test('a READ row turns success green once a later Response arrives for its GA', () => {
+  const read = makeTelegram({
+    timestamp: '2026-01-01T10:00:00.000Z',
+    simplified_type: 'Read',
+    telegram_type: 'GroupValueRead',
+    target_address: '1/2/3',
+    raw_hex: '0x00',
+  });
+  const { container, rerender } = renderTable([read]);
+  expect(container.querySelector('.tt-type-read')).toBeInTheDocument();
+  expect(container.querySelector('.tt-type-read-answered')).not.toBeInTheDocument();
+
+  rerender(
+    <TelegramTable
+      telegrams={[
+        makeTelegram({
+          timestamp: '2026-01-01T10:00:01.000Z',
+          simplified_type: 'Response',
+          telegram_type: 'GroupValueResponse',
+          target_address: '1/2/3',
+          raw_hex: '0x01',
+          value_formatted: 'On',
+        }),
+        read,
+      ]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+  const answered = container.querySelector('.tt-type-read-answered');
+  expect(answered).toBeTruthy();
+  expect(answered?.textContent).toBe('Read');
+  expect(container.querySelector('.tt-type-response')).toBeTruthy();
+});
+
+test('a visible READ follows a response that is only in the read-phase source', () => {
+  const read = makeTelegram({
+    timestamp: '2026-01-01T10:00:00.000Z',
+    simplified_type: 'Read',
+    telegram_type: 'GroupValueRead',
+    target_address: '1/2/3',
+    raw_hex: '0x00',
+  });
+  const response = makeTelegram({
+    timestamp: '2026-01-01T10:00:01.000Z',
+    simplified_type: 'Response',
+    telegram_type: 'GroupValueResponse',
+    target_address: '1/2/3',
+    raw_hex: '0x01',
+    value_formatted: 'On',
+  });
+  const { container, rerender } = renderTable([read]);
+  expect(container.querySelector('.tt-type-read-answered')).not.toBeInTheDocument();
+
+  rerender(
+    <TelegramTable
+      telegrams={[read]}
+      readPhaseTelegrams={[response, read]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+  expect(container.querySelector('.tt-type-read-answered')?.textContent).toBe('Read');
+  expect(container.querySelector('.tt-type-response')).not.toBeInTheDocument();
+
+  rerender(
+    <TelegramTable
+      telegrams={[read]}
+      readPhaseTelegrams={[read]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+  expect(container.querySelector('.tt-type-read-answered')).not.toBeInTheDocument();
+  expect(container.querySelector('.tt-type-read')).toBeInTheDocument();
+});
+
+test('matched/open send icons stay fully opaque under row hover CSS', () => {
+  render(
+    <TelegramTable
+      telegrams={makeList(1, 1)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+    />,
+  );
+  const styleText = Array.from(document.head.querySelectorAll('style'))
+    .map(s => s.textContent ?? '')
+    .join('\n');
+  expect(styleText).toMatch(/\.log-row:hover \.quick-send-btn\[data-send-popover-open\]/);
+  expect(styleText).toMatch(/\.quick-send-btn\[data-send-panel-match\][^}]*opacity:\s*1\s*!important/s);
+  expect(styleText).toMatch(/\.quick-send-btn\[data-send-job-active\][^}]*opacity:\s*1\s*!important/s);
+  expect(styleText).toMatch(/\.quick-send-btn\[data-send-job-active\][^}]*color:\s*var\(--tt-outgoing\)/s);
+  expect(styleText).toMatch(/\.quick-send-btn\[data-bus-pulse\][^}]*opacity:\s*1\s*!important/s);
+  expect(styleText).toMatch(/\.quick-send-btn\[data-bus-pulse="Outgoing"\]:hover[^}]*color:\s*var\(--tt-outgoing\)/s);
+  expect(styleText).toMatch(/\.quick-send-btn\[data-bus-pulse="Incoming"\]:hover[^}]*color:\s*var\(--tt-incoming\)/s);
+  expect(styleText).not.toMatch(/quick-send-write-pulse/);
+  expect(styleText).toMatch(/\.quick-send-btn:focus[^}]*opacity:\s*1\s*!important/s);
+});
+
+test('activeSendJobAddresses marks matching send icons with data-send-job-active', () => {
+  const telegrams = [
+    makeTelegram({ target_address: '1/2/3', dpt_main: 9, dpt_sub: 1 }),
+    makeTelegram({ target_address: '4/5/6', dpt_main: 1, dpt_sub: 1 }),
+  ];
+  const { container } = render(
+    <TelegramTable
+      telegrams={telegrams}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      canSend
+      activeSendJobAddresses={new Set(['1/2/3'])}
+    />,
+  );
+  const matched = container.querySelectorAll('.quick-send-btn[data-send-job-active]');
+  expect(matched).toHaveLength(1);
+});
+
+test('alt-click on send icon forwards onAltSend', () => {
+  const onAltSend = vi.fn();
+  const { container } = render(
+    <TelegramTable
+      telegrams={makeList(3, 1)}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      canSend
+      onAltSend={onAltSend}
+    />,
+  );
+  const sendIcon = container.querySelector('.quick-send-btn') as HTMLElement;
+  expect(sendIcon).toBeTruthy();
+  fireEvent.click(sendIcon, { altKey: true });
+  expect(onAltSend).toHaveBeenCalledTimes(1);
+});
+
+test('sendPanelAddresses marks matching send icons with data-send-panel-match', () => {
+  const telegrams = [
+    makeTelegram({ target_address: '1/2/3', dpt_main: 9, dpt_sub: 1 }),
+    makeTelegram({ target_address: '4/5/6', dpt_main: 1, dpt_sub: 1 }),
+    makeTelegram({ target_address: '7/8/9', dpt_main: 5, dpt_sub: 1 }),
+  ];
+  const { container } = render(
+    <TelegramTable
+      telegrams={telegrams}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      canSend
+      sendPanelAddresses={new Set(['1/2/3', '7/8/9'])}
+    />,
+  );
+  const matched = container.querySelectorAll('.quick-send-btn[data-send-panel-match]');
+  expect(matched).toHaveLength(2);
+});
+
 test('zebra stripes stay with their telegram when new ones are prepended (#266)', () => {
   const { container, rerender } = renderTable(makeList(6, 5));
   const before = stripesByKey(container);
@@ -1829,11 +2009,12 @@ const flushFrames = () => act(() => new Promise<void>(r => {
   requestAnimationFrame(() => requestAnimationFrame(() => r()));
 }));
 
-/** Opens the quick filter bar with a TARGET-name pattern, left disabled. */
+/** Opens the quick filter bar with a TARGET-name pattern, left disabled.
+ *  Typing turns the filter on; the last click turns it back off. */
 const armQuickFilter = (pattern: string) => {
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
-  fireEvent.click(screen.getByTitle(/^Disable quick filter \(keeps patterns\)/));
   fireEvent.change(screen.getByLabelText('Quick filter TARGET name'), { target: { value: pattern } });
+  fireEvent.click(screen.getByTitle(/^Disable quick filter \(keeps patterns\)/));
 };
 
 test('filter on: a pinned row that cannot hold its place leaves no fill spacer open', async () => {
@@ -3326,6 +3507,115 @@ test('manual pause with a backlog: the fill spacer holds, no rubber-band, labels
   }
 });
 
+test('manual pause whose backlog the filter hides: the fill spacer rubber-bands and the label leaves', async () => {
+  scrollBlockSize = 800;
+  const h = meteredHandlers();
+  const published = makeList(6, 5);
+  const hidden = makePausedAfter(4, 5).map(t => ({ ...t, target_address: '9/9/9' }));
+  const flushFrames = () => act(() => new Promise<void>(r => {
+    requestAnimationFrame(() => requestAnimationFrame(() => r()));
+  }));
+  try {
+    const { container } = render(
+      <TelegramTable
+        telegrams={published}
+        visibleColumns={visibleColumns}
+        sortConfig={sortConfig}
+        onSort={vi.fn()}
+        activeFilters={{ ...DEFAULT_FILTERS, targets: ['1/2/3'] }}
+        onQuickFilter={vi.fn()}
+        onQuickVisualize={vi.fn()}
+        listFollow={false}
+        onListFollowChange={h.onListFollowChange}
+        isPaused
+        isManualPause
+        {...withPauseBacklog(hidden)}
+        onPauseFlush={h.onPauseFlush}
+        onPauseReveal={h.onPauseReveal}
+      />,
+    );
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    await flushFrames();
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'requestAnimationFrame', 'cancelAnimationFrame'] });
+    try {
+      act(() => {
+        port.scrollTop = 0;
+        fireEvent.scroll(port);
+      });
+      expect(screen.queryByRole('button', { name: /newer telegram/ })).not.toBeInTheDocument();
+      await act(async () => { vi.advanceTimersByTime(90); });
+      await act(async () => { vi.advanceTimersByTime(180); });
+      expect(port.scrollTop).toBe(LIVE_EDGE_TOP);
+      expect(screen.queryByTestId('fill-rubber-pause-label')).not.toBeInTheDocument();
+      expect(h.onPauseReveal).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('dropping view-newer while the spacer is held rubber-bands it closed', async () => {
+  scrollBlockSize = 800;
+  const h = meteredHandlers();
+  const published = makeList(6, 5);
+  const paused = makePausedAfter(4, 5);
+  const hidden = paused.map(t => ({ ...t, target_address: '9/9/9' }));
+  const flushFrames = () => act(() => new Promise<void>(r => {
+    requestAnimationFrame(() => requestAnimationFrame(() => r()));
+  }));
+  const table = (backlog: Telegram[], targets: string[]) => (
+    <TelegramTable
+      telegrams={published}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, targets }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      onListFollowChange={h.onListFollowChange}
+      isPaused
+      isManualPause
+      {...withPauseBacklog(backlog)}
+      onPauseFlush={h.onPauseFlush}
+      onPauseReveal={h.onPauseReveal}
+    />
+  );
+  try {
+    const { container, rerender } = render(table(paused, []));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    await flushFrames();
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'requestAnimationFrame', 'cancelAnimationFrame'] });
+    try {
+      act(() => {
+        port.scrollTop = 0;
+        fireEvent.scroll(port);
+      });
+      await act(async () => { vi.advanceTimersByTime(90); });
+      await act(async () => { vi.advanceTimersByTime(180); });
+      expect(port.scrollTop).toBe(0);
+      expect(screen.getByTestId('fill-rubber-pause-label')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '4 newer telegrams' })).toBeInTheDocument();
+
+      rerender(table(hidden, ['1/2/3']));
+      expect(screen.queryByRole('button', { name: /newer telegram/ })).not.toBeInTheDocument();
+      await act(async () => { vi.advanceTimersByTime(90); });
+      await act(async () => { vi.advanceTimersByTime(180); });
+      expect(port.scrollTop).toBe(LIVE_EDGE_TOP);
+      expect(screen.queryByTestId('fill-rubber-pause-label')).not.toBeInTheDocument();
+      expect(h.onPauseReveal).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
 test('manual pause without a backlog: the fill spacer still rubber-bands back', async () => {
   scrollBlockSize = 800;
   const h = meteredHandlers();
@@ -3500,12 +3790,23 @@ test('Δt cell shows previous and next deltas', () => {
       onQuickVisualize={vi.fn()}
     />,
   );
-  const middle = container.querySelectorAll('.log-row')[1]!;
+  const deltaLines = (row: Element) => {
+    const cell = [...row.querySelectorAll('.mono-addr')].find(
+      el => (el as HTMLElement).style.display === 'grid',
+    )!;
+    const kids = [...cell.children];
+    return { top: kids[1].textContent ?? '', bottom: kids[3].textContent ?? '' };
+  };
+  const rows = container.querySelectorAll('.log-row');
+  const middle = rows[1]!;
   // Descending time sort: top = gap to newer (-), bottom = gap to older (+).
   // Without a context window the "+" slot stays a plus glyph (no context button).
   expect(middle.textContent).toMatch(/- ?00:01\.000/);
   expect(middle.textContent).toMatch(/\+ ?00:01\.000/);
   expect(middle.querySelector('button[title*="around this message"]')).toBeNull();
+  // Edge rows keep that line: newest has only the downward gap, oldest only the upward one.
+  expect(deltaLines(rows[0])).toEqual({ top: '', bottom: '00:01.000' });
+  expect(deltaLines(rows[2])).toEqual({ top: '00:01.000', bottom: '' });
 });
 
 test('DPT cell shows key and description; visualize sits on source/target', () => {

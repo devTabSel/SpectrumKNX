@@ -28,16 +28,15 @@ describe('expandWithDeltaContext', () => {
     expect(out.contextKeys).toEqual(new Set(['b']));
   });
 
-  it('a flagged non-match anchors its own window and stays classified as context', () => {
+  it('a flagged non-match anchors its own window but is not shown itself', () => {
     const items = [
       item('a', '2024-01-01T10:00:00.000Z'), // flagged, doesn't match
       item('b', '2024-01-01T10:00:00.500Z'), // near the flagged item
       item('c', '2024-01-01T10:00:10.000Z'), // far from everything
     ];
     const out = expandWithDeltaContext(items, [false, false, false], keyOf, new Set(['a']), 0, 1000);
-    expect(out.items.map(keyOf)).toEqual(['a', 'b']);
-    // Flag controls the anchor window, not context-row membership (#343).
-    expect(out.contextKeys).toEqual(new Set(['a', 'b']));
+    expect(out.items.map(keyOf)).toEqual(['b']);
+    expect(out.contextKeys).toEqual(new Set(['b']));
   });
 
   it('flagging a pulled-in context row keeps it in contextKeys', () => {
@@ -50,10 +49,10 @@ describe('expandWithDeltaContext', () => {
     expect(out.contextKeys).toEqual(new Set(['b']));
   });
 
-  it('a flagged item is shown even with no window at all (before=after=0)', () => {
+  it('a flagged non-match is hidden when the window is closed (before=after=0)', () => {
     const items = [item('a', '2024-01-01T10:00:00Z'), item('b', '2024-01-01T10:00:01Z')];
     const out = expandWithDeltaContext(items, [false, false], keyOf, new Set(['a']), 0, 0);
-    expect(out.items.map(keyOf)).toEqual(['a']);
+    expect(out.items).toEqual([]);
     expect(out.contextKeys).toEqual(new Set());
   });
 

@@ -12,7 +12,9 @@ const baseOpts = {
   quickPatterns: {},
   flaggedKeys: [] as string[],
   contextForAllMatches: false,
-  markReasons: {},
+  markedKeys: [],
+  mouseSelectedKeys: [],
+  lastSelectedKey: null,
 };
 
 describe('selectVisibleTelegrams', () => {
@@ -38,7 +40,8 @@ describe('selectVisibleTelegrams', () => {
     const { items } = selectVisibleTelegrams([keep, drop], {
       ...baseOpts,
       filters: { ...DEFAULT_FILTERS, sources: ['1.1.1'] },
-      markReasons: { [anchorKey(drop)]: ['manual'] },
+      markedKeys: [anchorKey(drop)],
+      mouseSelectedKeys: [],
     });
     expect(items.map(t => t.raw_hex)).toEqual(['0xkeep', '0xdrop']);
   });

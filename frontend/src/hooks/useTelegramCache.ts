@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import type { Telegram } from './useWebSocket';
 import { apiUrl } from '../utils/basePath';
 import { toEntry, telegramTs, type TelegramEntry } from '../utils/telegramId';
@@ -35,6 +35,12 @@ const HISTORY_CHUNK_SIZE = 2000;
 export interface TelegramCache {
   /** Current buffer contents, newest first. Frozen while paused. */
   telegrams: Telegram[];
+  /**
+   * Full buffer, newest first, including telegrams ingested while the
+   * published snapshot is frozen. GA read phase follows this buffer
+   * (published list plus pause backlog).
+   */
+  ingested: Telegram[];
   /** Ingest a live telegram from the WebSocket. */
   addLive: (t: Telegram) => void;
   /** Reflect the WS connection so offline windows become coverage gaps. */
@@ -590,9 +596,21 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
   // eslint-disable-next-line react-hooks/refs
   const pausedTelegrams = pausedBacklogRef.current;
 
+  // Full buffer for GA read phase. While playing this is the published list.
+  // While paused it is the in-place backlog plus that list, allocated only when
+  // one of those two changes — not a second snapshot on every live telegram.
+  /* eslint-disable react-hooks/refs -- backlog is mutated in place; pausedCount is the render signal */
+  const ingested = useMemo(() => {
+    if (pausedCount <= 0) return telegrams;
+    const backlog = pausedBacklogRef.current;
+    return backlog.length === 0 ? telegrams : backlog.concat(telegrams);
+  }, [pausedCount, telegrams]);
+  /* eslint-enable react-hooks/refs */
+
   /* eslint-disable react-hooks/refs -- pausedTelegrams is the stable backlog above */
   return {
     telegrams,
+    ingested,
     addLive,
     setConnected,
     setPaused,

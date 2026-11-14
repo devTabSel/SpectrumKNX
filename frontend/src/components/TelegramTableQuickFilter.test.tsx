@@ -325,6 +325,30 @@ test('context-row button flags that row as its own anchor without leaving all-mo
   expect(onContextForAllMatchesChange).not.toHaveBeenCalled();
 });
 
+test('mousedown on a context button pins that row, not the previous selection', async () => {
+  const onListAnchorKeyChange = vi.fn();
+  const { container } = renderTable({
+    activeFilters: FILTERS_WITH_DELTA,
+    onListAnchorKeyChange,
+  });
+  fireEvent.click(screen.getByTitle('Show quick filter bar'));
+  fireEvent.click(screen.getByTitle(/around all messages/));
+
+  const rows = [...container.querySelectorAll('.log-row')];
+  fireEvent.click(rows[0]);
+  const other = rows.find(r => r.textContent?.includes('Licht Flur'))!;
+  const key = other.getAttribute('data-akey')!;
+  const selected = rows[0].getAttribute('data-akey')!;
+  onListAnchorKeyChange.mockClear();
+  fireEvent.mouseDown(flagButton(other));
+  fireEvent.click(flagButton(other));
+
+  await vi.waitFor(() => {
+    expect(onListAnchorKeyChange).toHaveBeenCalledWith(key);
+  });
+  expect(onListAnchorKeyChange).not.toHaveBeenCalledWith(selected);
+});
+
 test('toggling a row context button pins the preferred row as the scroll anchor', async () => {
   const onListAnchorKeyChange = vi.fn();
   const onListFollowChange = vi.fn();
@@ -432,8 +456,146 @@ test('disabling a column quick filter ignores that column\'s patterns', () => {
 
   fireEvent.click(screen.getByTitle(/^Disable quick filter for TARGET/));
   expect(rowCount(container)).toBe(3);
-  expect(screen.getByLabelText('Quick filter TARGET name')).toBeDisabled();
+  const nameInput = screen.getByLabelText('Quick filter TARGET name');
+  expect(nameInput).toBeEnabled();
+  expect(nameInput).toHaveValue('küche');
 
   fireEvent.click(screen.getByTitle(/^Enable quick filter for TARGET/));
   expect(rowCount(container)).toBe(1);
+});
+
+test('typing into an empty cell turns the column filter back on', () => {
+  const { container } = renderTable();
+  fireEvent.click(screen.getByTitle('Show quick filter bar'));
+  fireEvent.change(screen.getByLabelText('Quick filter TARGET name'), { target: { value: 'küche' } });
+  expect(rowCount(container)).toBe(1);
+
+  fireEvent.click(screen.getByTitle(/^Disable quick filter for TARGET/));
+  expect(rowCount(container)).toBe(3);
+  expect(screen.getByTitle(/^Enable quick filter for TARGET/)).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText('Quick filter TARGET name'), { target: { value: '' } });
+  fireEvent.change(screen.getByLabelText('Quick filter TARGET name'), { target: { value: 'küche' } });
+  expect(screen.getByTitle(/^Disable quick filter for TARGET/)).toBeInTheDocument();
+  expect(rowCount(container)).toBe(1);
+});
+
+test('clearing both cells of a column turns its filter off', () => {
+  const { container } = renderTable();
+  fireEvent.click(screen.getByTitle('Show quick filter bar'));
+  fireEvent.change(screen.getByLabelText('Quick filter TARGET pattern'), { target: { value: '1/2/*' } });
+  fireEvent.change(screen.getByLabelText('Quick filter TARGET name'), { target: { value: 'licht' } });
+  expect(rowCount(container)).toBe(2);
+  expect(screen.getByTitle(/^Disable quick filter for TARGET/)).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText('Quick filter TARGET pattern'), { target: { value: '' } });
+  expect(rowCount(container)).toBe(2);
+  expect(screen.getByTitle(/^Disable quick filter for TARGET/)).toBeInTheDocument();
+
+  fireEvent.change(screen.getByLabelText('Quick filter TARGET name'), { target: { value: '' } });
+  expect(rowCount(container)).toBe(3);
+  expect(screen.getByTitle(/^Enable quick filter for TARGET/)).toBeInTheDocument();
+});
+
+test('an empty column filter cannot be turned on', () => {
+  renderTable({ quickFilterOpen: true, quickFilterEnabled: true });
+  const toggle = screen.getByTitle(/^Enable quick filter for TARGET/);
+  expect(toggle).not.toHaveClass('open');
+  fireEvent.click(toggle);
+  expect(screen.getByTitle(/^Enable quick filter for TARGET/)).not.toHaveClass('open');
+});
+
+test('empty quick-filter cells that do not filter use a dark background', () => {
+  const { unmount } = renderTable({ quickFilterOpen: true, quickFilterEnabled: true });
+  const pattern = screen.getByLabelText('Quick filter TARGET pattern');
+  const name = screen.getByLabelText('Quick filter TARGET name');
+  expect(pattern).toHaveClass('idle');
+  expect(name).toHaveClass('idle');
+  expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveClass('idle');
+
+  fireEvent.change(pattern, { target: { value: '1/2/*' } });
+  expect(pattern).not.toHaveClass('idle');
+  expect(name).toHaveClass('idle');
+  unmount();
+
+  renderTable({
+    quickFilterOpen: true,
+    quickFilterEnabled: true,
+    activeFilters: FILTERS_WITH_DELTA,
+  });
+  expect(screen.getByLabelText('Time-Delta-Context before (ms)')).not.toHaveClass('idle');
+});
+
+test('the DELTA filter toggle is active only when before or after is set', () => {
+  const { rerender } = renderTable({ quickFilterOpen: true, quickFilterEnabled: true });
+  expect(screen.getByTitle(/^Time-Delta-Context: (on|off)/)).not.toHaveClass('open');
+
+  rerender(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={FILTERS_WITH_DELTA}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+    />,
+  );
+  expect(screen.getByTitle(/^Time-Delta-Context: (on|off)/)).toHaveClass('open');
+});
+
+test('a quick filter hides a flagged non-context row and keeps selection, marks, and context', () => {
+  const flagged = makeTelegram({
+    timestamp: '2024-01-01T10:00:04.000Z',
+    target_address: '9/9/1',
+    target_name: 'Flagged only',
+    raw_hex: '0x11',
+  });
+  const selected = makeTelegram({
+    timestamp: '2024-01-01T10:00:05.000Z',
+    target_address: '9/9/2',
+    target_name: 'Selected only',
+    raw_hex: '0x12',
+  });
+  const marked = makeTelegram({
+    timestamp: '2024-01-01T10:00:06.000Z',
+    target_address: '9/9/3',
+    target_name: 'Marked only',
+    raw_hex: '0x13',
+  });
+  const context = makeTelegram({
+    timestamp: '2024-01-01T10:00:07.000Z',
+    target_address: '9/9/4',
+    target_name: 'Context only',
+    raw_hex: '0x14',
+  });
+  const match = TELEGRAMS[0];
+  const flaggedKey = anchorKey(flagged);
+  const selectedKey = anchorKey(selected);
+  const markedKey = anchorKey(marked);
+  const contextKey = anchorKey(context);
+  const { container } = renderTable({
+    telegrams: [flagged, selected, marked, context, match],
+    quickFilterOpen: true,
+    quickFilterEnabled: true,
+    quickPatterns: { target: { top: '', bottom: 'Küche' } },
+    flaggedKeys: [flaggedKey],
+    mouseSelectedKeys: [selectedKey],
+    markedKeys: [markedKey],
+    contextKeys: new Set([contextKey]),
+    activeFilters: {
+      ...DEFAULT_FILTERS,
+      deltaContextEnabled: true,
+      deltaBeforeMs: 1000,
+      deltaAfterMs: 1000,
+    },
+  });
+  const keys = [...container.querySelectorAll('.log-row')].map(r => r.getAttribute('data-akey'));
+  expect(keys).not.toContain(flaggedKey);
+  expect(keys).toContain(selectedKey);
+  expect(keys).toContain(markedKey);
+  expect(keys).toContain(contextKey);
+  expect(keys).toContain(anchorKey(match));
 });

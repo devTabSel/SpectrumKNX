@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useTelegramCache } from './useTelegramCache';
 import { TelegramBufferService } from '../services/telegram-buffer-service';
+import { gaReadPhases } from '../utils/telegramCellStyles';
 import { makeTelegram } from '../test/telegramFactory';
 import { toEntry } from '../utils/telegramId';
 import { COVERAGE_STORAGE_KEY } from '../services/telegram-coverage-service';
@@ -213,7 +214,9 @@ describe('useTelegramCache', () => {
 
     // Snapshot frozen, but ingestion keeps counting. The backlog array is
     // mutated in place — a new arrival must not allocate a fresh copy.
+    // The ingested view keeps the live tail for GA read phase.
     expect(result.current.telegrams).toHaveLength(1);
+    expect(result.current.ingested).toHaveLength(3);
     expect(result.current.pausedCount).toBe(2);
     const backlog = result.current.pausedTelegrams;
     expect(backlog.map(t => t.source_address)).toEqual(['1.2.c', '1.2.b']);
@@ -224,9 +227,30 @@ describe('useTelegramCache', () => {
     expect(backlog.map(t => t.source_address)).toEqual(['1.2.d', '1.2.c', '1.2.b']);
 
     act(() => {
+      result.current.addLive(makeTelegram({
+        timestamp: new Date(4000).toISOString(),
+        source_address: '1.2.read',
+        target_address: '9/9/9',
+        simplified_type: 'Read',
+        telegram_type: 'GroupValueRead',
+      }));
+      result.current.addLive(makeTelegram({
+        timestamp: new Date(5000).toISOString(),
+        source_address: '1.2.rsp',
+        target_address: '9/9/9',
+        simplified_type: 'Response',
+        telegram_type: 'GroupValueResponse',
+      }));
+    });
+    // The pause backlog stays out of the published snapshot. GA read phase
+    // follows `ingested`, so a Response still in the backlog still answers.
+    expect(gaReadPhases(result.current.telegrams).get('9/9/9')).toBeUndefined();
+    expect(gaReadPhases(result.current.ingested).get('9/9/9')).toBe('answered');
+
+    act(() => {
       result.current.setPaused(false);
     });
-    expect(result.current.telegrams).toHaveLength(4);
+    expect(result.current.telegrams).toHaveLength(6);
     expect(result.current.pausedCount).toBe(0);
     expect(result.current.pausedTelegrams).toEqual([]);
   });
@@ -385,6 +409,7 @@ describe('useTelegramCache', () => {
     expect(result.current.telegrams[1]).toBe(before[0]);
     expect(result.current.telegrams[2]).toBe(before[1]);
   });
+
 
   it('loadRange serves cache hits and fetches only the gaps', async () => {
     const cached = tg(1500, 'cached');

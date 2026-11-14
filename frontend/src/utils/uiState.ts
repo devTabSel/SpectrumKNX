@@ -1,9 +1,6 @@
-import type { QuickPatterns } from './quickFilter';
-import {
-  MARK_REASONS,
-  type MarkReason,
-  type MarkReasonsMap,
-} from './markReasons';
+import type { QuickFilterColumnEnabled, QuickPatterns } from './quickFilter';
+import { DEFAULT_QUICK_FILTER_COLUMN_ENABLED } from './quickFilter';
+import { splitLegacyMarkReasons } from './markReasons';
 import {
   isValidMarkColorIndex,
   type MarkColorIndexMap,
@@ -16,6 +13,8 @@ export interface UiSessionState {
     /** Each column's two quick-filter rows (#309) — e.g. an address pattern
      * and a name regex, or a from/to range. */
     patterns: QuickPatterns;
+    /** Per-column filter on/off. Absent keys default to on. */
+    columnEnabled: QuickFilterColumnEnabled;
   };
   listFollow: boolean;
   listAnchorKey: string | null;
@@ -29,8 +28,12 @@ export interface UiSessionState {
   lastSeenSearch: string;
   /** Master enable/disable of the filter set (#370); absent → enabled. */
   filtersEnabled: boolean;
-  /** Live telegram list mark reasons (manual / hidden / mouse / …). */
-  markReasons: MarkReasonsMap;
+  /** Rows with the marked flag. Mouse selection is a separate flag. */
+  markedKeys: string[];
+  /** Rows in the mouse selection. */
+  mouseSelectedKeys: string[];
+  /** Rows omitted from the telegram list until shown again. */
+  hiddenKeys: string[];
   /** Live telegram list mark colours (palette indices). */
   markColorIndices: MarkColorIndexMap;
   /** Per-message Time-Delta-Context flag buttons (#319). */
@@ -44,6 +47,7 @@ export const DEFAULT_UI_STATE: UiSessionState = {
     open: false,
     enabled: false,
     patterns: {},
+    columnEnabled: { ...DEFAULT_QUICK_FILTER_COLUMN_ENABLED },
   },
   listFollow: true,
   listAnchorKey: null,
@@ -55,7 +59,9 @@ export const DEFAULT_UI_STATE: UiSessionState = {
   lastSeenLive: true,
   lastSeenSearch: '',
   filtersEnabled: true,
-  markReasons: {},
+  markedKeys: [],
+  mouseSelectedKeys: [],
+  hiddenKeys: [],
   markColorIndices: {},
   flaggedKeys: [],
   contextForAllMatches: true,
@@ -65,22 +71,8 @@ export const UI_STORAGE_KEY = 'spectrum-knx-ui';
 
 interface StoredUiState extends UiSessionState {
   v: number;
-}
-
-const MARK_REASON_SET = new Set<string>(MARK_REASONS);
-
-function sanitizeMarkReasons(raw: unknown): MarkReasonsMap {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  const out: MarkReasonsMap = {};
-  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof key !== 'string' || key.length === 0) continue;
-    if (!Array.isArray(val)) continue;
-    const reasons = val.filter((r): r is MarkReason => typeof r === 'string' && MARK_REASON_SET.has(r));
-    // Drop ephemeral goto/auto; context is re-synced from the soft window on load.
-    const durable = reasons.filter(r => r !== 'goto' && r !== 'context' && r !== 'auto');
-    if (durable.length > 0) out[key] = durable;
-  }
-  return out;
+  /** Sessions from before row flags stored a reason map. */
+  markReasons?: unknown;
 }
 
 function sanitizeMarkColorIndices(raw: unknown): MarkColorIndexMap {
@@ -139,15 +131,25 @@ function sanitize(p: Partial<StoredUiState>): UiSessionState {
     }
   }
 
+  const columnEnabled: QuickFilterColumnEnabled = { ...DEFAULT_QUICK_FILTER_COLUMN_ENABLED };
+  if (q.columnEnabled && typeof q.columnEnabled === 'object' && !Array.isArray(q.columnEnabled)) {
+    for (const [key, val] of Object.entries(q.columnEnabled as Record<string, unknown>)) {
+      if (typeof key !== 'string' || key.length === 0) continue;
+      if (typeof val === 'boolean') columnEnabled[key] = val;
+    }
+  }
+
   const zoom = Array.isArray(p.zoomRange) && p.zoomRange.length === 2 && typeof p.zoomRange[0] === 'number' && typeof p.zoomRange[1] === 'number'
     ? (p.zoomRange as [number, number])
     : null;
+  const legacy = splitLegacyMarkReasons(p.markReasons);
 
   return {
     quickFilter: {
       open: typeof q.open === 'boolean' ? q.open : false,
       enabled: typeof q.enabled === 'boolean' ? q.enabled : false,
       patterns,
+      columnEnabled,
     },
     listFollow: typeof p.listFollow === 'boolean' ? p.listFollow : true,
     listAnchorKey: typeof p.listAnchorKey === 'string' ? p.listAnchorKey : null,
@@ -159,7 +161,9 @@ function sanitize(p: Partial<StoredUiState>): UiSessionState {
     lastSeenLive: typeof p.lastSeenLive === 'boolean' ? p.lastSeenLive : true,
     lastSeenSearch: typeof p.lastSeenSearch === 'string' ? p.lastSeenSearch : '',
     filtersEnabled: typeof p.filtersEnabled === 'boolean' ? p.filtersEnabled : true,
-    markReasons: sanitizeMarkReasons(p.markReasons),
+    markedKeys: sanitizeFlaggedKeys([...legacy.markedKeys, ...sanitizeFlaggedKeys(p.markedKeys)]),
+    mouseSelectedKeys: sanitizeFlaggedKeys([...legacy.mouseSelectedKeys, ...sanitizeFlaggedKeys(p.mouseSelectedKeys)]),
+    hiddenKeys: sanitizeFlaggedKeys([...legacy.hiddenKeys, ...sanitizeFlaggedKeys(p.hiddenKeys)]),
     markColorIndices: sanitizeMarkColorIndices(p.markColorIndices),
     flaggedKeys: sanitizeFlaggedKeys(p.flaggedKeys),
     contextForAllMatches: typeof p.contextForAllMatches === 'boolean' ? p.contextForAllMatches : true,

@@ -260,16 +260,36 @@ test('manual → auto pause with the fill spacer on screen reveals one backlog r
   }
 });
 
-test('clearing the buffer locks Paused manually while empty', async () => {
+test('ctrl-clicking buffer clear pauses automatically', async () => {
   render(<App />);
   expect(await screen.findByRole('button', { name: 'Playing' })).toBeInTheDocument();
   await act(async () => {
-    fireEvent.click(screen.getByTitle('Clear (also wipes the local telegram cache)'));
+    fireEvent.click(screen.getByTitle(/Clear \(also wipes the local telegram cache\)/), { ctrlKey: true });
   });
-  const pauseBtn = await screen.findByRole('button', { name: 'Paused manually' });
-  expect(pauseBtn).toBeDisabled();
-  fireEvent.click(pauseBtn);
-  expect(screen.getByRole('button', { name: 'Paused manually' })).toBeDisabled();
+  const paused = await screen.findByRole('button', { name: 'Paused automatically' });
+  expect(paused).toBeDisabled();
+});
+
+test('clearing the buffer leaves play/pause unchanged', async () => {
+  const { unmount } = render(<App />);
+  expect(await screen.findByRole('button', { name: 'Playing' })).toBeInTheDocument();
+  await act(async () => {
+    fireEvent.click(screen.getByTitle(/Clear \(also wipes the local telegram cache\)/));
+  });
+  const playing = await screen.findByRole('button', { name: 'Playing' });
+  expect(playing).toBeDisabled();
+  fireEvent.click(playing);
+  expect(screen.getByRole('button', { name: 'Playing' })).toBeDisabled();
+  unmount();
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Playing' }));
+  expect(screen.getByRole('button', { name: 'Paused manually' })).toBeInTheDocument();
+  await act(async () => {
+    fireEvent.click(screen.getByTitle(/Clear \(also wipes the local telegram cache\)/));
+  });
+  const paused = await screen.findByRole('button', { name: 'Paused manually' });
+  expect(paused).toBeDisabled();
 });
 
 test('companion mode warns while Home Assistant\'s store holds pre-UTC timestamps (#462)', async () => {

@@ -13,7 +13,9 @@ const opts: SelectVisibleOpts = {
   quickPatterns: {},
   flaggedKeys: [],
   contextForAllMatches: false,
-  markReasons: {},
+  markedKeys: [],
+  mouseSelectedKeys: [],
+  lastSelectedKey: null,
 };
 
 const desc = [{ key: 'timestamp' as const, direction: 'desc' as const }];
