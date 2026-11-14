@@ -21,7 +21,7 @@ describe('selectVisibleTelegrams', () => {
       makeTelegram({ timestamp: '2024-01-01T10:00:02.000Z', raw_hex: '0x2' }),
       makeTelegram({ timestamp: '2024-01-01T10:00:01.000Z', raw_hex: '0x1' }),
     ];
-    expect(selectVisibleTelegrams(sorted, baseOpts).items).toEqual(sorted);
+    expect(selectVisibleTelegrams(sorted, baseOpts).items).toBe(sorted);
   });
 
   it('keeps a marked row the main filter would drop', () => {

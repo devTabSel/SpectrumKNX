@@ -90,23 +90,10 @@ const makePausedAfter = (count: number, publishedNewestOffsetS: number): Telegra
   count <= 0 ? [] : makeList(count, publishedNewestOffsetS + count);
 
 /** Pause props so the pill/thumb use filter-visible backlog (not raw pausedCount). */
-const withPauseBacklog = (
-  published: Telegram[],
-  paused: Telegram[],
-  direction: 'asc' | 'desc' = 'desc',
-) => {
-  // `published` is already in display order; `paused` is newest-first.
-  const pillTelegrams = paused.length === 0
-    ? published
-    : direction === 'desc'
-      ? paused.concat(published)
-      : published.concat(paused.slice().reverse());
-  return {
-    pausedCount: paused.length,
-    pausedTelegrams: paused,
-    pillTelegrams,
-  };
-};
+const withPauseBacklog = (paused: Telegram[]) => ({
+  pausedCount: paused.length,
+  pausedTelegrams: paused,
+});
 
 const MAKE_LIST_BASE_MS = new Date('2024-01-01T10:00:00.000Z').getTime();
 
@@ -120,11 +107,8 @@ const newestOffsetFrom = (rows: Telegram[]): number => {
   return max;
 };
 
-const pauseBacklogFor = (
-  published: Telegram[],
-  pausedN: number,
-  direction: 'asc' | 'desc' = 'desc',
-) => withPauseBacklog(published, makePausedAfter(pausedN, newestOffsetFrom(published)), direction);
+const pauseBacklogFor = (published: Telegram[], pausedN: number) =>
+  withPauseBacklog(makePausedAfter(pausedN, newestOffsetFrom(published)));
 
 const renderTable = (telegrams: Telegram[]) =>
   render(
@@ -427,6 +411,60 @@ test('while paused at the live edge, wheel toward newer flushes and scrolls into
   }
 });
 
+test('wheel over the newer pill scrolls the port and flushes only toward newer', () => {
+  const ROW = 85;
+  scrollBlockSize = ROW * 2;
+  const onListFollowChange = vi.fn();
+  const onPauseFlush = vi.fn();
+  const frozen = makeList(8, 7);
+  try {
+    const { container } = render(
+      <TelegramTable
+        telegrams={frozen}
+        visibleColumns={visibleColumns}
+        sortConfig={sortConfig}
+        onSort={vi.fn()}
+        activeFilters={DEFAULT_FILTERS}
+        onQuickFilter={vi.fn()}
+        onQuickVisualize={vi.fn()}
+        listFollow={false}
+        onListFollowChange={onListFollowChange}
+        isPaused
+        {...pauseBacklogFor(frozen, 5)}
+        onPauseFlush={onPauseFlush}
+      />,
+    );
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = 0;
+    fireEvent.scroll(port);
+    onPauseFlush.mockClear();
+    // jsdom does not implement Element.scrollBy; the browser does.
+    const scrollBy = vi.fn();
+    port.scrollBy = scrollBy;
+    const pill = screen.getByRole('button', { name: '5 newer telegrams' });
+
+    // Away from the live edge: the list moves, the backlog stays put.
+    expect(fireEvent.wheel(pill, { deltaY: 40, deltaX: 0 })).toBe(false);
+    expect(onPauseFlush).not.toHaveBeenCalled();
+    expect(scrollBy).toHaveBeenCalledWith({ top: 40, left: 0 });
+
+    // Toward newer: same flush as a wheel on the port, then the pixel delta.
+    scrollBy.mockClear();
+    fireEvent.wheel(pill, { deltaY: -40, deltaX: 0 });
+    expect(onPauseFlush).toHaveBeenCalledTimes(1);
+    expect(onListFollowChange).not.toHaveBeenCalledWith(true);
+    expect(scrollBy).toHaveBeenCalledWith({ top: -40, left: 0 });
+
+    scrollBy.mockClear();
+    fireEvent.wheel(pill, { deltaY: 2, deltaX: -1, deltaMode: 1 });
+    expect(scrollBy).toHaveBeenCalledWith({ top: 32, left: -16 });
+    fireEvent.wheel(pill, { deltaY: 1, deltaX: 0, deltaMode: 2 });
+    expect(scrollBy).toHaveBeenCalledWith({ top: ROW * 2, left: 0 });
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
 test('wheel past newest at the live edge re-enables follow after unfollow', () => {
   const onListFollowChange = vi.fn();
   const { container, rerender } = render(
@@ -646,7 +684,57 @@ test('jump-to-live pill re-enables follow without leaving the edge first', () =>
   }
 });
 
-test('jump-to-live pill flushes pause buffer and lands on the merged newest', () => {
+test('plain click on the newer pill shows the backlog and stays manually paused', () => {
+  const ROW = 85;
+  scrollBlockSize = ROW * 2;
+  const onListFollowChange = vi.fn();
+  const onJumpToLive = vi.fn();
+  const onPauseReveal = vi.fn();
+  const frozen = makeList(10, 9);
+  const flushed = makeList(14, 13);
+  const props = (
+    telegrams: Telegram[],
+    follow: boolean,
+    paused: boolean,
+    pausedN: number,
+  ) => (
+    <TelegramTable
+      telegrams={telegrams}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={follow}
+      onListFollowChange={onListFollowChange}
+      isPaused={paused}
+      isManualPause={paused}
+      {...pauseBacklogFor(telegrams, pausedN)}
+      onPauseReveal={onPauseReveal}
+      onJumpToLive={onJumpToLive}
+    />
+  );
+
+  try {
+    const { container, rerender } = render(props(frozen, false, true, 4));
+    const port = container.querySelector('.custom-scrollbar') as HTMLElement;
+    port.scrollTop = ROW * 3;
+    fireEvent.scroll(port);
+
+    fireEvent.click(screen.getByRole('button', { name: /newer telegram/ }));
+    expect(onPauseReveal).toHaveBeenCalledTimes(1);
+    expect(onPauseReveal).toHaveBeenCalledWith(4);
+    expect(onJumpToLive).not.toHaveBeenCalled();
+    expect(onListFollowChange).not.toHaveBeenCalledWith(true);
+    rerender(props(flushed, false, true, 0));
+    expect(port.scrollTop).toBe(LIVE_EDGE_TOP);
+  } finally {
+    scrollBlockSize = 800;
+  }
+});
+
+test('ctrl-click on the newer pill flushes a manual pause and lands on the merged newest', () => {
   const ROW = 85;
   scrollBlockSize = ROW * 2;
   const onListFollowChange = vi.fn();
@@ -682,11 +770,10 @@ test('jump-to-live pill flushes pause buffer and lands on the merged newest', ()
     port.scrollTop = ROW * 3;
     fireEvent.scroll(port);
 
-    fireEvent.click(screen.getByRole('button', { name: /newer telegram/ }));
+    fireEvent.click(screen.getByRole('button', { name: /newer telegram/ }), { ctrlKey: true });
     expect(onJumpToLive).toHaveBeenCalledTimes(1);
     expect(onListFollowChange).toHaveBeenCalledWith(true);
 
-    // Simulate App resume: playing + follow, then publish the merged backlog.
     rerender(props(frozen, true, false, 0));
     rerender(props(flushed, true, false, 0));
     expect(port.scrollTop).toBe(LIVE_EDGE_TOP);
@@ -775,25 +862,24 @@ test('fill-spacer pause labels only when manually paused and fill rubber fully v
   );
   const port = container.querySelector('.custom-scrollbar') as HTMLElement;
 
-  // Fully into fill rubber → labels on.
+  // Fully into fill rubber → one label, above the pill (newest row is on top).
   act(() => {
     port.scrollTop = 0;
     fireEvent.scroll(port);
   });
-  const left = screen.getByTestId('fill-rubber-pause-label-left');
-  const right = screen.getByTestId('fill-rubber-pause-label-right');
-  expect(left).toHaveTextContent('...paused manually...');
-  expect(right).toHaveTextContent('...paused manually...');
-  expect(left).toHaveClass('fill-rubber-pause-label');
-  expect(right).toHaveClass('fill-rubber-pause-label');
+  const label = screen.getByTestId('fill-rubber-pause-label');
+  expect(screen.getAllByText('...paused manually...')).toHaveLength(1);
+  expect(label).toHaveClass('fill-rubber-pause-label');
+  expect(label).toHaveAttribute('data-edge', 'top');
+  expect(label.style.top).toBe('0px');
 
-  // Another toward-newer wheel at the hard stop remounts labels (restart fade).
+  // Another toward-newer wheel at the hard stop remounts the label (restart fade).
   act(() => {
     fireEvent.wheel(port, { deltaY: -40 });
   });
-  const leftAfterWheel = screen.getByTestId('fill-rubber-pause-label-left');
-  expect(leftAfterWheel).toBeInTheDocument();
-  expect(leftAfterWheel).not.toBe(left);
+  const labelAfterWheel = screen.getByTestId('fill-rubber-pause-label');
+  expect(labelAfterWheel).toBeInTheDocument();
+  expect(labelAfterWheel).not.toBe(label);
 
   // Overlay scrollbar thumb drag further into fill at the hard stop remounts too.
   const thumb = screen.getByTestId('list-scrollbar-thumb');
@@ -801,9 +887,9 @@ test('fill-spacer pause labels only when manually paused and fill rubber fully v
     fireEvent.pointerDown(thumb, { pointerId: 1, clientY: 80 });
     fireEvent.pointerMove(thumb, { pointerId: 1, clientY: 40 });
   });
-  const leftAfterSb = screen.getByTestId('fill-rubber-pause-label-left');
-  expect(leftAfterSb).toBeInTheDocument();
-  expect(leftAfterSb).not.toBe(leftAfterWheel);
+  const labelAfterSb = screen.getByTestId('fill-rubber-pause-label');
+  expect(labelAfterSb).toBeInTheDocument();
+  expect(labelAfterSb).not.toBe(labelAfterWheel);
   act(() => {
     fireEvent.pointerUp(thumb, { pointerId: 1, clientY: 40 });
   });
@@ -813,15 +899,37 @@ test('fill-spacer pause labels only when manually paused and fill rubber fully v
     port.scrollTop = LIVE_EDGE_TOP;
     fireEvent.scroll(port);
   });
-  expect(screen.queryByTestId('fill-rubber-pause-label-left')).not.toBeInTheDocument();
-  expect(screen.queryByTestId('fill-rubber-pause-label-right')).not.toBeInTheDocument();
+  expect(screen.queryByTestId('fill-rubber-pause-label')).not.toBeInTheDocument();
 
   // Re-enter fill rubber → labels return (fade restarts via rising edge).
   act(() => {
     port.scrollTop = 0;
     fireEvent.scroll(port);
   });
-  expect(screen.getByTestId('fill-rubber-pause-label-left')).toBeInTheDocument();
+  expect(screen.getByTestId('fill-rubber-pause-label')).toBeInTheDocument();
+
+  // Newest row at the bottom: the same label sits below the pill.
+  rerender(
+    <TelegramTable
+      telegrams={makeList(4, 3).slice().reverse()}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'asc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      isPaused
+      isManualPause
+    />,
+  );
+  act(() => {
+    port.scrollTop = port.scrollHeight;
+    fireEvent.scroll(port);
+  });
+  const below = screen.getByTestId('fill-rubber-pause-label');
+  expect(screen.getAllByText('...paused manually...')).toHaveLength(1);
+  expect(below).toHaveAttribute('data-edge', 'bottom');
+  expect(below.style.bottom).toBe('0px');
 
   // Auto-pause at full fill → still no labels.
   rerender(
@@ -841,7 +949,7 @@ test('fill-spacer pause labels only when manually paused and fill rubber fully v
     port.scrollTop = 0;
     fireEvent.scroll(port);
   });
-  expect(screen.queryByTestId('fill-rubber-pause-label-left')).not.toBeInTheDocument();
+  expect(screen.queryByTestId('fill-rubber-pause-label')).not.toBeInTheDocument();
 });
 
 test('newest-on-bottom: clicking a row stays anchored while the full buffer evicts (#297)', () => {
@@ -1878,7 +1986,7 @@ test('along-fill flush on ascending live edge stays seamless (no edge snap)', ()
       listFollow={false}
       onListFollowChange={onListFollowChange}
       isPaused={paused}
-      {...pauseBacklogFor(telegrams, pausedN, 'asc')}
+      {...pauseBacklogFor(telegrams, pausedN)}
       onPauseFlush={onPauseFlush}
     />
   );
@@ -2363,7 +2471,7 @@ test('pausedCount does not grow scrollHeight; pill still shows backlog', () => {
       listFollow={false}
       onListFollowChange={vi.fn()}
       isPaused={pausedN > 0}
-      {...pauseBacklogFor(published, pausedN, asc ? 'asc' : 'desc')}
+      {...pauseBacklogFor(published, pausedN)}
     />
     );
   };
@@ -2445,7 +2553,7 @@ test('newer-pill and thumb count only filter-visible pause backlog', () => {
     ...t,
     target_address: i === 0 ? '1/2/keep' : '1/2/drop',
   }));
-  const pause = withPauseBacklog(published, paused);
+  const pause = withPauseBacklog(paused);
 
   try {
     render(
@@ -2619,11 +2727,7 @@ const meteredProps = (
     listFollow={false}
     onListFollowChange={handlers.onListFollowChange}
     isPaused={paused}
-    {...pauseBacklogFor(
-      telegrams,
-      pausedN,
-      sort[0]?.direction === 'asc' ? 'asc' : 'desc',
-    )}
+    {...pauseBacklogFor(telegrams, pausedN)}
     onPauseFlush={handlers.onPauseFlush}
     onPauseReveal={handlers.onPauseReveal}
   />
@@ -3104,11 +3208,7 @@ const holdProps = (
     onListFollowChange={opts.handlers.onListFollowChange}
     isPaused={opts.paused}
     isManualPause={opts.manual}
-    {...pauseBacklogFor(
-      telegrams,
-      opts.pausedN,
-      (opts.sort ?? sortConfig)[0]?.direction === 'asc' ? 'asc' : 'desc',
-    )}
+    {...pauseBacklogFor(telegrams, opts.pausedN)}
     onPauseFlush={opts.handlers.onPauseFlush}
     onPauseReveal={opts.handlers.onPauseReveal}
     onJumpToLive={opts.onJumpToLive}
@@ -3132,14 +3232,15 @@ test('cleared list: newer-pill reveal lands on the edge row, not on the fill spa
     port.scrollTop = 0;
     fireEvent.scroll(port);
 
-    fireEvent.click(screen.getByRole('button', { name: /newer telegram/ }));
+    // Ctrl-click resumes a manual pause; a plain click would only scroll.
+    fireEvent.click(screen.getByRole('button', { name: /newer telegram/ }), { ctrlKey: true });
     expect(onJumpToLive).toHaveBeenCalledTimes(1);
 
     // Parent flushed the backlog: the first rows must sit flush with the edge —
     // the fill spacer (scrollTop 0) must not stay on screen.
     rerender(holdProps(makeList(3, 2), { paused: false, manual: false, pausedN: 0, handlers: h, onJumpToLive }));
     expect(port.scrollTop).toBe(LIVE_EDGE_TOP);
-    expect(screen.queryByTestId('fill-rubber-pause-label-left')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('fill-rubber-pause-label')).not.toBeInTheDocument();
   } finally {
     scrollBlockSize = 800;
   }
@@ -3207,14 +3308,14 @@ test('manual pause with a backlog: the fill spacer holds, no rubber-band, labels
         port.scrollTop = 0;
         fireEvent.scroll(port);
       });
-      expect(screen.getByTestId('fill-rubber-pause-label-left')).toHaveTextContent('...paused manually...');
+      expect(screen.getByTestId('fill-rubber-pause-label')).toHaveTextContent('...paused manually...');
       act(() => {
         fireEvent.wheel(port, { deltaY: -40 });
       });
       await act(async () => { vi.advanceTimersByTime(90); });
       await act(async () => { vi.advanceTimersByTime(180); });
       expect(port.scrollTop).toBe(0);
-      expect(screen.getByTestId('fill-rubber-pause-label-left')).toBeInTheDocument();
+      expect(screen.getByTestId('fill-rubber-pause-label')).toBeInTheDocument();
       expect(h.onPauseReveal).not.toHaveBeenCalled();
       expect(h.onPauseFlush).not.toHaveBeenCalled();
     } finally {

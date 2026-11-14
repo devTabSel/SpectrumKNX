@@ -123,6 +123,36 @@ test('manual pause latches as Paused manually', async () => {
   expect(screen.getByRole('button', { name: 'Paused manually' })).toBeInTheDocument();
 });
 
+test('newer pill does not leave manual pause', async () => {
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Playing' }));
+  await act(async () => {
+    cacheCtl.addLive!(makeTelegram({
+      timestamp: new Date().toISOString(),
+      raw_hex: '0xmanual',
+    }));
+  });
+  const revealsBefore = cacheCtl.revealCalls.length;
+  fireEvent.click(screen.getByRole('button', { name: '1 newer telegram' }));
+  expect(screen.getByRole('button', { name: 'Paused manually' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /newer telegram/ })).not.toBeInTheDocument();
+  expect(cacheCtl.revealCalls.slice(revealsBefore)).toEqual([1]);
+});
+
+test('ctrl-click on the newer pill leaves manual pause and flushes the backlog', async () => {
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Playing' }));
+  await act(async () => {
+    cacheCtl.addLive!(makeTelegram({
+      timestamp: new Date().toISOString(),
+      raw_hex: '0xctrl',
+    }));
+  });
+  fireEvent.click(screen.getByRole('button', { name: '1 newer telegram' }), { ctrlKey: true });
+  expect(screen.getByRole('button', { name: 'Playing' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '1 newer telegram' })).not.toBeInTheDocument();
+});
+
 test('Pause icon toggles Paused manually ↔ Paused automatically', async () => {
   render(<App />);
   fireEvent.click(await screen.findByRole('button', { name: 'Playing' }));
@@ -212,7 +242,7 @@ test('manual → auto pause with the fill spacer on screen reveals one backlog r
     port.scrollTop = 0;
     fireEvent.scroll(port);
   });
-  expect(screen.getByTestId('fill-rubber-pause-label-left')).toHaveTextContent('...paused manually...');
+  expect(screen.getByTestId('fill-rubber-pause-label')).toHaveTextContent('...paused manually...');
   expect(cacheCtl.revealCalls).toEqual([]);
 
   // Switching to auto pause fills the slot with the oldest backlog row only.

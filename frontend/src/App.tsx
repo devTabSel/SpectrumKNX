@@ -24,8 +24,8 @@ import { TelegramTable, type SortConfig, type SortKey, type ListGotoRequest } fr
 import { anchorKey } from './utils/anchorKey';
 import type { MarkReasonsMap } from './utils/markReasons';
 import type { MarkColorIndexMap } from './utils/markColors';
-import { selectVisibleTelegrams } from './utils/selectVisibleTelegrams';
-import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
+import { readSortConfigPref, writeSortConfigPref, toggleSortLevel } from './utils/sortConfig';
+import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTelegramView';
 import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
@@ -60,7 +60,6 @@ import { useAuthStatus, loginRequired } from './hooks/useAuthStatus';
 import { useUpdateCheck } from './hooks/useUpdateCheck';
 import {
   DEFAULT_FILTERS,
-  countFilterOptions,
   hasActiveFilters,
   enabledFilters,
   pruneDisabled,
@@ -587,8 +586,10 @@ function App() {
   // auto ↔ manual (stays frozen). Manual→Auto keeps the backlog in the pause
   // buffer; the table fills the fill-spacer with its oldest row and feeds the
   // rest in as the user scrolls toward the live edge. Empty buffer ("No data
-  // available") locks Paused manually. Resume via jump-to-live, or auto
-  // edge-flush / follow-while-auto.
+  // available") locks Paused manually. Resume via the newer pill while
+  // auto-paused, Ctrl-click on that pill while manually paused, or an auto
+  // edge-flush / follow-while-auto. A plain pill click keeps manual pause and
+  // publishes the backlog so the view can land on the newest telegram.
   const bufferEmpty = liveTelegrams.length === 0;
   const togglePause = () => {
     if (bufferEmpty) return;
@@ -624,18 +625,20 @@ function App() {
   }, [pauseMode, setCachePaused]);
 
   // Metered flush: reveal the oldest `n` backlog rows while staying auto-paused,
-  // so the table can scroll them in line by line. Once the backlog is gone the
-  // mode returns to playing (same as a full flush). Manual pause never reveals.
+  // so the table can scroll them in line by line. Once that backlog is gone the
+  // mode returns to playing (same as a full flush). A plain newer-pill click
+  // while manually paused reveals the whole backlog and stays paused.
   const revealPauseBuffer = useCallback((n: number) => {
-    if (pauseMode !== 'auto') return;
+    if (pauseMode === 'playing') return;
     const remaining = revealPaused(n);
-    if (remaining <= 0) {
+    if (pauseMode === 'auto' && remaining <= 0) {
       setPauseMode('playing');
       setCachePaused(false);
     }
   }, [pauseMode, revealPaused, setCachePaused]);
 
-  // Newer-pill: always Play + follow + flush (including manual pause latch).
+  // Newer-pill resume. The table only calls this for auto-pause and for a
+  // Ctrl-click during manual pause; a plain click stays latched.
   const jumpToLiveResume = useCallback(() => {
     setPauseMode('playing');
     setCachePaused(false);
@@ -835,11 +838,6 @@ function App() {
     handleFiltersChange(prev => ({ ...prev, deltaContextEnabled }));
   }, [handleFiltersChange]);
 
-  const sortedLiveTelegrams = useMemo(
-    () => sortTelegrams(liveTelegrams, sortConfig),
-    [liveTelegrams, sortConfig]
-  );
-
   // ── In-memory filtering (live view) ────────────────────────────────────────
   const visibleOpts = useMemo(() => ({
     filters: appliedFilters,
@@ -855,28 +853,19 @@ function App() {
     flaggedTelegramKeys, contextForAllMatches, telegramMarkReasons,
   ]);
 
-  const deltaExpandedLive = useMemo(
-    () => selectVisibleTelegrams(sortedLiveTelegrams, visibleOpts),
-    [sortedLiveTelegrams, visibleOpts],
-  );
-  const filteredLiveTelegrams = deltaExpandedLive.items;
+  const liveViewRef = useRef<LiveTelegramView | null>(null);
+  // The previous view has to be read while rendering: an effect would apply the
+  // prepend a frame late. deriveLiveTelegramView is idempotent for the same
+  // source, so StrictMode's second render does not edit the list twice.
+  // eslint-disable-next-line react-hooks/refs
+  const liveView = deriveLiveTelegramView(liveViewRef.current, liveTelegrams, sortConfig, visibleOpts);
+  // eslint-disable-next-line react-hooks/refs
+  liveViewRef.current = liveView;
+  const sortedLiveTelegrams = liveView.sorted;
+  const filteredLiveTelegrams = liveView.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
-  const contextTelegramKeys = deltaExpandedLive.contextKeys;
-
-  // Union of published + pause backlog for the newer-pill / scrollbar (not rendered).
-  const sortedPillPool = useMemo(() => {
-    if (pausedTelegrams.length === 0) return sortedLiveTelegrams;
-    return sortTelegrams([...liveTelegrams, ...pausedTelegrams], sortConfig);
-  }, [pausedTelegrams, sortedLiveTelegrams, liveTelegrams, sortConfig]);
-  const pillTelegrams = useMemo(
-    () => (pausedTelegrams.length === 0
-      ? filteredLiveTelegrams
-      : selectVisibleTelegrams(sortedPillPool, visibleOpts).items),
-    [pausedTelegrams.length, filteredLiveTelegrams, sortedPillPool, visibleOpts],
-  );
-
-  // ── Count bubbles ───────────────────────────────────────────────
-  const filterCounts = useMemo(() => countFilterOptions(sortedLiveTelegrams), [sortedLiveTelegrams]);
+  const contextTelegramKeys = liveView.contextKeys;
+  const filterCounts = liveView.counts;
 
   const activeFilterCount = countSelections(appliedFilters);
 
@@ -1466,8 +1455,8 @@ function App() {
                     <TelegramTable
                     telegrams={filteredLiveTelegrams}
                     forceIncludeFrom={sortedLiveTelegrams}
-                    pillTelegrams={pillTelegrams}
                     pausedTelegrams={pausedTelegrams}
+                    filtersEnabled={filtersEnabled}
                     visibleColumns={visibleColumns}
                     sortConfig={sortConfig}
                     onSort={handleSort}

@@ -3,13 +3,14 @@ import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
 import { ChevronUp, ChevronDown, Filter, LineChart, X, Clock, Circle, PlusCircle, Download, List, Search } from 'lucide-react';
-import { effectiveDeltaContext, type ActiveFilters } from '../types/filters';
+import { effectiveDeltaContext, enabledFilters, matchesTelegram, type ActiveFilters } from '../types/filters';
 import { contextRailSigns } from '../utils/deltaContextExpansion';
 import { SendToGaPopover } from './SendToGaPopover';
 import { GotoTimeControl } from './GotoTimeControl';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
 import {
+  activeQuickFilter,
   compileQuickFilters,
   DEFAULT_QUICK_FILTER_COLUMN_ENABLED,
   type QuickCellValue,
@@ -20,6 +21,10 @@ import { useTargetColors } from '../utils/targetColors';
 import { anchorKey } from '../utils/anchorKey';
 import { downloadTelegramsCsv } from '../utils/telegramCsv';
 import { adjacentMark } from '../utils/adjacentMark';
+import { readListEdge } from '../utils/listEdge';
+import { coveredByAnchors, createPausedVisState, syncPausedVisibility } from '../utils/pausedVisibility';
+import { createStripeState } from '../utils/stripeIndex';
+import { buildTelegramRows, patchTelegramRows, type TelegramRowOf } from '../utils/telegramRowDeltas';
 import { forceIncludeKeys } from '../utils/forceIncludeKeys';
 import { peakRate } from '../utils/peakRate';
 import { moveColumn, readColumnOrderPref, writeColumnOrderPref } from '../utils/columnOrder';
@@ -87,34 +92,34 @@ interface TelegramTableProps {
   onListFollowChange?: (follow: boolean) => void;
   listAnchorKey?: string | null;
   onListAnchorKeyChange?: (key: string | null) => void;
-  /** Buffer snapshot is frozen; pause backlog feeds the jump-to-live pill via pillTelegrams. */
+  /** Buffer snapshot is frozen; the pause backlog feeds the jump-to-live pill. */
   isPaused?: boolean;
   /** User latched Pause (manual); blocks auto live-follow from newest visibility. */
   isManualPause?: boolean;
+  /** Master filter toggle. Backlog rows are matched against `activeFilters` only while this is on. */
+  filtersEnabled?: boolean;
   /** Telegrams ingested since the buffer snapshot was frozen. */
   pausedCount?: number;
   /**
-   * Pause backlog as telegrams (newest first). Used with `pillTelegrams` so the
-   * newer-pill and scrollbar thumb count only filter-visible backlog rows.
+   * Pause backlog (newest first). Stable array, mutated in place; pair with
+   * `pausedCount` so the pill can classify each arrival without copying it.
    */
   pausedTelegrams?: Telegram[];
-  /**
-   * App-visible published∪paused pool (main filter + context + marks). The
-   * table applies Focus/QF/Hidden on top for the newer-pill and thumb. Defaults
-   * to `telegrams` (no pause backlog in the count).
-   */
-  pillTelegrams?: Telegram[];
   /** Reach the frozen live edge while auto-paused: flush without forcing follow. */
   onPauseFlush?: () => void;
   /**
    * Metered flush while auto-paused: reveal the oldest `n` backlog telegrams
    * (snapshot stays frozen otherwise). The table feeds the backlog in a few
    * rows per fill-axis gesture so it scrolls in line by line; the parent
-   * resumes playing once the backlog is empty. Without it, the whole backlog
-   * is flushed via `onPauseFlush`.
+   * resumes playing once the backlog is empty. A plain newer-pill click while
+   * manually paused asks for the whole backlog and stays paused. Without it,
+   * the whole backlog is flushed via `onPauseFlush`.
    */
   onPauseReveal?: (n: number) => void;
-  /** Newer-pill: force Play + follow + flush so the jump includes the pause buffer. */
+  /**
+   * Newer-pill resume. Called for auto-pause and for a Ctrl-click during
+   * manual pause. A plain click while manually paused does not call this.
+   */
   onJumpToLive?: () => void;
 
   // Lifted row marks (#310): keys of marked telegrams + the most-recently
@@ -249,20 +254,14 @@ const SOURCE_NAME_TEXT_STYLE: React.CSSProperties = {
   whiteSpace: 'nowrap',
 };
 
-type TelegramRow = Telegram & { deltaStr: string | null; deltaNextStr: string | null; deltaMs: number | null };
-
-const formatDeltaMs = (diffMs: number, sign: '+' | '-'): string => {
-  const mm = String(Math.floor(diffMs / 60000)).padStart(2, '0');
-  const ss = String(Math.floor((diffMs % 60000) / 1000)).padStart(2, '0');
-  const ms = String(diffMs % 1000).padStart(3, '0');
-  return `${sign} ${mm}:${ss}.${ms}`;
-};
+type TelegramRow = TelegramRowOf<Telegram>;
 
 const cellPadding = '0.75rem 1rem'; // Unified padding for all cells
-
 const ROW_ESTIMATE = 85; // matches the virtualizer's estimateSize
 /** Fill-axis overscroll rubber; rubber-bands back to the edge telegram. */
 const FILL_RUBBER_PX = Math.round(ROW_ESTIMATE / 2);
+/** Stable empty backlog so a missing prop does not change identity every render. */
+const EMPTY_PAUSED: Telegram[] = [];
 const EDGE_SCROLL_EPS = 20;
 /**
  * Most pause-backlog rows revealed per step. Must stay below the virtualizer's
@@ -275,6 +274,14 @@ const LIST_SB_WIDTH_PX = 8;
 const LIST_SB_MIN_THUMB_PX = 20;
 // Floating edge pills (newer / marks): inset from the live edge, then half a
 // single-line pill height so 1- and 2-line marks stay on the same center as newer.
+/** CSS default for one DOM_DELTA_LINE when an overlay must scroll the port itself. */
+const WHEEL_LINE_PX = 16;
+
+function wheelAxisPx(delta: number, mode: number, pagePx: number): number {
+  if (mode === WheelEvent.DOM_DELTA_LINE) return delta * WHEEL_LINE_PX;
+  if (mode === WheelEvent.DOM_DELTA_PAGE) return delta * pagePx;
+  return delta;
+}
 const EDGE_PILL_INSET = '1rem';
 const EDGE_PILL_HALF = '0.85rem';
 const EDGE_PILL_CENTER = `calc(${EDGE_PILL_INSET} + ${EDGE_PILL_HALF})`;
@@ -283,42 +290,44 @@ function timeMs(timestamp: string): number {
   return new Date(timestamp).getTime();
 }
 
+interface VirtualEdgeItem {
+  index: number;
+  start: number;
+  size: number;
+}
+
 /**
- * Merged rows completely scrolled out of the viewport toward the fill axis
- * (partial overlap does not count). `liveEdge === 'top'` → rows fully above
- * the viewport; `'bottom'` → fully below. Walks from the fill edge so
- * unmeasured sizes stop the scan rather than inventing offsets.
+ * Merged rows completely scrolled out toward the fill axis (partial overlap
+ * does not count). Rows outside the rendered window are fully out; only the
+ * already-rendered edge items are inspected, so this stays O(overscan).
  */
-function countFillAxisScrolledOut(
+function countMergedScrolledOut(
   rowCount: number,
   liveEdge: 'top' | 'bottom',
   scrollTop: number,
   clientHeight: number,
-  getStart: (index: number) => number | undefined,
-  getSize: (index: number) => number | undefined,
+  virtualItems: readonly VirtualEdgeItem[],
 ): number {
-  if (rowCount === 0 || clientHeight <= 0) return 0;
+  if (rowCount === 0 || clientHeight <= 0 || virtualItems.length === 0) return 0;
   const viewTop = scrollTop;
   const viewBottom = scrollTop + clientHeight;
-  let count = 0;
   if (liveEdge === 'top') {
-    for (let i = 0; i < rowCount; i++) {
-      const start = getStart(i);
-      const size = getSize(i);
-      if (start === undefined || size === undefined || size <= 0) break;
-      if (start + size <= viewTop) count++;
+    const first = virtualItems[0];
+    let extra = 0;
+    for (const item of virtualItems) {
+      if (item.size > 0 && item.start + item.size <= viewTop) extra++;
       else break;
     }
-  } else {
-    for (let i = rowCount - 1; i >= 0; i--) {
-      const start = getStart(i);
-      const size = getSize(i);
-      if (start === undefined || size === undefined || size <= 0) break;
-      if (start >= viewBottom) count++;
-      else break;
-    }
+    return first.index + extra;
   }
-  return count;
+  const last = virtualItems[virtualItems.length - 1];
+  let extra = 0;
+  for (let i = virtualItems.length - 1; i >= 0; i--) {
+    const item = virtualItems[i];
+    if (item.size > 0 && item.start >= viewBottom) extra++;
+    else break;
+  }
+  return (rowCount - 1 - last.index) + extra;
 }
 
 // ── Quick filter bar (#271, #309) ────────────────────────────────────────────
@@ -335,8 +344,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   onDeltaContextChange,
   onDeltaContextEnabledChange,
   listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
-  isPaused = false, isManualPause = false, pausedCount = 0,
-  pausedTelegrams = [], pillTelegrams,
+  isPaused = false, isManualPause = false, filtersEnabled = true, pausedCount = 0,
+  pausedTelegrams = EMPTY_PAUSED,
   onPauseFlush, onPauseReveal, onJumpToLive,
   markReasons: markReasonsProp, onMarkReasonsChange,
   markColorIndices: markColorIndicesProp, onMarkColorIndicesChange,
@@ -777,6 +786,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // already dropped them from `telegrams`. List pool stays published-only so
   // pause backlog never leaks into rows; pill pool adds paused for mark restore.
   const applyTableVisibility = useCallback((rows: Telegram[], pool: Telegram[]) => {
+    if (
+      !focusFilteringActive &&
+      !(quickOpen && quickEnabled) &&
+      hiddenMarkedSet.size === 0 &&
+      visibleMarkedSet.size === 0
+    ) {
+      return rows;
+    }
     let list = rows;
     if (focusFilteringActive) {
       const focusListSet = new Set(focusListAddresses);
@@ -806,43 +823,82 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const listForcePool = forceIncludeFrom ?? telegrams;
   // Zebra parity follows this pool index (not the compacted visible index), so
   // filter / QF toggles do not recolour surviving telegrams.
-  const stripeIndexByKey = useMemo(() => {
-    const map = new Map<string, number>();
-    for (let i = 0; i < listForcePool.length; i++) {
-      map.set(anchorKey(listForcePool[i]), i);
-    }
-    return map;
-  }, [listForcePool]);
+  const [stripeState] = useState(createStripeState<Telegram>);
+  const stripeIndexByKey = useMemo(
+    () => stripeState.update(listForcePool, anchorKey),
+    [stripeState, listForcePool],
+  );
   const quickFiltered = useMemo(
     () => applyTableVisibility(telegrams, listForcePool),
     [applyTableVisibility, telegrams, listForcePool],
   );
 
-  const pillForcePool = useMemo(() => {
-    if (pausedTelegrams.length === 0) return listForcePool;
-    const seen = new Set(listForcePool.map(anchorKey));
-    const extra = pausedTelegrams.filter(t => !seen.has(anchorKey(t)));
-    return extra.length === 0 ? listForcePool : listForcePool.concat(extra);
-  }, [listForcePool, pausedTelegrams]);
-
-  const pillVisible = useMemo(
-    () => applyTableVisibility(pillTelegrams ?? telegrams, pillForcePool),
-    [applyTableVisibility, pillTelegrams, telegrams, pillForcePool],
+  // Pill count: main filter + QF + delta window + focus + marks. Full scan only
+  // when those inputs change; each paused arrival classifies the new row.
+  const pillFilters = useMemo(() => enabledFilters(activeFilters), [activeFilters]);
+  const noMainFilter = !filtersEnabled || (
+    pillFilters.sources.length === 0 &&
+    pillFilters.targets.length === 0 &&
+    pillFilters.types.length === 0 &&
+    pillFilters.directions.length === 0 &&
+    pillFilters.dpts.length === 0
   );
-
-  const pausedKeySet = useMemo(
-    () => new Set(pausedTelegrams.map(anchorKey)),
-    [pausedTelegrams],
+  const pillQuick = useMemo(
+    () => activeQuickFilter(quickOpen, quickEnabled, currentPatterns, quickColumnEnabled),
+    [quickOpen, quickEnabled, currentPatterns, quickColumnEnabled],
   );
-
-  const visiblePausedCount = useMemo(() => {
-    if (pausedKeySet.size === 0) return 0;
-    let n = 0;
-    for (const t of pillVisible) {
-      if (pausedKeySet.has(anchorKey(t))) n++;
+  const focusAddressSet = useMemo(
+    () => (focusFilteringActive ? new Set(focusListAddresses) : null),
+    [focusFilteringActive, focusListAddresses],
+  );
+  const pauseVisEpoch = useMemo(() => ({
+    noMainFilter, pillFilters, pillQuick, focusAddressSet, sourceFocusOnly, targetFocusOnly,
+    hiddenMarkedSet, visibleMarkedSet, flaggedSet, contextForAll,
+    deltaBeforeMs, deltaAfterMs, deltaOn: activeFilters.deltaContextEnabled,
+  }), [
+    noMainFilter, pillFilters, pillQuick, focusAddressSet, sourceFocusOnly, targetFocusOnly,
+    hiddenMarkedSet, visibleMarkedSet, flaggedSet, contextForAll,
+    deltaBeforeMs, deltaAfterMs, activeFilters.deltaContextEnabled,
+  ]);
+  const pauseVisRef = useRef(createPausedVisState());
+  const windowOn = deltaBeforeMs > 0 || deltaAfterMs > 0;
+  const primaryMatch = (t: Telegram) =>
+    (noMainFilter || matchesTelegram(t, pillFilters)) && (!pillQuick || pillQuick(t));
+  const isPausedAnchor = (t: Telegram) =>
+    windowOn && (flaggedSet.has(anchorKey(t)) || (contextForAll && primaryMatch(t)));
+  const keepPaused = (t: Telegram, anchors: readonly number[]) => {
+    const key = anchorKey(t);
+    if (hiddenMarkedSet.has(key)) return false;
+    if (visibleMarkedSet.has(key)) return true;
+    if (focusAddressSet) {
+      if (sourceFocusOnly && !focusAddressSet.has(t.source_address)) return false;
+      if (targetFocusOnly && !focusAddressSet.has(t.target_address)) return false;
     }
-    return n;
-  }, [pillVisible, pausedKeySet]);
+    if (primaryMatch(t)) return true;
+    if (activeFilters.deltaContextEnabled && flaggedSet.has(key)) return true;
+    if (windowOn && coveredByAnchors(anchors, timeMs(t.timestamp), deltaBeforeMs, deltaAfterMs)) {
+      return true;
+    }
+    return false;
+  };
+  const visiblePausedCount = syncPausedVisibility(pauseVisRef.current, {
+    epoch: pauseVisEpoch,
+    backlog: pausedTelegrams,
+    pausedCount,
+    beforeMs: deltaBeforeMs,
+    afterMs: deltaAfterMs,
+    isAnchor: isPausedAnchor,
+    keep: keepPaused,
+    collectAnchors: (backlog) => {
+      if (!windowOn) return [];
+      const out: number[] = [];
+      for (const t of listForcePool) if (isPausedAnchor(t)) out.push(timeMs(t.timestamp));
+      for (const t of backlog) if (isPausedAnchor(t)) out.push(timeMs(t.timestamp));
+      return out;
+    },
+  });
+  const visiblePausedCountRef = useRef(0);
+  visiblePausedCountRef.current = visiblePausedCount;
 
   const timeSortDirection: 'asc' | 'desc' | null =
     sortConfig[0]?.key === 'timestamp' ? sortConfig[0].direction : null;
@@ -850,43 +906,23 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // Time deltas between consecutive rows, by visual (sorted) order — always
   // computed regardless of sort column, respecting whatever hierarchy is
   // active (#311). Top row = gap to previous, bottom = gap to next.
+  const [rowCache] = useState(() => ({ source: null as readonly Telegram[] | null, rows: [] as TelegramRow[] }));
   const naturalTelegramRows = useMemo<TelegramRow[]>(() => {
-    if (quickFiltered.length === 0) return [];
-    const timestamps = quickFiltered.map(t => new Date(t.timestamp).getTime());
-    const minTs = Math.min(...timestamps);
-    const maxTs = Math.max(...timestamps);
-
-    return quickFiltered.map((t, idx) => {
-      let deltaStr: string | null = null;
-      let deltaNextStr: string | null = null;
-      let deltaMs: number | null = null;
-      const currTs = timestamps[idx];
-      const hasOlderInList = currTs > minTs;
-      const hasYoungerInList = currTs < maxTs;
-      if (idx > 0) {
-        const prev = timestamps[idx - 1];
-        const rawDiff = currTs - prev;
-        deltaMs = Math.abs(rawDiff);
-        const sign: '+' | '-' = timeSortDirection
-          ? (timeSortDirection === 'asc' ? '+' : '-')
-          : (rawDiff >= 0 ? '+' : '-');
-        const hasRequiredNeighbor = sign === '+' ? hasOlderInList : hasYoungerInList;
-        deltaStr = hasRequiredNeighbor ? formatDeltaMs(deltaMs, sign) : null;
+    if (rowCache.source === quickFiltered) return rowCache.rows;
+    const edge = readListEdge(quickFiltered);
+    if (edge && rowCache.source && edge.prev === rowCache.source && timeSortDirection) {
+      const patched = patchTelegramRows(quickFiltered, rowCache.rows, edge, timeSortDirection);
+      if (patched) {
+        rowCache.source = quickFiltered;
+        rowCache.rows = patched;
+        return patched;
       }
-      if (idx < quickFiltered.length - 1) {
-        const next = timestamps[idx + 1];
-        const rawDiffToNext = next - currTs;
-        const nextSign: '+' | '-' = timeSortDirection
-          ? (timeSortDirection === 'asc' ? '-' : '+')
-          : (rawDiffToNext >= 0 ? '-' : '+');
-        const hasRequiredNeighbor = nextSign === '+' ? hasOlderInList : hasYoungerInList;
-        deltaNextStr = hasRequiredNeighbor ? formatDeltaMs(Math.abs(rawDiffToNext), nextSign) : null;
-      }
-      return { ...t, deltaStr, deltaNextStr, deltaMs };
-    });
-  }, [quickFiltered, timeSortDirection]);
-
-  // ── Delta-sort exclusive mode (#311) ────────────────────────────────────────
+    }
+    const rows = buildTelegramRows(quickFiltered, timeSortDirection);
+    rowCache.source = quickFiltered;
+    rowCache.rows = rows;
+    return rows;
+  }, [quickFiltered, timeSortDirection, rowCache]);
   // Sorting by the Δt column is a self-referential operation (deltas are
   // derived from row order), so it freezes a snapshot instead of participating
   // in the normal sortConfig: buffer/live-follow pause, deltas stop
@@ -1384,7 +1420,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   /**
    * Manually paused with a backlog: the fill spacer is a hard stop that stays
-   * on screen (with its "...paused manually..." labels) instead of rubber-
+   * on screen (with its "...paused manually..." label) instead of rubber-
    * banding away; switching to auto pause fills it with the oldest backlog row.
    */
   const manualHoldActive = () => isManualPause && pausedCount > 0;
@@ -1818,25 +1854,24 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   /**
    * Virtual backlog px for the overlay thumb — same basis as the newer pill:
    * displayNewerCount minus merged rows already in scrollHeight (fill-offscreen).
-   * Equals filter-visible pause rows in the steady state; keeps sticky count
-   * during a flush gap so thumb and pill stay aligned.
+   * Virtual backlog px for the overlay thumb. Steady state is the filter-visible
+   * pause count; during a flush gap the sticky pill count is held so the thumb
+   * does not collapse before the merged rows are measured. Merged-out rows are
+   * already in scrollHeight and are not walked via getOffsetForIndex.
    */
   const overlayBacklogPx = (scrollTop: number, clientHeight: number) => {
     const newer = Math.max(0, displayNewerCountRef.current);
-    if (telegramRows.length === 0) return newer * ROW_ESTIMATE;
-    if (!isTimeSort) return Math.max(0, visiblePausedCount) * ROW_ESTIMATE;
-    const mergedOut = countFillAxisScrolledOut(
-      telegramRows.length,
-      liveEdge,
-      scrollTop,
-      clientHeight,
-      (i) => virtualizer.measurementsCache[i]?.start
-        ?? virtualizer.getOffsetForIndex(i, 'start')?.[0],
-      (i) => virtualizer.measurementsCache[i]?.size ?? ROW_ESTIMATE,
+    const pausedPx = Math.max(0, visiblePausedCountRef.current) * ROW_ESTIMATE;
+    if (!isTimeSort || telegramRows.length === 0) return Math.max(pausedPx, newer * ROW_ESTIMATE);
+    const items = virtualizer.getVirtualItems();
+    if (!items.some(item => item.size > 0) || virtualizer.getTotalSize() <= 0) {
+      return Math.max(pausedPx, newer * ROW_ESTIMATE);
+    }
+    const mergedOut = countMergedScrolledOut(
+      telegramRows.length, liveEdge, scrollTop, clientHeight, items,
     );
     return Math.max(0, newer - mergedOut) * ROW_ESTIMATE;
   };
-
   /**
    * Paint-only thumb: size/position from the newer-pill backlog (not raw
    * pausedCount). Always computed from live state — also while the thumb is held.
@@ -1896,6 +1931,30 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
     if (inFillRubberBand() || inOppositeRubberZone()) scheduleRubberBand();
   };
+
+  const handleScrollGestureRef = useRef(handleScrollGesture);
+  handleScrollGestureRef.current = handleScrollGesture;
+
+  // Pills sit outside the scrollport, so a wheel over them never reaches it.
+  // Non-passive: React's root wheel listener cannot preventDefault. Run the
+  // gesture while scrollTop is still the pre-tick value, then scroll the port
+  // the way the browser would have if the cursor had been on a row.
+  const attachPillWheel = useCallback((node: HTMLElement | null) => {
+    if (!node) return;
+    const onWheel = (e: WheelEvent) => {
+      const scroller = parentRef.current;
+      if (!scroller) return;
+      e.preventDefault();
+      e.stopPropagation();
+      handleScrollGestureRef.current(e.deltaY);
+      scroller.scrollBy({
+        top: wheelAxisPx(e.deltaY, e.deltaMode, scroller.clientHeight),
+        left: wheelAxisPx(e.deltaX, e.deltaMode, scroller.clientWidth),
+      });
+    };
+    node.addEventListener('wheel', onWheel, { passive: false });
+    return () => node.removeEventListener('wheel', onWheel);
+  }, []);
 
   /**
    * Thumb pixels → scroll pixels with the CURRENT virtual geometry (recomputed
@@ -2376,12 +2435,28 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     el.scrollTop = settledEdgeScrollTop();
   };
 
-  const jumpToLive = () => {
+  const jumpToLive = (releaseManual = false, revealBacklog = false) => {
     // Pill path wants the jump to the merged newest — not a seamless pin.
     flushPinRef.current = false;
     pendingFlushScrollDeltaRef.current = null;
     revealRef.current = null;
     setStickyOppositeSpacerPx(0);
+    // Plain click while manually paused: publish the backlog and scroll to
+    // the newest telegram, but stay paused and do not follow. Ctrl-click
+    // resumes (Play + follow + flush), same as a click while auto-paused.
+    // `revealBacklog` is only set by that pill click — a mount-time fallback
+    // must not empty the pause buffer.
+    if (isManualPause && !releaseManual) {
+      if (revealBacklog && pausedCount > 0) {
+        jumpToLiveRef.current = true;
+        atEdgeRef.current = true;
+        onPauseReveal?.(pausedCount);
+      } else {
+        jumpToLiveRef.current = false;
+      }
+      scrollToEdge();
+      return;
+    }
     jumpToLiveRef.current = true;
     enableLiveFollow();
     onJumpToLive?.();
@@ -2897,7 +2972,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     const prevEdgeKey = liveEdge === 'top' ? prev.firstKey : prev.lastKey;
     if (!prevEdgeKey || edgeKey === prevEdgeKey) {
       if (jumpingToLive) {
-        // Wait for the pause buffer to merge; keep the jump arm.
+        // The backlog is already published (or there was none): land on the
+        // edge and drop the arm. Otherwise wait for the merge.
+        if (!isPaused || pausedCount === 0) {
+          jumpToLiveRef.current = false;
+          atEdgeRef.current = true;
+          scrollToEdge();
+        }
         return;
       }
       if (pinArmed && revealLanded) {
@@ -3369,26 +3450,22 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // with the viewport does not count as out. `telegramRows` is already the
   // on-list (filter) set; `visiblePausedCount` is the filtered backlog.
   const virtualItems = virtualizer.getVirtualItems();
-  let newerCount = 0;
+  let newerCount: number;
   const rangeMeasured = virtualItems.some(item => item.size > 0);
   const scrollEl = parentRef.current;
   if (isTimeSort) {
     if (telegramRows.length === 0) {
-      // Empty list: every filter-visible pill row (usually pause backlog) counts.
-      newerCount = pillVisible.length;
+      // Empty list: every filter-visible pause-backlog row counts.
+      newerCount = visiblePausedCount;
     } else {
       let mergedOut = 0;
       if (rangeMeasured && scrollEl && virtualizer.getTotalSize() > 0) {
-        mergedOut = countFillAxisScrolledOut(
+        mergedOut = countMergedScrolledOut(
           telegramRows.length,
           liveEdge,
           scrollEl.scrollTop,
           scrollEl.clientHeight,
-          (i) => virtualizer.measurementsCache[i]?.start
-            ?? virtualizer.getOffsetForIndex(i, 'start')?.[0],
-          // Fall back to the estimate so fill-offscreen rows outside the
-          // overscan window still count when the filter is off / list is long.
-          (i) => virtualizer.measurementsCache[i]?.size ?? ROW_ESTIMATE,
+          virtualItems,
         );
       }
       // Always add the filtered pause backlog — do not use Math.max (that
@@ -3402,7 +3479,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // keep sticky only for that unpause frame or while the virtualizer is
   // unmeasured. Show the pill whenever there is a filter-visible backlog,
   // including manual pause while live-follow is still on. Empty list: no
-  // sticky phantom after clear; pillVisible alone may still show arrivals.
+  // sticky phantom after clear; the pause backlog alone may still show arrivals.
   const rawNewerCount = newerCount;
   const justUnpaused = wasPausedRef.current && !isPaused;
   if (telegramRows.length === 0) {
@@ -4008,8 +4085,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           (including pause-buffer backlog while follow is still on). */}
       {isTimeSort && displayNewerCount > 0 && (
         <button
-          onClick={jumpToLive}
+          onClick={e => jumpToLive(e.ctrlKey, !e.ctrlKey)}
           className="jump-to-live-pill"
+          ref={attachPillWheel}
           data-edge={liveEdge}
           style={{
             position: 'absolute', left: '50%', zIndex: 20,
@@ -4017,46 +4095,36 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               ? { top: EDGE_PILL_CENTER, transform: 'translate(-50%, -50%)' }
               : { bottom: EDGE_PILL_CENTER, transform: 'translate(-50%, 50%)' }),
           }}
-          title="Jump back to the live edge"
+          title={isManualPause
+            ? 'Jump to the newest telegram. Ctrl-click resumes.'
+            : 'Jump back to the live edge'}
         >
           {liveEdge === 'top' ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
           {displayNewerCount.toLocaleString()} {displayNewerCount === 1 ? 'newer telegram' : 'newer telegrams'}
         </button>
       )}
 
-      {/* Fill-spacer overlay: Pause tooltip copy, only while manually paused and
-          the fill rubber band is fully on screen. */}
+      {/* One pause label in the outer band of the newer pill: above it when
+          the newest row is at the top, below it when the newest row is at
+          the bottom. Only while manually paused and the fill rubber is fully
+          on screen. */}
       {showFillPauseLabels && fillRubberPx > 0 && (
-        <Fragment key={fillPauseFadeKey}>
-          <div
-            aria-hidden
-            className="fill-rubber-pause-label"
-            data-testid="fill-rubber-pause-label-left"
-            style={{
-              left: 0,
-              width: '50%',
-              height: fillRubberPx,
-              [liveEdge]: 0,
-              zIndex: 19,
-            }}
-          >
-            ...paused manually...
-          </div>
-          <div
-            aria-hidden
-            className="fill-rubber-pause-label"
-            data-testid="fill-rubber-pause-label-right"
-            style={{
-              right: 0,
-              width: '50%',
-              height: fillRubberPx,
-              [liveEdge]: 0,
-              zIndex: 19,
-            }}
-          >
-            ...paused manually...
-          </div>
-        </Fragment>
+        <div
+          key={fillPauseFadeKey}
+          aria-hidden
+          className="fill-rubber-pause-label"
+          data-testid="fill-rubber-pause-label"
+          data-edge={liveEdge}
+          style={{
+            left: '50%',
+            transform: 'translateX(-50%)',
+            height: EDGE_PILL_INSET,
+            zIndex: 19,
+            ...(liveEdge === 'top' ? { top: 0 } : { bottom: 0 }),
+          }}
+        >
+          ...paused manually...
+        </div>
       )}
 
       {/* Marks pill — visible marks (top) and hidden marks (bottom) when present.
@@ -4065,6 +4133,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       {(actionableMarkedKeys.length > 0 || hiddenMarkedKeys.length > 0) && (
         <div
           className="marks-pill"
+          ref={attachPillWheel}
           style={{
             position: 'absolute',
             right: EDGE_PILL_INSET,
