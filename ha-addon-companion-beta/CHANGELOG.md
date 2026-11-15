@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.0-beta.14-devTabSel.1
+
+### Changed
+
+- **devTabSel fork beta**: image retargeted to `ghcr.io/devtabsel/spectrum-knx-addon-{arch}` and
+  versioned under origin beta.14 as `2.0.0-beta.14-devTabSel.1`.
+- **Telegram table development state**: buffer status pill, DPT display/cache refinements, and
+  related telegram-table WIP from `feature/telegramtable-refinement`.
+
 ## 2.0.0-beta.14
 
 ### Fixed
