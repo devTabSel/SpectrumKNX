@@ -1,5 +1,5 @@
-# digTabSel fork only. Never cherry-pick into a PR for martinhoefling/SpectrumKNX.
-name: digTabSel HAOS branding
+# devTabSel fork only. Never cherry-pick into a PR for martinhoefling/SpectrumKNX.
+name: devTabSel HAOS branding
 
 on:
   push:
@@ -17,5 +17,5 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.14'
-      - name: Assert digTabSel HAOS packaging overlay
+      - name: Assert devTabSel HAOS packaging overlay
         run: python scripts/devtabsel_haos_branding.py assert
