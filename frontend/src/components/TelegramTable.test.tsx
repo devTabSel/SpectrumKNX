@@ -1297,6 +1297,8 @@ test('jump pill keeps a fill-edge partial as anchor; only fully scrolled-out cou
 test('jump pill newer count follows filter on and off', () => {
   // Filter off: three fill-offscreen rows. Filter on: only the three newest
   // match — after scroll, N is among that keep set only (1), not the unfiltered 3.
+  // Fresh mounts (not rerender) avoid sticky scroll/virtualizer state that
+  // flaked in CI when the keep-set shrank under an existing scrollTop.
   const ROW = 85;
   scrollBlockSize = ROW * 2;
   const rows = makeList(10, 9).map((t, i) => ({
@@ -1315,14 +1317,18 @@ test('jump pill newer count follows filter on and off', () => {
     onListFollowChange: vi.fn(),
     onListAnchorKeyChange: vi.fn(),
   };
-  try {
-    const { container, rerender } = render(<TelegramTable {...base} />);
+  const scrollTo = (container: HTMLElement, top: number) => {
     const port = container.querySelector('.custom-scrollbar') as HTMLElement;
-    port.scrollTop = LIVE_EDGE_TOP + ROW * 3;
+    port.scrollTop = top;
     fireEvent.scroll(port);
+  };
+  try {
+    const unfiltered = render(<TelegramTable {...base} />);
+    scrollTo(unfiltered.container, LIVE_EDGE_TOP + ROW * 3);
     expect(screen.getByRole('button', { name: '3 newer telegrams' })).toBeInTheDocument();
+    unfiltered.unmount();
 
-    rerender(
+    const filtered = render(
       <TelegramTable
         {...base}
         quickFilterOpen
@@ -1331,13 +1337,12 @@ test('jump pill newer count follows filter on and off', () => {
       />,
     );
     // Keep-only list has 3 rows; scroll one row off toward fill → 1 newer.
-    port.scrollTop = LIVE_EDGE_TOP + ROW;
-    fireEvent.scroll(port);
+    scrollTo(filtered.container, LIVE_EDGE_TOP + ROW);
     expect(screen.getByRole('button', { name: '1 newer telegram' })).toBeInTheDocument();
+    filtered.unmount();
 
-    rerender(<TelegramTable {...base} />);
-    port.scrollTop = LIVE_EDGE_TOP + ROW * 3;
-    fireEvent.scroll(port);
+    const again = render(<TelegramTable {...base} />);
+    scrollTo(again.container, LIVE_EDGE_TOP + ROW * 3);
     expect(screen.getByRole('button', { name: '3 newer telegrams' })).toBeInTheDocument();
   } finally {
     scrollBlockSize = 800;

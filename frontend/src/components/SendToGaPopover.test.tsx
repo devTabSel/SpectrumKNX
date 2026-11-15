@@ -55,8 +55,9 @@ test('opens on click, shows the last value and sends a DPT-1 boolean', async () 
   expect(screen.getByLabelText('Datapoint type')).toHaveValue('1.011');
   expect(screen.queryByText(/^DPT\s/)).not.toBeInTheDocument();
 
-  const inactive = screen.getByRole('button', { name: /^inactive$/i });
-  const active = screen.getByRole('button', { name: /^active$/i });
+  // Write buttons share the boolean label with BusValueText's cycle control.
+  const inactive = screen.getByTitle(/^Write inactive/);
+  const active = screen.getByTitle(/^Write active/);
   const read = screen.getByRole('button', { name: /^Read$/i });
   expect(inactive.compareDocumentPosition(active) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   // No value field: delay/every sit to the right of DPT; Read is on the write row.
@@ -919,8 +920,8 @@ test('ctrl-click on hosted trigger calls onCtrlSend and does not open the popove
 test('opening a DPT-1 popover focuses the leftmost write button, not on or Read', async () => {
   render(<SendToGaPopover address="1/1/1" dptMain={1} dptSub={1} />);
   fireEvent.click(screen.getByRole('button', { name: /Send to this GA/ }));
-  await waitFor(() => expect(screen.getByRole('button', { name: /^off$/i })).toHaveFocus());
-  expect(screen.getByRole('button', { name: /^on$/i })).not.toHaveFocus();
+  await waitFor(() => expect(screen.getByTitle(/^Write off/)).toHaveFocus());
+  expect(screen.getByTitle(/^Write on/)).not.toHaveFocus();
   expect(screen.getByRole('button', { name: /^Read$/i })).not.toHaveFocus();
 });
 
@@ -1450,7 +1451,7 @@ test('a delay commit does not create a send-panel row until Write starts the job
   expect(onScheduleCommit).not.toHaveBeenCalled();
   expect(onWriteWithSchedule).not.toHaveBeenCalled();
 
-  fireEvent.click(screen.getByRole('button', { name: /^active$/i }));
+  fireEvent.click(screen.getByTitle(/^Write active/));
   expect(onWriteWithSchedule).toHaveBeenCalledWith(
     expect.objectContaining({ address: '16/0/1', delay: '5', every: '' }),
     true,
