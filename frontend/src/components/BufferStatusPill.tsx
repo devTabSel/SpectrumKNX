@@ -215,12 +215,13 @@ export function BufferStatusPill({
       />
 
       {readDirection === 'forward' && (
-        <ChevronRight
-          size={14}
-          aria-label="Reading forward"
-          title="Reading forward"
-          style={{ flexShrink: 0, color: 'var(--accent-primary)' }}
-        />
+        <span title="Reading forward" style={{ display: 'inline-flex', flexShrink: 0 }}>
+          <ChevronRight
+            size={14}
+            aria-label="Reading forward"
+            style={{ color: 'var(--accent-primary)' }}
+          />
+        </span>
       )}
 
       <input
@@ -257,12 +258,13 @@ export function BufferStatusPill({
       </button>
 
       {readDirection === 'backward' && (
-        <ChevronLeft
-          size={14}
-          aria-label="Reading backward"
-          title="Reading backward"
-          style={{ flexShrink: 0, color: 'var(--accent-primary)' }}
-        />
+        <span title="Reading backward" style={{ display: 'inline-flex', flexShrink: 0 }}>
+          <ChevronLeft
+            size={14}
+            aria-label="Reading backward"
+            style={{ color: 'var(--accent-primary)' }}
+          />
+        </span>
       )}
 
       <ThemedDatetimePicker
