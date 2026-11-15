@@ -476,6 +476,7 @@ function ContextWindowPopup({
   const [listSnapshot, setListSnapshot] = useState<ListScrollSnapshot | null>(null);
   const [listScrollAway, setListScrollAway] = useState(false);
   const listSnapshotRef = useRef<ListScrollSnapshot | null>(null);
+  // eslint-disable-next-line react-hooks/refs -- scroll listener reads the snapshot from this render
   listSnapshotRef.current = listSnapshot;
   const dragRef = useRef<{
     pointerId: number;
@@ -498,6 +499,7 @@ function ContextWindowPopup({
       if (!scrollEl) return null;
       return { scrollTop: scrollEl.scrollTop, key: null, offset: 0 };
     })();
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- capture list scroll once when the popup opens
     setListSnapshot(snap);
     setListScrollAway(false);
     placeFull();
@@ -747,6 +749,7 @@ function useLiftedKeyList(
   const [internal, setInternal] = useState<string[]>([]);
   const list = prop ?? internal;
   const ref = useRef(list);
+  // eslint-disable-next-line react-hooks/refs -- setList reads the latest list without stale closures
   ref.current = list;
   const setList = useCallback((val: readonly string[] | ((prev: readonly string[]) => readonly string[])) => {
     const prev = ref.current;
@@ -3601,7 +3604,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     setStripeOffset(0);
     // Sort reorders the list — pin + flash the preferred working row.
     requestDisplayPinRef.current();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortConfig]);
 
   // Restore scroll position/anchor on mount (#203, #341)
