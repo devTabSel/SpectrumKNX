@@ -7,6 +7,9 @@ on:
     tags:
       - 'v*.*.*'
   workflow_dispatch:
+  # devTabSel "Test in HAOS" calls this after branding+pushing main. A plain
+  # push with GITHUB_TOKEN would not re-trigger this workflow on its own.
+  workflow_call:
 
 env:
   REGISTRY: ghcr.io
@@ -34,6 +37,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          # workflow_call runs on the feature ref; publish the branded main tip.
+          ref: ${{ github.event_name == 'workflow_call' && 'main' || github.ref }}
 
       - name: Compute image base (owner-scoped, fork-friendly)
         id: image
@@ -52,7 +58,7 @@ jobs:
         # which is the one that moves ahead (#427). Older versions referenced by
         # the stable slugs were built when they were current.
         run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          if [[ "${{ github.event_name }}" != "workflow_call" && "${{ github.ref_type }}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
             VERSION=$(grep '^version:' ha-addon-beta/config.yaml | sed 's/version: *"\(.*\)"/\1/')
@@ -93,8 +99,14 @@ jobs:
         id: check_tag
         run: |
           IMAGE="${{ steps.image.outputs.base }}-${{ matrix.ha_arch }}:${{ steps.addon_version.outputs.version }}"
-          # Only skip on main branch pushes to allow manual runs/tag releases to overwrite if needed
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]] && docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+          # Only skip on main / Test-in-HAOS publishes; allow tag/manual overwrite.
+          ON_MAIN=false
+          if [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+            ON_MAIN=true
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            ON_MAIN=true
+          fi
+          if [[ "$ON_MAIN" == "true" ]] && docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Image $IMAGE already exists in registry. Skipping build/push on main to prevent overwrite."
           else

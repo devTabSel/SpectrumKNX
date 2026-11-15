@@ -1,0 +1,156 @@
+# devTabSel fork only. Never cherry-pick into a PR for martinhoefling/SpectrumKNX.
+# On feature branches: run CI; on success brand + bump packaging and push main so
+# the existing "Build and Publish HA Add-on" workflow publishes to GHCR/HAOS.
+# On main: assert devTabSel packaging identity stays in place.
+name: Test in HAOS
+
+on:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: test-in-haos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  assert-main-branding:
+    if: github.repository_owner == 'devTabSel' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - name: Assert devTabSel HAOS packaging overlay
+        run: python scripts/devtabsel_haos_branding.py assert
+
+  backend-test:
+    if: github.repository_owner == 'devTabSel' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run Tests with Pytest
+        run: |
+          cd backend
+          export DATABASE_URL=sqlite+aiosqlite:///unittest.db
+          export PYTHONPATH=.
+          python -m pytest tests/
+
+  frontend-build:
+    if: github.repository_owner == 'devTabSel' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: |
+          cd frontend
+          npm install
+      - name: Lint
+        run: |
+          cd frontend
+          npm run lint
+      - name: Test
+        run: |
+          cd frontend
+          npx vitest run
+      - name: Build
+        run: |
+          cd frontend
+          npm run build
+
+  pg-migration-test:
+    if: github.repository_owner == 'devTabSel' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run migration test suite
+        run: packaging/pg-migrate/test/run-tests.sh
+
+  compose-migration-test:
+    if: github.repository_owner == 'devTabSel' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run compose-migrate.sh end-to-end test
+        run: packaging/pg-migrate/test/compose-e2e.sh
+
+  publish-haos:
+    name: Brand, bump, publish to devTabSel main
+    if: github.repository_owner == 'devTabSel' && github.ref != 'refs/heads/main'
+    needs:
+      - backend-test
+      - frontend-build
+      - pg-migration-test
+      - compose-migration-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      - name: Merge into main, brand, bump, push
+        env:
+          FEATURE_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin main
+          PREV_VERSION=$(git show origin/main:ha-addon-beta/config.yaml | grep '^version:' | sed 's/version: *"\(.*\)"/\1/')
+          echo "Previous devTabSel main version: ${PREV_VERSION}"
+
+          git checkout -B main origin/main
+          git merge --no-ff "$GITHUB_SHA" -m "Test in HAOS: merge ${FEATURE_REF} for publish"
+
+          python scripts/devtabsel_haos_branding.py bump \
+            --previous "${PREV_VERSION}" \
+            --feature-ref "${FEATURE_REF}"
+
+          VERSION=$(grep '^version:' ha-addon-beta/config.yaml | sed 's/version: *"\(.*\)"/\1/')
+          git add ha-addon-beta/config.yaml ha-addon-beta/CHANGELOG.md \
+            ha-addon-companion-beta/config.yaml ha-addon-companion-beta/CHANGELOG.md \
+            repository.yaml
+          git commit -m "Test in HAOS: brand and bump to ${VERSION} from ${FEATURE_REF}"
+
+          git push origin main
+          echo "Pushed main @ ${VERSION}; reusable addon publish job will push GHCR."
+
+  publish-images:
+    name: Publish HA add-on images
+    needs: publish-haos
+    if: github.repository_owner == 'devTabSel' && github.ref != 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/addon.yml
