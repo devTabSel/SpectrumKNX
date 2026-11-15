@@ -1,10 +1,10 @@
 # Beta channel (#427). Same image as the stable add-on, pinned to a
 # pre-release version. Install this one *instead of* the stable add-on —
 # running both against the same bus is not supported.
-name: "Spectrum KNX (Beta)"
-description: "BETA — A professional KNX bus monitor and analyzer"
+name: "Spectrum KNX (Beta, devTabSel)"
+description: "BETA (devTabSel) — A professional KNX bus monitor and analyzer"
 url: "https://github.com/devTabSel/SpectrumKNX"
-version: "2.0.0-beta.14-devTabSel.1"
+version: "2.0.0-beta.14-devTabSel.2"
 slug: "spectrum_knx_beta"
 image: "ghcr.io/devtabsel/spectrum-knx-addon-{arch}"
 host_network: true
@@ -21,7 +21,7 @@ ingress: true
 ingress_port: 8765
 ingress_stream: true
 panel_icon: mdi:chart-timeline-variant
-panel_title: "Spectrum KNX Beta"
+panel_title: "Spectrum KNX Beta · devTabSel"
 panel_admin: true
 options:
   KNX_GATEWAY_IP: "AUTO"

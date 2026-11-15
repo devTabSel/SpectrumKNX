@@ -1,10 +1,10 @@
 # Beta channel (#427). Same image as the stable add-on, pinned to a
 # pre-release version. Install this one *instead of* the stable add-on —
 # running both against the same bus is not supported.
-name: "Spectrum KNX (HA Companion, Beta)"
-description: "BETA — KNX analyzer UI on top of Home Assistant's own KNX telegram history — no second bus connection, no separate database"
+name: "Spectrum KNX (HA Companion, Beta, devTabSel)"
+description: "BETA (devTabSel) — KNX analyzer UI on top of Home Assistant's own KNX telegram history — no second bus connection, no separate database"
 url: "https://github.com/devTabSel/SpectrumKNX"
-version: "2.0.0-beta.14-devTabSel.1"
+version: "2.0.0-beta.14-devTabSel.2"
 slug: "spectrum_knx_companion_beta"
 image: "ghcr.io/devtabsel/spectrum-knx-addon-{arch}"
 init: false
@@ -15,7 +15,7 @@ ingress: true
 ingress_port: 8765
 ingress_stream: true
 panel_icon: mdi:database-eye
-panel_title: "Spectrum KNX (HA) Beta"
+panel_title: "Spectrum KNX (HA) Beta · devTabSel"
 panel_admin: true
 # Read HA's KNX telegram database (rw mount: sqlite WAL/locking needs a writable
 # directory even though the database itself is opened read-only)

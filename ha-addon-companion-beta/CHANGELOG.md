@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.0-beta.14-devTabSel.2
+
+### Changed
+
+- **Sidebar branding**: panel title and add-on name include `devTabSel` so the fork is
+  distinguishable from origin in the Home Assistant sidebar.
+
 ## 2.0.0-beta.14-devTabSel.1
 
 ### Changed
