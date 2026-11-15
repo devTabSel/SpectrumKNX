@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.0-beta.14-devTabSel.3
+
+### Changed
+
+- **Telegram table PR lint fixes**: BufferStatusPill draft sync, context-popup refs, and
+  QuickFilter test cleanup from `feature/telegramtable-refinement` so HAOS ships the
+  CI-clean development state.
+
 ## 2.0.0-beta.14-devTabSel.2
 
 ### Changed
