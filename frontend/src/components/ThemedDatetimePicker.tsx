@@ -709,6 +709,12 @@ export function ThemedDatetimePicker({
 
   const useHostChrome = Boolean(className) && variant === 'field';
   const chevronVisible = showChevron === true;
+  const explicitWidth = style?.width;
+  const wrapWidth: CSSProperties['width'] = explicitWidth != null
+    ? 'fit-content'
+    : variant === 'bare'
+      ? undefined
+      : '100%';
   const fieldStyle: CSSProperties = variant === 'bare'
     ? {
         ...style,
@@ -822,8 +828,15 @@ export function ThemedDatetimePicker({
   const onWrapMouseDown = (e: ReactMouseEvent) => {
     if (disabled) return;
     const target = e.target as HTMLElement;
-    if (target === localInputRef.current || localInputRef.current?.contains(target)) {
-      if (!open) openPicker();
+    const onField = target === localInputRef.current || localInputRef.current?.contains(target);
+    if (onField) {
+      // Click on the value toggles popover visibility (Esc closes, Enter applies).
+      if (open) {
+        skipFocusOpen.current = true;
+        closePicker();
+      } else {
+        openPicker();
+      }
       return;
     }
     e.preventDefault();
@@ -899,7 +912,15 @@ export function ThemedDatetimePicker({
     <>
       <div
         ref={wrapRef}
-        style={{ display: 'inline-flex', alignItems: 'center', width: '100%', minWidth: 0, position: 'relative', flex: variant === 'bare' ? '1 1 auto' : undefined }}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          width: wrapWidth,
+          minWidth: 0,
+          position: 'relative',
+          flex: variant === 'bare' ? '1 1 auto' : undefined,
+          flexShrink: explicitWidth != null ? 0 : undefined,
+        }}
         onMouseDown={onWrapMouseDown}
       >
         <input

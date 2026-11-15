@@ -526,6 +526,32 @@ test('an empty column filter cannot be turned on', () => {
   expect(screen.getByTitle(/^Enable quick filter for TARGET/)).not.toHaveClass('open');
 });
 
+test('QF bottom rule reflects inactive / idle / filtering', () => {
+  const { rerender, container } = renderTable({
+    quickFilterOpen: true,
+    quickFilterEnabled: false,
+  });
+  expect(container.querySelector('[data-qf-bar-status="inactive"]')).toBeTruthy();
+
+  rerender(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+    />,
+  );
+  expect(container.querySelector('[data-qf-bar-status="idle"]')).toBeTruthy();
+
+  fireEvent.change(screen.getByLabelText('Quick filter TARGET name'), { target: { value: 'küche' } });
+  expect(container.querySelector('[data-qf-bar-status="filtering"]')).toBeTruthy();
+});
+
 test('empty quick-filter cells that do not filter use a dark background', () => {
   const { unmount } = renderTable({ quickFilterOpen: true, quickFilterEnabled: true });
   const pattern = screen.getByLabelText('Quick filter TARGET pattern');

@@ -1,5 +1,10 @@
-import { useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
-import { formatBusValueForDpt, type BusValueView } from '../utils/dptValues';
+import { useMemo, useState, type CSSProperties, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
+import {
+  buildValueDisplayModes,
+  nextValueDisplayMode,
+  type BusValueView,
+  type ValueDisplayMode,
+} from '../utils/dptValues';
 import { isTextDptMain, parseDptMain } from '../utils/knxSend';
 import { TT } from '../utils/telegramCellStyles';
 
@@ -9,14 +14,14 @@ interface Props {
   dpt?: string | null;
   /** Style while showing the decoded value (default). */
   style?: CSSProperties;
-  /** Style while showing raw_hex (e.g. TelegramTable raw-badge copy). */
+  /** Style while showing raw/hex/bin (e.g. TelegramTable raw-badge copy). */
   rawStyle?: CSSProperties;
   className?: string;
-  /** Extra class while showing raw_hex (e.g. raw-badge). */
+  /** Extra class while showing non-decoded modes (e.g. raw-badge). */
   rawClassName?: string;
   /** Wrap the value text (default: strong). */
   as?: 'strong' | 'span';
-  /** Start in raw_hex mode when hex is available (TelegramTable DATA under VALUE). */
+  /** Start in hex mode when hex is available (TelegramTable DATA under VALUE). */
   defaultShowHex?: boolean;
   /**
    * When false, the toggle stays mouse-only (no Tab / focus ring). Use in the
@@ -25,15 +30,20 @@ interface Props {
   allowFocus?: boolean;
   /** Incoming/Outgoing color + one-shot pulse. The node stays mounted in that color. */
   pulse?: 'Incoming' | 'Outgoing' | null;
-  /** New key restarts the pulse animation without resetting decoded/hex state. */
+  /** New key restarts the pulse animation without resetting format state. */
   pulseKey?: string | number | null;
 }
 
+const MODE_TITLE: Record<ValueDisplayMode, string> = {
+  decoded: 'Show decoded value',
+  decimal: 'Show decimal',
+  hex: 'Show hex',
+  bin: 'Show binary',
+};
+
 /**
- * Decoded bus value (lowercase discrete words when DPT known). Click toggles
- * to raw_hex when available, then back. Both states are stacked in one box so
- * surrounding layout does not shift. Defaults match TelegramTable VALUE
- * (`.tt-value` / `.tt-value-unit` / `.raw-badge`).
+ * Reusable bus-value display: click cycles decoded → decimal (if different) →
+ * hex → binary (≤4-bit DPT). All modes stay stacked so layout does not shift.
  */
 export function BusValueText({
   value, dpt, style, rawStyle, className, rawClassName, as = 'strong',
@@ -42,11 +52,15 @@ export function BusValueText({
   pulse = null,
   pulseKey = null,
 }: Props) {
-  const [showHex, setShowHex] = useState(defaultShowHex);
-  const hex = (value.raw_hex ?? '').trim();
-  const canToggle = hex !== '';
-  const showingHex = showHex && canToggle;
-  const decoded = formatBusValueForDpt(value, dpt);
+  const modes = useMemo(() => buildValueDisplayModes(value, dpt), [value, dpt]);
+  const [mode, setMode] = useState<ValueDisplayMode>(() => (
+    defaultShowHex ? 'hex' : 'decoded'
+  ));
+
+  const active = modes.find(m => m.mode === mode)
+    ?? (defaultShowHex ? modes.find(m => m.mode === 'hex') : undefined)
+    ?? modes[0];
+  const canCycle = modes.length > 1;
   const textDpt = isTextDptMain(dpt ? parseDptMain(dpt) : null);
   const textStyle: CSSProperties | undefined = textDpt
     ? { fontFamily: "'JetBrains Mono', monospace", whiteSpace: 'pre', ...style }
@@ -55,19 +69,54 @@ export function BusValueText({
   const Tag = as;
   const pulseProps = pulse ? { 'data-bus-pulse': pulse } : {};
   const decodedClass = className ?? TT.value;
-  const hexClass = rawClassName ?? TT.rawBadge;
-  const decodedLabel = `${decoded.text}${decoded.unit ? ` ${decoded.unit}` : ''}`;
-  const decodedBody: ReactNode = (
-    <>
-      {decoded.text}
-      {decoded.unit ? <span className={TT.valueUnit}>{` ${decoded.unit}`}</span> : null}
-    </>
-  );
+  const rawClass = rawClassName ?? TT.rawBadge;
 
-  if (!canToggle) {
+  const cycle = () => {
+    if (!canCycle) return;
+    setMode(prev => nextValueDisplayMode(modes, prev));
+  };
+
+  const nextTitle = (() => {
+    if (!canCycle || !active) return undefined;
+    const next = nextValueDisplayMode(modes, active.mode);
+    return MODE_TITLE[next];
+  })();
+
+  const renderOption = (opt: typeof modes[number], visible: boolean): ReactNode => {
+    const isDecoded = opt.mode === 'decoded';
+    const body = isDecoded && opt.unit ? (
+      <>
+        {opt.label}
+        <span className={TT.valueUnit}>{` ${opt.unit}`}</span>
+      </>
+    ) : opt.label;
+
+    return (
+      <span
+        key={opt.mode}
+        className={isDecoded ? decodedClass : rawClass}
+        style={{
+          visibility: visible ? 'visible' : 'hidden',
+          ...(isDecoded ? textStyle : rawStyle),
+        }}
+        aria-hidden={!visible}
+      >
+        {body}
+      </span>
+    );
+  };
+
+  if (!canCycle || !active) {
+    const opt = modes[0] ?? { mode: 'decoded' as const, label: '—', unit: undefined };
+    const body = opt.unit ? (
+      <>
+        {opt.label}
+        <span className={TT.valueUnit}>{` ${opt.unit}`}</span>
+      </>
+    ) : opt.label;
     return (
       <Tag key={pulseKey ?? undefined} className={decodedClass} style={textStyle} {...pulseProps}>
-        {decodedBody}
+        {body}
       </Tag>
     );
   }
@@ -79,39 +128,26 @@ export function BusValueText({
       className={TT.valueToggle}
       role="button"
       tabIndex={allowFocus ? 0 : -1}
-      title={showingHex ? 'Show decoded value' : 'Show raw hex'}
-      aria-label={showingHex ? hex : decodedLabel}
+      title={nextTitle}
+      aria-label={active.unit ? `${active.label} ${active.unit}` : active.label}
       onMouseDown={(e: MouseEvent) => {
         if (!allowFocus) e.preventDefault();
       }}
       onClick={(e: MouseEvent) => {
         e.stopPropagation();
-        setShowHex(v => !v);
+        cycle();
       }}
       onKeyDown={(e: KeyboardEvent) => {
         if (!allowFocus) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           e.stopPropagation();
-          setShowHex(v => !v);
+          cycle();
         }
       }}
       style={{ cursor: 'pointer' }}
     >
-      <span
-        className={decodedClass}
-        style={{ visibility: showingHex ? 'hidden' : 'visible', ...textStyle }}
-        aria-hidden={showingHex}
-      >
-        {decodedBody}
-      </span>
-      <span
-        className={hexClass}
-        style={{ visibility: showingHex ? 'visible' : 'hidden', ...rawStyle }}
-        aria-hidden={!showingHex}
-      >
-        {hex}
-      </span>
+      {modes.map(opt => renderOption(opt, opt.mode === active.mode))}
     </Tag>
   );
 }

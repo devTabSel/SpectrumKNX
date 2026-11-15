@@ -1,10 +1,12 @@
 import { expect, test } from 'vitest';
 import {
+  buildValueDisplayModes,
   discreteDptValues,
   discretePayloadRawBits,
   formatBusValueForDpt,
   formatDiscreteChoiceLabel,
   nextDiscreteLabelMode,
+  nextValueDisplayMode,
 } from './dptValues';
 
 test('discreteDptValues labels are lowercase', () => {
@@ -99,5 +101,25 @@ test('formatDiscreteChoiceLabel cycles name / hex / bin', () => {
   expect(nextDiscreteLabelMode('name')).toBe('hex');
   expect(nextDiscreteLabelMode('hex')).toBe('bin');
   expect(nextDiscreteLabelMode('bin')).toBe('name');
+});
+
+test('buildValueDisplayModes: decoded → decimal → hex → bin for ≤4-bit DPT', () => {
+  const modes = buildValueDisplayModes(
+    { value_numeric: 1, value_formatted: '1', raw_hex: '0x01' },
+    '1.001',
+  );
+  expect(modes.map(m => m.mode)).toEqual(['decoded', 'decimal', 'hex', 'bin']);
+  expect(modes.map(m => m.label)).toEqual(['on', '1', '0x01', '0b1']);
+  expect(nextValueDisplayMode(modes, 'decoded')).toBe('decimal');
+  expect(nextValueDisplayMode(modes, 'bin')).toBe('decoded');
+});
+
+test('buildValueDisplayModes skips decimal when identical to decoded and omits bin for wide DPTs', () => {
+  const modes = buildValueDisplayModes(
+    { value_formatted: '21.5', value_numeric: 21.5, raw_hex: '0x0C65', unit: '°C' },
+    '9.001',
+  );
+  expect(modes.map(m => m.mode)).toEqual(['decoded', 'hex']);
+  expect(modes[0]).toMatchObject({ label: '21.5', unit: '°C' });
 });
 

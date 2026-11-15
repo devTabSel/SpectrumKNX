@@ -326,6 +326,29 @@ test('Escape discards draft without committing', () => {
   expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
 });
 
+test('click on the field toggles the picker; Enter applies', () => {
+  const onChange = vi.fn();
+  render(
+    <ThemedDatetimePicker
+      value="2026-07-18T12:30:00"
+      onChange={onChange}
+      aria-label="When"
+      openOnFocus={false}
+    />,
+  );
+  const input = screen.getByLabelText('When');
+  fireEvent.mouseDown(input);
+  expect(screen.getByRole('dialog', { name: 'Date and time picker' })).toBeInTheDocument();
+  fireEvent.mouseDown(input);
+  expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
+
+  fireEvent.mouseDown(input);
+  fireEvent.keyDown(input, { key: 'ArrowDown' });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  expect(onChange).toHaveBeenCalledWith('2027-07-18T12:30:00');
+  expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
+});
+
 test('standard actions: Now left and Clear right above time, OK below', () => {
   render(
     <ThemedDatetimePicker value="2026-07-18T12:30:00" onChange={() => {}} aria-label="When" />,

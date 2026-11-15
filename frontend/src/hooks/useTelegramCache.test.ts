@@ -711,4 +711,48 @@ describe('useTelegramCache', () => {
     rerender({ limit: 2 });
     expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.c', '1.2.b']);
   });
+
+  it('fillForwardFrom pages ascending from the target up to the buffer oldest', async () => {
+    // restoreFromCache=false: no startup fetch; responses are for fill only.
+    const { result } = renderHook(() => useTelegramCache(1000, false));
+    await settle(result);
+
+    act(() => {
+      result.current.addLive(tg(5000, 'live'));
+    });
+    expect(result.current.oldestTs).toBe(5000);
+
+    // Ascending chunk older than the live edge.
+    telegramResponses.push({
+      telegrams: [tg(1000, 'old1'), tg(2000, 'old2'), tg(3000, 'old3')],
+    });
+
+    const before = fetchCalls.filter(u => u.includes('/api/telegrams')).length;
+    await act(async () => {
+      await result.current.fillForwardFrom(1000);
+    });
+    const loadCall = fetchCalls.filter(u => u.includes('/api/telegrams')).slice(before).at(-1)!;
+    const params = new URLSearchParams(loadCall.split('?')[1]);
+    expect(params.get('order_descending')).toBe('false');
+    expect(Date.parse(params.get('start_time')!)).toBe(1000);
+    expect(Date.parse(params.get('end_time')!)).toBe(5000);
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual([
+      '1.2.live', '1.2.old3', '1.2.old2', '1.2.old1',
+    ]);
+  });
+
+  it('fillBackwardTo loads newest-first covering [endMs, now]', async () => {
+    const { result } = renderHook(() => useTelegramCache(1000, false));
+    await settle(result);
+
+    const endMs = 2000;
+    telegramResponses.push({ telegrams: [tg(3000, 'n'), tg(2500, 'm')] });
+    await act(async () => {
+      await result.current.fillBackwardTo(endMs);
+    });
+    const loadCall = fetchCalls.filter(u => u.includes('/api/telegrams')).at(-1)!;
+    const params = new URLSearchParams(loadCall.split('?')[1]);
+    expect(Date.parse(params.get('start_time')!)).toBe(endMs);
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.n', '1.2.m']);
+  });
 });

@@ -1210,7 +1210,7 @@ test('last value follows the row DPT like send buttons (0 → off for 1.001)', a
   await waitFor(() => expect(lastValueOf().querySelector('strong')).toHaveTextContent('off'));
 });
 
-test('last value decodes DPT 3.007 raw 0 as decrease 0 and toggles hex', async () => {
+test('last value decodes DPT 3.007 raw 0 as decrease 0 and cycles decimal/hex/bin', async () => {
   vi.stubGlobal('fetch', mockFetch({
     '/api/knx/send/scheduled/status': IDLE,
     '/api/telegrams/last': {
@@ -1229,7 +1229,11 @@ test('last value decodes DPT 3.007 raw 0 as decrease 0 and toggles hex', async (
   const value = await waitFor(() => lastValueOf().querySelector('strong') as HTMLElement);
   expect(value).toHaveTextContent('decrease 0');
   fireEvent.click(value);
+  expect(value).toHaveTextContent('0');
+  fireEvent.click(value);
   expect(value).toHaveTextContent('0x00');
+  fireEvent.click(value);
+  expect(value).toHaveTextContent('0b0000');
 });
 
 test('last value keeps decoded/raw when a new telegram arrives', async () => {

@@ -516,6 +516,24 @@ test('a goto request selects the telegram when it is in the list and stops live-
   });
 });
 
+test('a time-only gotoRequest jumps by time without selecting a row', async () => {
+  const onListFollowChange = vi.fn();
+  const onMouseSelectedKeysChange = vi.fn();
+  const oldest = TELEGRAMS[4];
+  renderTable({
+    listFollow: true,
+    onListFollowChange,
+    onMouseSelectedKeysChange,
+    gotoRequest: { id: 2, targetMs: new Date(oldest.timestamp).getTime() },
+  });
+
+  // gotoTime → gotoIndex stops follow; time-only jumps never select a row.
+  await vi.waitFor(() => {
+    expect(onListFollowChange).toHaveBeenCalledWith(false);
+  });
+  expect(onMouseSelectedKeysChange).not.toHaveBeenCalled();
+});
+
 test('Alt-click on the colour swatch sets the hide flag', () => {
   const onMarkedKeysChange = vi.fn();
   const onHiddenKeysChange = vi.fn();

@@ -17,6 +17,7 @@ import { type LinkedRowStatus } from './WriteToBusPanel';
 import type { SendCorrespondenceKey } from '../utils/sendCorrespondence';
 import type { BusPayload } from '../utils/dptValues';
 import { GotoTimeControl } from './GotoTimeControl';
+import { BusValueText } from './BusValueText';
 import { SecondsField } from './SecondsField';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 import { sanitizeSecondsInput } from '../utils/sendCorrespondence';
@@ -208,6 +209,17 @@ interface TelegramTableProps {
    * that exact telegram is in the buffer. */
   gotoRequest?: ListGotoRequest | null;
 
+  /** Raw-buffer oldest/newest bounds (epoch ms) for out-of-range goto fills. */
+  bufferOldestMs?: number | null;
+  bufferNewestMs?: number | null;
+  /**
+   * Goto target is newer than the published buffer: pause and merge the
+   * pause-backlog toward newer, then the table jumps again.
+   */
+  onGotoMergeNewer?: () => void;
+  /** Goto target is older than the buffer: ascending DB fill from that time. */
+  onGotoFillOlder?: (targetMs: number) => Promise<void>;
+
   /**
    * Bumped by the parent when an outside action changes what the list shows
    * (e.g. main filter on/off or filter edits). Each bump pins + flashes the
@@ -229,7 +241,10 @@ interface TelegramTableProps {
 
 export interface ListGotoRequest {
   id: number;
-  telegram: Telegram;
+  /** Prefer telegram jump; if only targetMs, jump nearest time via gotoTime. */
+  telegram?: Telegram;
+  /** Time-only jump (e.g. rewind to DB oldest after fill). */
+  targetMs?: number;
   /** Ctrl/Cmd: toggle this row in the mouse selection, same as a row click. */
   additive?: boolean;
   /** Shift: select the range from the previous last-selected row. */
@@ -770,6 +785,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   contextKeys,
   contextParents,
   gotoRequest,
+  bufferOldestMs = null,
+  bufferNewestMs = null,
+  onGotoMergeNewer,
+  onGotoFillOlder,
   viewChangeToken,
   onFocusCategorySelect,
   focusListAddresses,
@@ -3206,8 +3225,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // "Quick goto time" (#282): jump to the telegram nearest a given time. Only
   // meaningful for the timestamp sort, where rows are ordered by time — the
   // info bar's jumps use gotoIndex directly since they already know the index.
-  const gotoTime = (targetMs: number): number | null => {
-    const rows = telegramRows;
+  // Out-of-range targets pause+merge newer or ascending-fill older first.
+  const gotoTimeGenRef = useRef(0);
+  const nearestTimeIndex = (rows: readonly TelegramRow[], targetMs: number): number | null => {
     if (rows.length === 0) return null;
     let bestIdx = 0;
     let bestDiff = Infinity;
@@ -3215,6 +3235,39 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       const diff = Math.abs(new Date(rows[i].timestamp).getTime() - targetMs);
       if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
     }
+    return bestIdx;
+  };
+
+  const gotoTime = (targetMs: number): number | null => {
+    const rows = telegramRows;
+    if (rows.length === 0 && bufferOldestMs == null && bufferNewestMs == null) return null;
+
+    if (bufferNewestMs != null && targetMs > bufferNewestMs) {
+      const gen = ++gotoTimeGenRef.current;
+      onListFollowChange?.(false);
+      onGotoMergeNewer?.();
+      // Jump after React publishes the merged backlog on the next paint.
+      requestAnimationFrame(() => {
+        if (gotoTimeGenRef.current !== gen) return;
+        const idx = nearestTimeIndex(telegramRowsRef.current, targetMs);
+        if (idx != null) gotoIndex(idx);
+      });
+      return nearestTimeIndex(rows, targetMs);
+    }
+
+    if (bufferOldestMs != null && targetMs < bufferOldestMs && onGotoFillOlder) {
+      const gen = ++gotoTimeGenRef.current;
+      onListFollowChange?.(false);
+      void onGotoFillOlder(targetMs).then(() => {
+        if (gotoTimeGenRef.current !== gen) return;
+        const idx = nearestTimeIndex(telegramRowsRef.current, targetMs);
+        if (idx != null) gotoIndex(idx);
+      });
+      return null;
+    }
+
+    const bestIdx = nearestTimeIndex(rows, targetMs);
+    if (bestIdx == null) return null;
     gotoIndex(bestIdx);
     return bestIdx;
   };
@@ -3589,6 +3642,17 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const pendingGotoSelect = useRef<{ key: string; additive: boolean; range: boolean; selected: boolean } | null>(null);
   useEffect(() => {
     if (!gotoRequest) return;
+    // Time-only jump (rewind / fill-then-scroll): no telegram identity to select.
+    // Wait for rows before marking applied so a post-fill re-render can retry.
+    if (gotoRequest.targetMs != null && !gotoRequest.telegram) {
+      if (appliedGotoId.current === gotoRequest.id) return;
+      if (telegramRows.length === 0) return;
+      appliedGotoId.current = gotoRequest.id;
+      pendingGotoSelect.current = null;
+      gotoTime(gotoRequest.targetMs);
+      return;
+    }
+    if (!gotoRequest.telegram) return;
     const key = anchorKey(gotoRequest.telegram);
     if (appliedGotoId.current !== gotoRequest.id) {
       const pool = forceIncludeFrom ?? telegrams;
@@ -4261,18 +4325,34 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       }
 
       case 'value': {
-        const valueText = t.value_formatted || (t.value_numeric !== null ? String(t.value_numeric) : '-');
-        const raw = visibleColumns.data && t.raw_hex ? t.raw_hex : '';
+        const dptKey = t.dpt ?? (t.dpt_main != null ? dptKeyLabel(t.dpt_main, t.dpt_sub) : null);
         return (
           <div style={cellBox} className="tt-cell filterable-cell">
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.35rem', minWidth: 0 }} title={t.unit ? `${valueText} ${t.unit}` : valueText}>
-              <span style={{ fontWeight: 700, color: 'var(--accent-primary)', fontSize: '0.9375rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}>
-                {valueText}
-              </span>
-              {t.unit && <span style={{ fontSize: '0.7rem', color: 'var(--text-dim)', fontWeight: 500, flexShrink: 0 }}>{t.unit}</span>}
+            <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden' }}>
+              <BusValueText
+                value={{
+                  value_formatted: t.value_formatted,
+                  value_numeric: t.value_numeric,
+                  value_json: t.value_json ?? null,
+                  raw_hex: t.raw_hex,
+                  unit: t.unit,
+                }}
+                dpt={dptKey}
+                allowFocus={false}
+                as="span"
+                style={{
+                  fontWeight: 700,
+                  color: 'var(--accent-primary)',
+                  fontSize: '0.9375rem',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                  minWidth: 0,
+                }}
+              />
             </div>
-            <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={raw || undefined}>
-              {raw || '\u00a0'}
+            <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', overflow: 'hidden' }} aria-hidden>
+              {'\u00a0'}
             </div>
           </div>
         );
@@ -4520,29 +4600,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           >
           {visibleCols.map(c => {
             if (c.id === 'time') {
-              if (infoMetrics.count === 0) {
-                return <div key={c.id} style={infoColStyle} />;
-              }
-              const oldestTs = format(new Date(telegramRows[infoMetrics.oldestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS');
-              const newestTs = format(new Date(telegramRows[infoMetrics.newestIdx].timestamp), 'yyyy-MM-dd HH:mm:ss.SS');
-              return (
-                <div key={c.id} style={infoColStyle}>
-                  <button
-                    style={infoChipBtnStyle}
-                    title={`Jump to the oldest telegram in the current view (${oldestTs})`}
-                    onClick={() => gotoIndex(infoMetrics.oldestIdx)}
-                  >
-                    Oldest: {oldestTs}
-                  </button>
-                  <button
-                    style={infoChipBtnStyle}
-                    title={`Jump to the newest telegram in the current view (${newestTs})`}
-                    onClick={() => gotoIndex(infoMetrics.newestIdx)}
-                  >
-                    Newest: {newestTs}
-                  </button>
-                </div>
-              );
+              // Oldest/newest buffer bounds + fill live in the header status pill.
+              return <div key={c.id} style={infoColStyle} />;
             }
             if (c.id === 'delta') {
               return (
@@ -4887,9 +4946,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
       {/* Quick filter bar (#271, #309) — two rows per column.
           Cells stay editable even when a column or the bar is toggled off;
-          only filtering is paused. The hide toggle stays full-strength. */}
+          only filtering is paused. The hide toggle stays full-strength.
+          Bottom rule: dark when disabled, gray when on but empty, orange when filtering. */}
       {quickOpen && (
-        <div style={{ display: 'flex', background: 'var(--bg-panel)', borderBottom: '1px solid var(--border-color)', flexShrink: 0 }}>
+        <div
+          className={`quick-filter-bar${!quickEnabled ? '' : pillQuick ? ' filtering' : ' idle'}`}
+          data-qf-bar-status={!quickEnabled ? 'inactive' : pillQuick ? 'filtering' : 'idle'}
+          style={{ display: 'flex', background: 'var(--bg-panel)', flexShrink: 0 }}
+        >
           <div style={{ width: RAIL_WIDTH, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }} />
             <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>
@@ -5730,6 +5794,18 @@ style.textContent = `
   .marks-pill button[aria-disabled="true"] {
     opacity: 0.4;
     cursor: default;
+  }
+
+  /* Status line under the open QF: inactive → dark, idle → gray, filtering → orange. */
+  .quick-filter-bar {
+    border-bottom: 1px solid var(--border-subtle);
+    transition: border-color 0.15s;
+  }
+  .quick-filter-bar.idle {
+    border-bottom-color: var(--text-dim);
+  }
+  .quick-filter-bar.filtering {
+    border-bottom-color: var(--warning);
   }
 
   .quick-filter-bar-toggle {

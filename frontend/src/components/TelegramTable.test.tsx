@@ -1770,8 +1770,10 @@ test('quick info bar (#311): toggled via the header button and summarizes the vi
   expect(screen.queryByText(/4 telegrams/)).not.toBeInTheDocument();
   fireEvent.click(screen.getByTitle('Show info bar'));
   expect(screen.getByText(/4 telegrams/)).toBeInTheDocument();
-  expect(screen.getByText(/Oldest:/)).toBeInTheDocument();
-  expect(screen.getByText(/Newest:/)).toBeInTheDocument();
+  // Oldest/newest moved to the header status pill — info bar keeps other metrics.
+  expect(screen.queryByText(/Oldest:/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/Newest:/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Min Δt:/)).toBeInTheDocument();
 });
 
 test('quick info bar (#311): still shown with zero counts when the list is empty', () => {
@@ -1810,12 +1812,8 @@ test('quick info bar (#311): lays out metrics in the column grid like the quick 
 
   fireEvent.click(screen.getByTitle('Show info bar'));
   const headerCols = container.querySelectorAll('.header-col');
-  const infoBar = screen.getByText(/Oldest:/).parentElement!.parentElement!;
+  const infoBar = screen.getByText(/Min Δt:/).parentElement!.parentElement!;
   expect(infoBar.childElementCount).toBe(headerCols.length);
-  // Two rows in TIME: oldest above newest.
-  const timeCol = screen.getByText(/Oldest:/).parentElement!;
-  expect(timeCol.children[0]).toHaveTextContent(/Oldest:/);
-  expect(timeCol.children[1]).toHaveTextContent(/Newest:/);
   // Two rows in Δt: min above max.
   const deltaCol = screen.getByText(/Min Δt:/).parentElement!;
   expect(deltaCol.children[0]).toHaveTextContent(/Min Δt:/);

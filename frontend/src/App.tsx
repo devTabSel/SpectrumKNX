@@ -20,12 +20,13 @@ import {
   DEFAULT_UI_STATE,
 } from './utils/uiState';
 import { DeviceStatusOverlay } from './components/DeviceStatusOverlay';
+import { BufferStatusPill } from './components/BufferStatusPill';
 import { TelegramTable, type SortConfig, type SortKey, type ListGotoRequest } from './components/TelegramTable';
 import { anchorKey } from './utils/anchorKey';
 import type { MarkColorIndexMap } from './utils/markColors';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel } from './utils/sortConfig';
 import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTelegramView';
-import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
+import { LayoutDashboard, History, Settings, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
 import { useTheme } from './hooks/useTheme';
@@ -369,6 +370,10 @@ function App() {
     pausedTelegrams,
     revealPaused,
     loadRange,
+    fillForwardFrom,
+    fillBackwardTo,
+    oldestTs: bufferOldestTs,
+    newestTs: bufferNewestTs,
     isLoading: isHistoryLoading,
     loadError: historyLoadError,
     clear: clearTelegrams,
@@ -1060,10 +1065,6 @@ function App() {
   // that panel consumes the main filter, so the pane shows only when it is active.
   const showFilterPane = activePanel === 'list' && isFilterOpen;
 
-  // The buffer holds at most `loadLimit` (newest) telegrams; once it is at
-  // capacity there is no room to load older history (#313).
-  const bufferFull = liveTelegrams.length >= loadLimit;
-
   // Inline "buffer full" marker shown next to the count in the stats pill (#284).
   const bufferLimitWarning = filteredLiveTelegrams.length >= loadLimit ? (
     <span
@@ -1130,91 +1131,84 @@ function App() {
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexShrink: 0 }}>
             {activeTab === 'live' && !isSettingsOpen && (
               <>
-                {/* Embedded Stats */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginRight: '1rem', background: 'var(--bg-subtle)', padding: '0.4rem 0.85rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                  <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-dim)' }}>
-                    Rate: <span onClick={() => setRateMode(m => m === 's' ? 'm' : m === 'm' ? 'h' : 's')} style={{ color: 'var(--accent-primary)', fontWeight: 600, cursor: 'pointer' }}>{busRate.toFixed(1)}/{rateMode}</span>
-                  </span>
-                  <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--text-dim)' }}>
-                    Buffer:
-                    {/* Buffer-related actions live with the count (#284): clear + load history */}
-                    <button
-                      className="icon-button"
-                      onClick={e => {
-                        setListFollow(false);
-                        if (e.ctrlKey || e.metaKey) {
-                          setPauseMode('auto');
-                          setCachePaused(true);
-                        }
-                        void clearTelegrams();
-                      }}
-                      title="Clear (also wipes the local telegram cache). Ctrl-click pauses automatically."
-                      style={{ color: 'var(--text-dim)', padding: '0.15rem' }}
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                    <button
-                      className="icon-button"
-                      onClick={() => setIsHistoryLoaderOpen(true)}
-                      disabled={bufferFull}
-                      title={
-                        bufferFull
-                          ? `Buffer full (${loadLimit.toLocaleString()}); clear it or raise the limit to load more history`
-                          : isHistoryLoading
-                            ? 'History read in progress…'
-                            : 'Load history'
+                <BufferStatusPill
+                  oldestMs={bufferOldestTs}
+                  newestMs={bufferNewestTs}
+                  readDirection={
+                    (sortConfig.find(l => l.key === 'timestamp')?.direction
+                      ?? sortConfig[0]?.direction
+                      ?? 'desc') === 'asc'
+                      ? 'forward'
+                      : 'backward'
+                  }
+                  loadLimit={loadLimit}
+                  onLoadLimitChange={setLoadLimit}
+                  filteredCount={filteredLiveTelegrams.length}
+                  totalCount={liveTelegrams.length}
+                  filterActive={activeFilterCount > 0}
+                  onClear={({ pauseAuto }) => {
+                    setListFollow(false);
+                    if (pauseAuto) {
+                      setPauseMode('auto');
+                      setCachePaused(true);
+                    }
+                    void clearTelegrams();
+                  }}
+                  pauseTitle={pauseTitle}
+                  pauseColor={pauseColor}
+                  pauseMode={pauseMode}
+                  pauseDisabled={bufferEmpty}
+                  onTogglePause={togglePause}
+                  busRate={busRate}
+                  rateMode={rateMode}
+                  onCycleRateMode={() => setRateMode(m => (m === 's' ? 'm' : m === 'm' ? 'h' : 's'))}
+                  wsConnected={isConnected}
+                  isHistoryLoading={isHistoryLoading}
+                  historyLoadError={historyLoadError}
+                  onOldestCommit={ms => { void fillForwardFrom(ms); }}
+                  onNewestCommit={ms => { void fillBackwardTo(ms); }}
+                  onLoadFromDbOldest={() => {
+                    void (async () => {
+                      try {
+                        const res = await fetch(apiUrl('/api/database/info'));
+                        if (!res.ok) return;
+                        const info = await res.json() as { oldest_timestamp?: string | null };
+                        const raw = info.oldest_timestamp;
+                        if (!raw) return;
+                        const ms = new Date(raw).getTime();
+                        if (Number.isNaN(ms)) return;
+                        await fillForwardFrom(ms);
+                        handleListFollowChange(false);
+                        setActivePanel('list');
+                        listGotoSeq.current += 1;
+                        setListGoto({ id: listGotoSeq.current, targetMs: ms });
+                      } catch {
+                        // Status pill already surfaces historyLoadError from the cache.
                       }
-                      style={{
-                        color: isHistoryLoading ? 'var(--accent-primary)' : 'var(--text-dim)',
-                        padding: '0.15rem',
-                        opacity: bufferFull ? 0.4 : 1,
-                        cursor: bufferFull ? 'not-allowed' : 'pointer',
-                      }}
-                    >
-                      <Download size={15} />
-                    </button>
-                    {/* Pausing holds back the buffer for every panel, not just
-                        the list, so it sits with the other buffer actions (#374). */}
-                    <button
-                      className="icon-button"
-                      onClick={togglePause}
-                      title={pauseTitle}
-                      disabled={bufferEmpty}
-                      style={{
-                        color: pauseColor,
-                        padding: '0.15rem',
-                        opacity: bufferEmpty ? 0.45 : 1,
-                        cursor: bufferEmpty ? 'not-allowed' : 'pointer',
-                      }}
-                    >
-                      {pauseMode === 'playing'
-                        ? <Play size={15} fill="currentColor" />
-                        : <Pause size={15} fill="currentColor" />}
-                    </button>
-                    <span style={{ color: 'var(--text-main)', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
-                      {activeFilterCount
-                        ? <>{filteredLiveTelegrams.length}{bufferLimitWarning}<span style={{ color: 'var(--text-dim)', fontWeight: 400 }}> / {liveTelegrams.length}</span></>
-                        : <>{liveTelegrams.length}{bufferLimitWarning}</>}
-                    </span>
-                  </span>
-                  <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-dim)' }}>
-                    WS: <span style={{ color: isConnected ? 'var(--success)' : 'var(--error)', fontWeight: 500 }}>{isConnected ? 'Active' : 'Offline'}</span>
-                  </span>
-                  {/* Background history reads run without blocking the UI (#222) */}
-                  {isHistoryLoading && (
-                    <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--accent-primary)' }}>
-                      <span className="chip-spinner" /> History: loading…
-                    </span>
-                  )}
-                  {!isHistoryLoading && historyLoadError && (
-                    <span
-                      title={historyLoadError}
-                      style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--error)' }}
-                    >
-                      <AlertTriangle size={13} /> History: failed
-                    </span>
-                  )}
-                </div>
+                    })();
+                  }}
+                  onLoadFromDbNewest={() => {
+                    void (async () => {
+                      try {
+                        const res = await fetch(apiUrl('/api/database/info'));
+                        if (!res.ok) return;
+                        const info = await res.json() as { newest_timestamp?: string | null };
+                        const raw = info.newest_timestamp;
+                        if (!raw) return;
+                        const ms = new Date(raw).getTime();
+                        if (Number.isNaN(ms)) return;
+                        await fillBackwardTo(ms);
+                        handleListFollowChange(false);
+                        setActivePanel('list');
+                        listGotoSeq.current += 1;
+                        setListGoto({ id: listGotoSeq.current, targetMs: ms });
+                      } catch {
+                        // Status pill already surfaces historyLoadError from the cache.
+                      }
+                    })();
+                  }}
+                  bufferLimitWarning={bufferLimitWarning}
+                />
 
                 {/* Main-panel switch (#374): the five panels close back to the
                     list; the Building opener also clears any drilled-in device. */}
@@ -1708,6 +1702,20 @@ function App() {
                     onPauseFlush={flushPauseBuffer}
                     onPauseReveal={revealPauseBuffer}
                     onJumpToLive={jumpToLiveResume}
+                    bufferOldestMs={bufferOldestTs}
+                    bufferNewestMs={bufferNewestTs}
+                    onGotoMergeNewer={() => {
+                      setListFollow(false);
+                      if (pauseMode === 'playing') {
+                        // Latch auto-pause so subsequent live rows buffer, then
+                        // merge whatever is already waiting toward newer.
+                        setPauseMode('auto');
+                        setCachePaused(true);
+                      }
+                      // Reveal the entire pause backlog into the published list.
+                      revealPaused(Number.MAX_SAFE_INTEGER);
+                    }}
+                    onGotoFillOlder={ms => fillForwardFrom(ms)}
                     listAnchorKey={listAnchorKey}
                     onListAnchorKeyChange={setListAnchorKey}
                     viewChangeToken={ttViewChangeToken}

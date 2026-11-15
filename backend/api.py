@@ -244,6 +244,8 @@ async def get_telegrams(
     # Time-delta context window (milliseconds, applied directionally)
     delta_before_ms: int = 0,
     delta_after_ms: int = 0,
+    # Default newest-first; false pages oldest-first for forward buffer fills.
+    order_descending: bool = True,
 ):
     # Parse comma-separated multi-value params
     source_list = [s.strip() for s in source_address.split(",")] if source_address else []
@@ -275,7 +277,7 @@ async def get_telegrams(
         delta_after_ms=delta_after_ms,
         limit=limit,
         offset=offset,
-        order_descending=True,
+        order_descending=order_descending,
     )
 
     result = await store.query(query, flush_first=True)

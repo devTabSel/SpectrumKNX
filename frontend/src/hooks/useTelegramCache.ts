@@ -64,6 +64,20 @@ export interface TelegramCache {
   revealPaused: (n: number) => number;
   /** Load a time range: cache hits appear immediately, gaps fetch in background. */
   loadRange: (startMs: number, endMs: number) => Promise<void>;
+  /**
+   * Fill the buffer ascending from `startMs` toward now / the existing buffer
+   * (oldest-first DB pages). Used by the oldest datetime field and goto-older.
+   */
+  fillForwardFrom: (startMs: number) => Promise<void>;
+  /**
+   * Fill newest-first from `endMs` backward to cover `[endMs, now]` (or the
+   * existing newest). Used by the newest datetime field.
+   */
+  fillBackwardTo: (endMs: number) => Promise<void>;
+  /** Oldest timestamp currently in the in-memory buffer, or null when empty. */
+  oldestTs: number | null;
+  /** Newest timestamp currently in the in-memory buffer, or null when empty. */
+  newestTs: number | null;
   /** True while any backend history fetch is in flight (#222). */
   isLoading: boolean;
   /** Last background load failure, cleared by the next successful load. */
@@ -77,12 +91,18 @@ interface FetchResult {
   limitReached: boolean;
 }
 
-/** Fetches a time range from the backend, newest first, unfiltered. */
-async function fetchRange(startMs: number, endMs: number, limit: number): Promise<FetchResult> {
+/** Fetches a time range from the backend, unfiltered. */
+async function fetchRange(
+  startMs: number,
+  endMs: number,
+  limit: number,
+  orderDescending = true,
+): Promise<FetchResult> {
   const params = new URLSearchParams({
     limit: String(limit),
     start_time: new Date(startMs).toISOString(),
     end_time: new Date(endMs).toISOString(),
+    order_descending: orderDescending ? 'true' : 'false',
   });
   const res = await fetch(apiUrl(`/api/telegrams?${params}`));
   if (!res.ok) throw new Error(`Server error: ${res.status}`);
@@ -364,6 +384,72 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     [runLoad, mergeIntoBuffer, publish, fillGaps],
   );
 
+  /**
+   * Pages oldest-first from `startMs` toward now (or the existing buffer's
+   * oldest edge). Merges each chunk and marks coverage as it goes.
+   */
+  const fillForwardFrom = useCallback(
+    (startMs: number) =>
+      runLoad(async () => {
+        const gen = loadGenerationRef.current;
+        const now = Date.now();
+        // Cap the forward fill at the prior buffer edge so we only close the
+        // older hole; when the buffer is empty, fill up to now.
+        const connectTs = bufferRef.current!.oldestTs;
+        const endMs = connectTs != null ? Math.min(connectTs, now) : now;
+        if (startMs > endMs) return;
+
+        const cached = await cacheRef.current!.loadRange(startMs, endMs).catch(() => []);
+        if (loadGenerationRef.current !== gen) return;
+        if (cached.length > 0 && mergeIntoBuffer(cached)) publish();
+
+        let cursor = startMs;
+        let fetched = 0;
+        while (cursor <= endMs && fetched < maxSize) {
+          if (loadGenerationRef.current !== gen) return;
+
+          const limit = Math.min(HISTORY_CHUNK_SIZE, maxSize - fetched);
+          const { entries, limitReached } = await fetchRange(cursor, endMs, limit, false);
+          if (loadGenerationRef.current !== gen) return;
+          if (entries.length === 0) {
+            coverageRef.current!.addCovered(cursor, endMs);
+            break;
+          }
+          // Ascending response: first = oldest, last = newest in the chunk.
+          if (mergeIntoBuffer(entries)) publish();
+          pendingStoreCountRef.current++;
+          const stored = await cacheRef.current!.store(entries).then(
+            () => { pendingStoreCountRef.current--; return true; },
+            () => { pendingStoreCountRef.current--; return false; },
+          );
+          fetched += entries.length;
+          const newestInChunk = entries[entries.length - 1].ts;
+          const oldestInChunk = entries[0].ts;
+          if (stored) coverageRef.current!.addCovered(oldestInChunk, newestInChunk);
+          if (!limitReached || newestInChunk >= endMs) {
+            if (stored) coverageRef.current!.addCovered(cursor, endMs);
+            break;
+          }
+          cursor = newestInChunk > cursor ? newestInChunk : cursor + 1;
+        }
+        saveCoverage();
+      }),
+    [runLoad, mergeIntoBuffer, publish, maxSize, saveCoverage],
+  );
+
+  /** Newest-first fill covering `[endMs, now]` (backward toward older history). */
+  const fillBackwardTo = useCallback(
+    (endMs: number) => {
+      const now = Date.now();
+      const start = Math.min(endMs, now);
+      const end = Math.max(endMs, now);
+      // When the user picks a past instant as the newest bound, page that
+      // window newest-first so the buffer reaches back to it.
+      return loadRange(start, end);
+    },
+    [loadRange],
+  );
+
   // ── Startup: restore cache + coverage, then fill gaps up to now ─────────────
   useEffect(() => {
     // When restore is disabled the view starts empty; only live telegrams and
@@ -607,6 +693,14 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
   }, [pausedCount, telegrams]);
   /* eslint-enable react-hooks/refs */
 
+  // Published list is newest-first; buffer bounds follow that order.
+  const oldestTs = telegrams.length > 0
+    ? telegramTs(telegrams[telegrams.length - 1])
+    : null;
+  const newestTs = telegrams.length > 0
+    ? telegramTs(telegrams[0])
+    : null;
+
   /* eslint-disable react-hooks/refs -- pausedTelegrams is the stable backlog above */
   return {
     telegrams,
@@ -618,6 +712,10 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     pausedTelegrams,
     revealPaused,
     loadRange,
+    fillForwardFrom,
+    fillBackwardTo,
+    oldestTs,
+    newestTs,
     isLoading: activeLoads > 0,
     loadError,
     clear,

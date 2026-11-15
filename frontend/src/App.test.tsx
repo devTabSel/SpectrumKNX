@@ -70,6 +70,14 @@ vi.mock('./hooks/useTelegramCache', () => {
           return remaining;
         },
         loadRange: async () => {},
+        fillForwardFrom: async () => {},
+        fillBackwardTo: async () => {},
+        oldestTs: telegrams.length > 0
+          ? new Date(telegrams[telegrams.length - 1].timestamp).getTime()
+          : null,
+        newestTs: telegrams.length > 0
+          ? new Date(telegrams[0].timestamp).getTime()
+          : null,
         isLoading: false,
         loadError: null,
         clear: async () => {

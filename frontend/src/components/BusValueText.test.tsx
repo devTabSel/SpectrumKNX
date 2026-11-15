@@ -3,7 +3,7 @@ import { expect, test } from 'vitest';
 import { BusValueText } from './BusValueText';
 import { TT } from '../utils/telegramCellStyles';
 
-test('defaults to tt-value and toggles to raw-badge on click without unmounting either layer', () => {
+test('cycles decoded → decimal → hex → bin for ≤4-bit DPT', () => {
   render(
     <BusValueText
       value={{ value_numeric: 0, value_formatted: '0', raw_hex: '0x00' }}
@@ -11,22 +11,47 @@ test('defaults to tt-value and toggles to raw-badge on click without unmounting 
     />,
   );
   const el = screen.getByRole('button', { name: 'decrease 0' });
-  const decoded = el.querySelector(`.${TT.value}`) as HTMLElement;
-  const raw = el.querySelector(`.${TT.rawBadge}`) as HTMLElement;
-  expect(decoded).toHaveTextContent('decrease 0');
-  expect(decoded).toHaveStyle({ visibility: 'visible' });
-  expect(raw).toHaveTextContent('0x00');
-  expect(raw).toHaveStyle({ visibility: 'hidden' });
+  expect(el.querySelector(`.${TT.value}`)).toHaveStyle({ visibility: 'visible' });
+
+  fireEvent.click(el);
+  expect(screen.getByRole('button', { name: '0' })).toBe(el);
 
   fireEvent.click(el);
   expect(screen.getByRole('button', { name: '0x00' })).toBe(el);
-  expect(decoded).toHaveStyle({ visibility: 'hidden' });
-  expect(raw).toHaveStyle({ visibility: 'visible' });
+
+  fireEvent.click(el);
+  expect(screen.getByRole('button', { name: '0b0000' })).toBe(el);
 
   fireEvent.click(el);
   expect(screen.getByRole('button', { name: 'decrease 0' })).toBe(el);
-  expect(decoded).toHaveStyle({ visibility: 'visible' });
-  expect(raw).toHaveStyle({ visibility: 'hidden' });
+});
+
+test('skips decimal when it matches decoded text', () => {
+  render(
+    <BusValueText
+      value={{ value_formatted: '21.5', value_numeric: 21.5, raw_hex: '0x0C65', unit: '°C' }}
+      dpt="9.001"
+    />,
+  );
+  // Decoded is "21.5" with unit; decimal would also be "21.5" → skipped.
+  const el = screen.getByRole('button', { name: '21.5 °C' });
+  fireEvent.click(el);
+  expect(screen.getByRole('button', { name: '0x0C65' })).toBe(el);
+  fireEvent.click(el);
+  expect(screen.getByRole('button', { name: '21.5 °C' })).toBe(el);
+});
+
+test('omits binary outside ≤4-bit discrete DPTs', () => {
+  render(
+    <BusValueText
+      value={{ value_formatted: '21.5', value_numeric: 21.5, raw_hex: '0x0C65' }}
+      dpt="9.001"
+    />,
+  );
+  const el = screen.getByRole('button', { name: '21.5' });
+  fireEvent.click(el); // hex
+  fireEvent.click(el); // back to decoded (no bin)
+  expect(screen.getByRole('button', { name: '21.5' })).toBe(el);
 });
 
 test('renders unit in a separate tt-value-unit span', () => {
@@ -53,12 +78,13 @@ test('className / rawClassName overrides replace defaults', () => {
   const el = screen.getByRole('button', { name: 'on' });
   expect(el.querySelector('.custom-value')).toBeTruthy();
   expect(el.querySelector(`.${TT.value}`)).toBeNull();
-  fireEvent.click(el);
+  fireEvent.click(el); // decimal "1"
+  fireEvent.click(el); // hex
   expect(el.querySelector('.custom-raw')).toBeTruthy();
   expect(el.querySelector(`.${TT.rawBadge}`)).toBeNull();
 });
 
-test('defaultShowHex starts in raw-badge mode and toggles to decoded', () => {
+test('defaultShowHex starts in hex mode and cycles onward', () => {
   render(
     <BusValueText
       value={{ value_numeric: 0, value_formatted: '0', raw_hex: '0x00' }}
@@ -67,11 +93,11 @@ test('defaultShowHex starts in raw-badge mode and toggles to decoded', () => {
     />,
   );
   const el = screen.getByRole('button', { name: '0x00' });
-  expect(el.querySelector(`.${TT.rawBadge}`)).toHaveStyle({ visibility: 'visible' });
-  expect(el.querySelector(`.${TT.value}`)).toHaveStyle({ visibility: 'hidden' });
+  const hexLayer = [...el.querySelectorAll(`.${TT.rawBadge}`)]
+    .find(node => node.textContent === '0x00') as HTMLElement;
+  expect(hexLayer).toHaveStyle({ visibility: 'visible' });
   fireEvent.click(el);
-  expect(screen.getByRole('button', { name: 'decrease 0' })).toBe(el);
-  expect(el.querySelector(`.${TT.value}`)).toHaveStyle({ visibility: 'visible' });
+  expect(screen.getByRole('button', { name: '0b0000' })).toBe(el);
 });
 
 test('text DPTs render padded values in monospace', () => {
@@ -97,5 +123,5 @@ test('allowFocus=false keeps the toggle out of the tab order', () => {
   fireEvent.mouseDown(el);
   expect(el).not.toHaveFocus();
   fireEvent.click(el);
-  expect(screen.getByRole('button', { name: '0x01' })).toBe(el);
+  expect(screen.getByRole('button', { name: '1' })).toBe(el);
 });
