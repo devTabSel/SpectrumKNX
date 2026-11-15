@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.0-beta.14-devTabSel.4
+
+### Changed
+
+- **Test in HAOS**: published devTabSel fork build from `cursor/test-in-haos-workflow-2fbb` with sidebar/store branding.
+
 ## 2.0.0-beta.14-devTabSel.3
 
 ### Changed

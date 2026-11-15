@@ -4,7 +4,7 @@
 name: "Spectrum KNX (Beta, devTabSel)"
 description: "BETA (devTabSel) — A professional KNX bus monitor and analyzer"
 url: "https://github.com/devTabSel/SpectrumKNX"
-version: "2.0.0-beta.14-devTabSel.3"
+version: "2.0.0-beta.14-devTabSel.4"
 slug: "spectrum_knx_beta"
 image: "ghcr.io/devtabsel/spectrum-knx-addon-{arch}"
 host_network: true
