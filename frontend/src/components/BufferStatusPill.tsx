@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
+import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import { format } from 'date-fns';
 import {
   ChevronLeft,
@@ -118,18 +118,23 @@ export function BufferStatusPill({
   const [oldestDraft, setOldestDraft] = useState(() => msToInput(oldestMs));
   const [newestDraft, setNewestDraft] = useState(() => msToInput(newestMs));
   const [limitDraft, setLimitDraft] = useState(String(loadLimit));
-
-  useEffect(() => {
+  // Mirror committed buffer bounds into the editable drafts when the parent
+  // value changes (React "adjust state while rendering" pattern).
+  const [oldestBaseline, setOldestBaseline] = useState(oldestMs);
+  if (oldestMs !== oldestBaseline) {
+    setOldestBaseline(oldestMs);
     setOldestDraft(msToInput(oldestMs));
-  }, [oldestMs]);
-
-  useEffect(() => {
+  }
+  const [newestBaseline, setNewestBaseline] = useState(newestMs);
+  if (newestMs !== newestBaseline) {
+    setNewestBaseline(newestMs);
     setNewestDraft(msToInput(newestMs));
-  }, [newestMs]);
-
-  useEffect(() => {
+  }
+  const [limitBaseline, setLimitBaseline] = useState(loadLimit);
+  if (loadLimit !== limitBaseline) {
+    setLimitBaseline(loadLimit);
     setLimitDraft(String(loadLimit));
-  }, [loadLimit]);
+  }
 
   const countText = filterActive
     ? `${filteredCount} / ${totalCount}`

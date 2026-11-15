@@ -683,7 +683,7 @@ test('ctrl-click drafts an individual context window; Enter commits, Esc/outside
 
   onFlaggedKeysChange.mockClear();
   expect(onFlaggedKeysChange).not.toHaveBeenCalled();
-  const popup = screen.getByTestId('context-window-popup');
+  expect(screen.getByTestId('context-window-popup')).toBeInTheDocument();
   const before = screen.getByLabelText('Individual context before (ms)');
   const after = screen.getByLabelText('Individual context after (ms)');
   expect(before).toHaveAttribute('placeholder', 'before');
