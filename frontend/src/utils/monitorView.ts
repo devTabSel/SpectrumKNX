@@ -3,6 +3,12 @@ import { getPref, setPref } from './prefs';
 import type { SortConfig } from './sortConfig';
 import { UI_STORAGE_KEY } from './uiState';
 
+/**
+ * Pause carried by the monitor view. `off` is the forward read: there is no
+ * live edge and the snapshot is not frozen. Backward uses playing | auto | manual.
+ */
+export type MonitorPauseMode = PauseMode | 'off';
+
 /** Read axis of the group monitor. Forward is oldest-first. */
 export type ReadDirection = 'forward' | 'backward';
 
@@ -17,7 +23,7 @@ export interface MonitorView {
   direction: ReadDirection;
   anchorTs: number | null;
   follow: boolean;
-  pauseMode: PauseMode;
+  pauseMode: MonitorPauseMode;
 }
 
 export const DEFAULT_MONITOR_VIEW: MonitorView = {
@@ -39,7 +45,7 @@ export interface MonitorViewDerived {
   /** Cache anchor. `ts === null` keeps the buffer edge (see MonitorView). */
   bufferAnchor: { direction: ReadDirection; ts: number | null };
   listFollow: boolean;
-  pauseMode: PauseMode;
+  pauseMode: MonitorPauseMode;
 }
 
 /** Projects the view onto the values the monitor and the cache consume. */
@@ -79,6 +85,27 @@ function isPauseMode(value: unknown): value is PauseMode {
   return typeof value === 'string' && (PAUSE_MODES as readonly string[]).includes(value);
 }
 
+function isMonitorPauseMode(value: unknown): value is MonitorPauseMode {
+  return value === 'off' || isPauseMode(value);
+}
+
+/**
+ * Forward has no live or pause. The stored form is `pauseMode: 'off'` and
+ * follow off, so a reload does not revive Play. `off` on a backward view is
+ * not a live mode: it becomes auto without follow (no automatic live).
+ * A backward playing | auto | manual view is returned unchanged.
+ */
+export function normalizeMonitorView(view: MonitorView): MonitorView {
+  if (view.direction === 'forward') {
+    if (view.pauseMode === 'off' && view.follow === false) return view;
+    return { ...view, follow: false, pauseMode: 'off' };
+  }
+  if (view.pauseMode === 'off') {
+    return { ...view, follow: false, pauseMode: 'auto' };
+  }
+  return view;
+}
+
 function sanitizeMonitorView(raw: unknown, legacyFollow?: boolean): MonitorView {
   const p = (raw && typeof raw === 'object' ? raw : {}) as Partial<MonitorView>;
   const anchorTs = typeof p.anchorTs === 'number' && Number.isFinite(p.anchorTs) ? p.anchorTs : null;
@@ -86,7 +113,7 @@ function sanitizeMonitorView(raw: unknown, legacyFollow?: boolean): MonitorView 
     direction: p.direction === 'forward' || p.direction === 'backward' ? p.direction : 'backward',
     anchorTs,
     follow: typeof p.follow === 'boolean' ? p.follow : (legacyFollow ?? DEFAULT_MONITOR_VIEW.follow),
-    pauseMode: isPauseMode(p.pauseMode) ? p.pauseMode : DEFAULT_MONITOR_VIEW.pauseMode,
+    pauseMode: isMonitorPauseMode(p.pauseMode) ? p.pauseMode : DEFAULT_MONITOR_VIEW.pauseMode,
   };
 }
 
@@ -127,6 +154,7 @@ export function readBufferRangeMinutesPref(): number {
  * and range, including their defaults for omitted params, and wins over the
  * preference. Follow and pause mode are not in the URL. Embedded mode and a
  * bare address keep the preference: the iframe URL is not the workspace.
+ * A forward result is normalized to `pauseMode: 'off'` and follow off.
  */
 export function resolveMonitorStartup(opts: {
   embedded: boolean;
@@ -135,14 +163,14 @@ export function resolveMonitorStartup(opts: {
   const view = readMonitorViewPref();
   const rangeMinutes = readBufferRangeMinutesPref();
   if (opts.embedded || opts.url == null) {
-    return { view, rangeMinutes, fromUrl: false };
+    return { view: normalizeMonitorView(view), rangeMinutes, fromUrl: false };
   }
   return {
-    view: {
+    view: normalizeMonitorView({
       ...view,
       direction: opts.url.direction,
       anchorTs: opts.url.anchorTs,
-    },
+    }),
     rangeMinutes: opts.url.rangeMinutes,
     fromUrl: true,
   };

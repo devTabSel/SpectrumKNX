@@ -5,6 +5,7 @@ import {
   BUFFER_RANGE_MINUTES_DEFAULT,
   DEFAULT_MONITOR_VIEW,
   deriveMonitorView,
+  normalizeMonitorView,
   readBufferRangeMinutesPref,
   readMonitorViewPref,
   resolveMonitorStartup,
@@ -109,6 +110,48 @@ describe('monitor view preference', () => {
   });
 });
 
+describe('normalizeMonitorView', () => {
+  it('drops live and pause from a forward view', () => {
+    expect(normalizeMonitorView({
+      direction: 'forward',
+      anchorTs: 5000,
+      follow: true,
+      pauseMode: 'playing',
+    })).toEqual({
+      direction: 'forward',
+      anchorTs: 5000,
+      follow: false,
+      pauseMode: 'off',
+    });
+    expect(normalizeMonitorView({
+      ...forwardParked,
+      pauseMode: 'auto',
+    }).pauseMode).toBe('off');
+    expect(normalizeMonitorView(forwardParked).pauseMode).toBe('off');
+  });
+
+  it('leaves a backward playing, auto or manual view unchanged', () => {
+    const playing = DEFAULT_MONITOR_VIEW;
+    expect(normalizeMonitorView(playing)).toBe(playing);
+    const manual: MonitorView = { ...playing, follow: false, pauseMode: 'manual' };
+    expect(normalizeMonitorView(manual)).toBe(manual);
+  });
+
+  it('does not treat off as live when the direction is backward', () => {
+    expect(normalizeMonitorView({
+      direction: 'backward',
+      anchorTs: null,
+      follow: true,
+      pauseMode: 'off',
+    })).toEqual({
+      direction: 'backward',
+      anchorTs: null,
+      follow: false,
+      pauseMode: 'auto',
+    });
+  });
+});
+
 describe('resolveMonitorStartup', () => {
   const prefs = forwardParked;
 
@@ -119,7 +162,7 @@ describe('resolveMonitorStartup', () => {
 
   it('uses the preference when the address is not a monitor URL', () => {
     expect(resolveMonitorStartup({ embedded: false, url: null })).toEqual({
-      view: prefs,
+      view: { ...prefs, follow: false, pauseMode: 'off' },
       rangeMinutes: 30,
       fromUrl: false,
     });
@@ -147,11 +190,28 @@ describe('resolveMonitorStartup', () => {
     });
   });
 
-  it('ignores the URL while embedded and keeps follow and pause from the preference', () => {
+  it('normalizes a forward URL over a playing preference', () => {
+    writeMonitorViewPref({ ...DEFAULT_MONITOR_VIEW, follow: true, pauseMode: 'playing' });
+    expect(resolveMonitorStartup({
+      embedded: false,
+      url: { direction: 'forward', anchorTs: 5000, rangeMinutes: 15 },
+    }).view).toEqual({
+      direction: 'forward',
+      anchorTs: 5000,
+      follow: false,
+      pauseMode: 'off',
+    });
+  });
+
+  it('ignores the URL while embedded and normalizes a forward preference', () => {
     const resolved = resolveMonitorStartup({
       embedded: true,
       url: { direction: 'backward', anchorTs: null, rangeMinutes: 5 },
     });
-    expect(resolved).toEqual({ view: prefs, rangeMinutes: 30, fromUrl: false });
+    expect(resolved).toEqual({
+      view: { ...prefs, follow: false, pauseMode: 'off' },
+      rangeMinutes: 30,
+      fromUrl: false,
+    });
   });
 });

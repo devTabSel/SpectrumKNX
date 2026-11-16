@@ -640,7 +640,7 @@ describe('useTelegramCache', () => {
     // Reconnect gap fills hit fillGaps without skipBufferFullBreak.
     act(() => { result.current.setConnected(true); });
     act(() => { result.current.setConnected(false); });
-    act(() => { result.current.setConnected(true); });
+    await act(async () => { result.current.setConnected(true); });
 
     // Only the reconnect gap [disconnect..now] is fetched, not older gaps.
     const reconnectFetches = fetchCalls
@@ -650,6 +650,35 @@ describe('useTelegramCache', () => {
         return Date.parse(p.get('end_time')!) < 8000;
       });
     expect(reconnectFetches).toHaveLength(0);
+  });
+
+  it('marks fillingGaps only while a reconnect gap fill is in flight', async () => {
+    localStorage.setItem(COVERAGE_STORAGE_KEY, JSON.stringify([[1000, 2000]]));
+    const { result } = renderHook(() => useTelegramCache(1000));
+    await settle(result);
+    expect(result.current.fillingGaps).toBe(false);
+
+    act(() => { result.current.setConnected(true); });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.fillingGaps).toBe(false);
+
+    act(() => { result.current.setConnected(false); });
+    expect(result.current.fillingGaps).toBe(false);
+    // The offline window has to be a real gap; same-millisecond reconnect is covered.
+    await new Promise(r => setTimeout(r, 20));
+
+    let release: (value: Response) => void = () => {};
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => new Promise<Response>(resolve => { release = resolve; })),
+    );
+    act(() => { result.current.setConnected(true); });
+    await waitFor(() => expect(result.current.fillingGaps).toBe(true));
+
+    await act(async () => {
+      release(jsonRes({ telegrams: [], metadata: { limit_reached: false } }));
+    });
+    await waitFor(() => expect(result.current.fillingGaps).toBe(false));
   });
 
   it('does not mark a range covered when the cache write fails (#317)', async () => {

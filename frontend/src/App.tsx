@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from 'react';
 import { useWebSocket, type Telegram, type ConnectionStateEvent } from './hooks/useWebSocket';
 import { parseViewUrl } from './utils/viewUrl';
 import {
@@ -27,9 +27,11 @@ import type { MarkColorIndexMap } from './utils/markColors';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel } from './utils/sortConfig';
 import {
   deriveMonitorView,
+  normalizeMonitorView,
   resolveMonitorStartup,
   sortConfigForReadDirection,
   writeMonitorViewPref,
+  type MonitorPauseMode,
   type MonitorView,
 } from './utils/monitorView';
 import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTelegramView';
@@ -47,7 +49,6 @@ import {
   MONITOR_PAGE_SIZE_MAX,
 } from './hooks/useTelegramCache';
 import {
-  type PauseMode,
   pauseModeForListFollow,
   pauseModeForToggle,
   cachePausedForMode,
@@ -402,6 +403,7 @@ function App() {
     ingested: ingestedTelegrams,
     addLive,
     setConnected: setCacheConnected,
+    fillingGaps,
     setPaused: setCachePaused,
     pausedCount,
     pausedTelegrams,
@@ -429,7 +431,7 @@ function App() {
   );
   // Live-trim policy for handleTelegram (declared before filters; synced below).
   const liveTrimRef = useRef({
-    pauseMode: 'playing' as PauseMode,
+    pauseMode: 'playing' as MonitorPauseMode,
     readDirection: 'backward' as 'forward' | 'backward',
     rangeMinutes: 60,
     filters: DEFAULT_FILTERS as ActiveFilters,
@@ -452,9 +454,16 @@ function App() {
     setBufferAnchor: typeof setBufferAnchor;
     setEvictionMode: typeof setEvictionMode;
   } | null>(null);
-  // Snapshot frozen in auto/manual; flush moves mode to playing without
-  // necessarily enabling live-follow (edge flush keeps the viewport + pill).
-  const isPaused = cachePausedForMode(pauseMode);
+  // Snapshot frozen in auto/manual while reading backward. Forward never
+  // freezes: new rows appear when the buffer's own window admits them.
+  // Flush moves mode to playing without necessarily enabling live-follow
+  // (edge flush keeps the viewport + pill).
+  const isPaused = readDirection === 'backward'
+    && pauseMode !== 'off'
+    && cachePausedForMode(pauseMode);
+  const applyCachePause = useCallback((paused: boolean) => {
+    setCachePaused(readDirection === 'backward' && paused);
+  }, [readDirection, setCachePaused]);
   // Popover, send panel, and list READ color follow the full buffer, including
   // telegrams still sitting in the pause backlog.
 
@@ -568,9 +577,10 @@ function App() {
     // nothing is lost and resume simply reveals what arrived in between.
     addLive(t);
 
-    // While playing, enforce the minute window when a filter-matching telegram arrives.
+    // While playing backward, enforce the minute window when a filter-matching
+    // telegram arrives. Forward has no live trim; admission stays in the cache.
     const pol = liveTrimRef.current;
-    if (pol.pauseMode !== 'playing') return;
+    if (pol.readDirection === 'forward' || pol.pauseMode !== 'playing') return;
     const filters = enabledFilters(pol.filters);
     const filterOn = pol.filtersEnabled && hasActiveFilters(filters);
     if (filterOn && !matchesTelegram(t, filters)) return;
@@ -622,7 +632,11 @@ function App() {
   }, [loadLimit, monitorPageSize, bufferRangeMinutes, visibleColumns, rateMode, restoreOnStartup]);
 
   useEffect(() => {
-    writeMonitorViewPref(monitorView);
+    // Disk matches the forward form even when a timestamped switch left a
+    // backward pause mode in memory for a later return to backward.
+    writeMonitorViewPref(
+      monitorView.direction === 'forward' ? normalizeMonitorView(monitorView) : monitorView,
+    );
   }, [monitorView]);
 
   // Eviction and the live admission window follow the view. An explicit anchor
@@ -709,10 +723,10 @@ function App() {
         && cur.direction === ws.readDirection
         && cur.anchorTs === ws.anchorTs
         && cur.rangeMinutes === ws.rangeMinutes;
-      setMonitorView(prev => (
+      setMonitorView(prev => normalizeMonitorView(
         prev.direction === ws.readDirection && prev.anchorTs === ws.anchorTs
           ? prev
-          : { ...prev, direction: ws.readDirection, anchorTs: ws.anchorTs }
+          : { ...prev, direction: ws.readDirection, anchorTs: ws.anchorTs },
       ));
       setBufferRangeMinutes(ws.rangeMinutes);
       if (sameWindow) return;
@@ -759,7 +773,7 @@ function App() {
   // publishes the backlog so the view can land on the newest telegram.
   const bufferEmpty = liveTelegrams.length === 0;
   const togglePause = () => {
-    if (bufferEmpty) return;
+    if (readDirection !== 'backward' || bufferEmpty || pauseMode === 'off') return;
     const next = pauseModeForToggle(pauseMode);
     if (pauseMode === 'manual' && next === 'auto') {
       setMonitorView(v => ({ ...v, follow: false, pauseMode: 'auto' }));
@@ -768,7 +782,7 @@ function App() {
     setMonitorView(v => ({ ...v, pauseMode: next, follow: next === 'auto' ? false : v.follow }));
     // Sync cache in the same turn so the pill does not see isPaused flip
     // before publish/pausedCount update.
-    setCachePaused(cachePausedForMode(next));
+    applyCachePause(cachePausedForMode(next));
   };
 
   // Status icon: Play=running, Pause=frozen; color separates auto vs manual.
@@ -782,44 +796,46 @@ function App() {
     : 'var(--accent-primary)';
 
   const flushPauseBuffer = useCallback(() => {
-    if (pauseMode !== 'auto') return;
+    if (readDirection !== 'backward' || pauseMode !== 'auto') return;
     setMonitorView(v => ({ ...v, pauseMode: 'playing' }));
-    setCachePaused(false);
-  }, [pauseMode, setCachePaused]);
+    applyCachePause(false);
+  }, [readDirection, pauseMode, applyCachePause]);
 
   // Metered flush: reveal the oldest `n` backlog rows while staying auto-paused,
   // so the table can scroll them in line by line. Once that backlog is gone the
   // mode returns to playing (same as a full flush). A plain newer-pill click
   // while manually paused reveals the whole backlog and stays paused.
   const revealPauseBuffer = useCallback((n: number) => {
-    if (pauseMode === 'playing') return;
+    if (readDirection !== 'backward' || pauseMode === 'playing' || pauseMode === 'off') return;
     const remaining = revealPaused(n);
     if (pauseMode === 'auto' && remaining <= 0) {
       setMonitorView(v => ({ ...v, pauseMode: 'playing' }));
-      setCachePaused(false);
+      applyCachePause(false);
     }
-  }, [pauseMode, revealPaused, setCachePaused]);
+  }, [readDirection, pauseMode, revealPaused, applyCachePause]);
 
   // Newer-pill resume. The table only calls this for auto-pause and for a
   // Ctrl-click during manual pause; a plain click stays latched.
   const jumpToLiveResume = useCallback(() => {
+    if (readDirection !== 'backward') return;
     setMonitorView(v => ({ ...v, pauseMode: 'playing', follow: true }));
-    setCachePaused(false);
-  }, [setCachePaused]);
+    applyCachePause(false);
+  }, [readDirection, applyCachePause]);
 
   // Couple list live-follow to pause mode in the same turn as follow changes
   // (table scroll unfollow, chart jump, etc.) — avoid syncing via an effect.
   const handleListFollowChange = useCallback((follow: boolean) => {
+    if (readDirection !== 'backward') return;
     setMonitorView(prev => ({
       ...prev,
       follow,
-      pauseMode: pauseModeForListFollow(prev.pauseMode, follow),
+      pauseMode: pauseModeForListFollow(prev.pauseMode === 'off' ? 'auto' : prev.pauseMode, follow),
     }));
-  }, []);
+  }, [readDirection]);
 
-  useEffect(() => {
-    setCachePaused(isPaused);
-  }, [isPaused, setCachePaused]);
+  useLayoutEffect(() => {
+    applyCachePause(isPaused);
+  }, [isPaused, applyCachePause]);
 
   const toggleColumn = (col: string) =>
     setVisibleColumns(prev => ({ ...prev, [col]: !prev[col] }));
@@ -1217,15 +1233,34 @@ function App() {
   const changeReadDirection = useCallback(async (
     dir: 'forward' | 'backward',
     after?: () => Promise<void>,
+    /** Chevron: no timestamp. Forward→backward lands on the edge, auto, not live. */
+    edge = false,
   ) => {
-    if (readDirection !== dir) {
-      setMonitorView(v => ({ ...v, direction: dir, anchorTs: null }));
+    const switched = readDirection !== dir;
+    // Forward has nothing to restore. Latch auto only after `after` publishes
+    // the window — pausing first would hide that fill.
+    const parkAuto = switched && dir === 'backward' && (edge || pauseMode === 'off');
+    if (switched) {
+      setMonitorView(v => {
+        let next: MonitorView = { ...v, direction: dir, anchorTs: null };
+        if ((edge && dir === 'forward') || parkAuto) {
+          next = { ...next, pauseMode: 'off', follow: false };
+        }
+        return next;
+      });
       setEvictionMode(dir === 'forward' ? 'keepOldest' : 'keepNewest');
       adoptAnchorDirection(dir);
       syncSortToReadDirection(dir);
     }
     await after?.();
-  }, [readDirection, setEvictionMode, adoptAnchorDirection, syncSortToReadDirection]);
+    if (parkAuto) {
+      setMonitorView(v => (
+        v.direction === 'backward'
+          ? { ...v, pauseMode: 'auto', follow: false }
+          : v
+      ));
+    }
+  }, [readDirection, pauseMode, setEvictionMode, adoptAnchorDirection, syncSortToReadDirection]);
 
   /** User-chosen anchor. The view is the source; the cache trims from it. */
   const placeAnchor = useCallback((dir: 'forward' | 'backward', ts: number) => {
@@ -1259,9 +1294,8 @@ function App() {
 
   // Direction owns the timestamp sort, including the direction restored at
   // startup. An explicit anchor loads through the same window fill as a
-  // rewind; no anchor keeps today's newest-first startup. Forward restored
-  // together with pauseMode 'playing' is left as-is (Live is backward-only;
-  // the pill still offers Play until that is disabled).
+  // rewind; no anchor keeps today's newest-first startup. A restored forward
+  // view is already normalized (no live, no pause).
   const startupAnchorOnce = useRef(false);
   useEffect(() => {
     if (startupAnchorOnce.current) return;
@@ -1368,10 +1402,11 @@ function App() {
                     void changeReadDirection(dir, async () => {
                       // No timestamp: the anchor is the buffer edge (oldest
                       // forward, newest backward), then trim and fill.
-                      const edge = dir === 'forward' ? bufferOldestTs : bufferNewestTs;
-                      if (edge == null) return;
-                      await fillAnchorWindow(dir, edge);
-                    });
+                      // Forward → backward does not go live (auto, follow off).
+                      const edgeTs = dir === 'forward' ? bufferOldestTs : bufferNewestTs;
+                      if (edgeTs == null) return;
+                      await fillAnchorWindow(dir, edgeTs);
+                    }, true);
                   }}
                   loadLimit={loadLimit}
                   rangeMinutes={bufferRangeMinutes}
@@ -1383,23 +1418,24 @@ function App() {
                     setMonitorView(v => ({
                       ...v,
                       follow: false,
-                      pauseMode: pauseAuto ? 'auto' : v.pauseMode,
+                      pauseMode: readDirection === 'backward' && pauseAuto ? 'auto' : v.pauseMode,
                       anchorTs: null,
                     }));
-                    if (pauseAuto) setCachePaused(true);
+                    if (pauseAuto) applyCachePause(true);
                     // Real wipe. clear() also drops the anchor timestamp.
                     void clearTelegrams();
                   }}
                   onCancelLoad={cancelLoad}
                   pauseTitle={pauseTitle}
                   pauseColor={pauseColor}
-                  pauseMode={pauseMode}
+                  pauseMode={pauseMode === 'off' ? 'auto' : pauseMode}
                   pauseDisabled={bufferEmpty}
                   onTogglePause={togglePause}
                   busRate={busRate}
                   rateMode={rateMode}
                   onCycleRateMode={() => setRateMode(m => (m === 's' ? 'm' : m === 'm' ? 'h' : 's'))}
                   wsConnected={isConnected}
+                  fillingGaps={fillingGaps}
                   isHistoryLoading={isHistoryLoading}
                   historyLoadError={historyLoadError}
                   onOldestCommit={ms => {
@@ -1967,10 +2003,11 @@ function App() {
                     onQuickColumnEnabledChange={setQuickColumnEnabled}
                     onDeltaContextChange={handleDeltaContextChange}
                     onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
-                    listFollow={listFollow}
+                    listFollow={readDirection === 'backward' && listFollow}
+                    liveFollow={readDirection === 'backward'}
                     onListFollowChange={handleListFollowChange}
                     isPaused={isPaused}
-                    isManualPause={pauseMode === 'manual'}
+                    isManualPause={readDirection === 'backward' && pauseMode === 'manual'}
                     pausedCount={pausedCount}
                     onPauseFlush={flushPauseBuffer}
                     onPauseReveal={revealPauseBuffer}
@@ -1986,7 +2023,8 @@ function App() {
                       if (pauseMode === 'playing') {
                         // Latch auto-pause so subsequent live rows buffer, then
                         // merge whatever is already waiting toward newer.
-                        setCachePaused(true);
+                        // Forward ignores the latch: the snapshot stays live.
+                        applyCachePause(true);
                       }
                       // Reveal the entire pause backlog into the published list.
                       revealPaused(Number.MAX_SAFE_INTEGER);

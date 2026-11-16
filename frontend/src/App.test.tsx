@@ -9,10 +9,18 @@ import { readSortConfigPref, writeSortConfigPref } from './utils/sortConfig';
 
 // Mock the WebSocket hook
 vi.mock('./hooks/useWebSocket', () => ({
-  useWebSocket: () => ({
-    isConnected: true,
-    telegrams: [],
-  }),
+  useWebSocket: () => {
+    const [, bump] = React.useState(0);
+    React.useEffect(() => {
+      const notify = () => bump(n => n + 1);
+      wsCtl.bump.add(notify);
+      return () => { wsCtl.bump.delete(notify); };
+    }, []);
+    return {
+      isConnected: wsCtl.connected,
+      telegrams: [],
+    };
+  },
 }));
 
 /** Test handle into the mocked cache: inject live telegrams, observe reveals. */
@@ -23,6 +31,14 @@ const cacheCtl = vi.hoisted(() => ({
   onReveal: null as null | ((n: number) => void),
   loadRangeCalls: [] as [number, number][],
   fillForwardCalls: [] as number[],
+  fillingGaps: false,
+  setFillingGaps: null as null | ((v: boolean) => void),
+}));
+
+/** Controllable socket so the pill can show Offline. */
+const wsCtl = vi.hoisted(() => ({
+  connected: true,
+  bump: new Set<() => void>(),
 }));
 
 /** Controllable cache so pause/clear tests can leave the empty-buffer lock. */
@@ -32,6 +48,8 @@ vi.mock('./hooks/useTelegramCache', async (importOriginal) => {
     ...actual,
     useTelegramCache: () => {
       const [telegrams, setTelegrams] = React.useState(() => [makeTelegram({ raw_hex: '0xseed' })]);
+      const [fillingGaps, setFillingGaps] = React.useState(cacheCtl.fillingGaps);
+      cacheCtl.setFillingGaps = setFillingGaps;
       const [pausedCount, setPausedCount] = React.useState(0);
       const pausedRef = React.useRef(false);
       const backlogRef = React.useRef<ReturnType<typeof makeTelegram>[]>([]);
@@ -54,6 +72,7 @@ vi.mock('./hooks/useTelegramCache', async (importOriginal) => {
         telegrams,
         addLive,
         setConnected: () => {},
+        fillingGaps,
         setPaused: (paused: boolean) => {
           if (pausedRef.current === paused) return;
           pausedRef.current = paused;
@@ -122,7 +141,17 @@ beforeEach(() => {
   cacheCtl.revealCalls.length = 0;
   cacheCtl.loadRangeCalls.length = 0;
   cacheCtl.fillForwardCalls.length = 0;
+  cacheCtl.fillingGaps = false;
+  cacheCtl.setFillingGaps = null;
+  wsCtl.connected = true;
 });
+
+function setWsConnected(connected: boolean) {
+  wsCtl.connected = connected;
+  act(() => {
+    for (const notify of wsCtl.bump) notify();
+  });
+}
 
 test('renders app title', async () => {
   render(<App />);
@@ -419,15 +448,18 @@ test('the monitor URL wins over prefs for direction, anchor and range', async ()
   await waitFor(() => expect(cacheCtl.fillForwardCalls).toEqual([5000]));
   expect(cacheCtl.loadRangeCalls).toEqual([]);
   expect(screen.getByRole('button', { name: 'Reading forward' })).toBeInTheDocument();
-  // Follow and pause are not in the URL, so the preference still wins.
-  expect(screen.getByRole('button', { name: 'Paused manually' })).toBeInTheDocument();
+  // Forward has no pause. The preference's manual latch is normalized away.
+  const stop = screen.getByRole('button', { name: 'Stop' });
+  expect(stop).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Paused manually' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
   await waitFor(() => expect(getPref('bufferRangeMinutes')).toBe('15'));
   await waitFor(() => {
     expect(readMonitorViewPref()).toMatchObject({
       direction: 'forward',
       anchorTs: 5000,
       follow: false,
-      pauseMode: 'manual',
+      pauseMode: 'off',
     });
   });
   await waitFor(() => {
@@ -460,4 +492,115 @@ test('toggling the filter pane updates the URL without a history entry', async (
   fireEvent.click(toggle);
   await waitFor(() => expect(window.location.search).toContain('fp=0'), { timeout: 2000 });
   expect(window.history.length).toBe(start);
+});
+
+test('a saved forward playing view starts as a disabled Stop', async () => {
+  writeMonitorViewPref({
+    direction: 'forward',
+    anchorTs: null,
+    follow: true,
+    pauseMode: 'playing',
+  });
+  render(<App />);
+  const stop = await screen.findByRole('button', { name: 'Stop' });
+  expect(stop).toBeDisabled();
+  expect(stop).toHaveAttribute('title', 'Kein Live in Leserichtung vorwärts');
+  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
+  await waitFor(() => {
+    expect(readMonitorViewPref()).toMatchObject({
+      direction: 'forward',
+      follow: false,
+      pauseMode: 'off',
+    });
+  });
+});
+
+test('forward Stop does not toggle pause and live rows are not a newer pill', async () => {
+  writeMonitorViewPref({
+    direction: 'forward',
+    anchorTs: null,
+    follow: true,
+    pauseMode: 'manual',
+  });
+  render(<App />);
+  const stop = await screen.findByRole('button', { name: 'Stop' });
+  fireEvent.click(stop);
+  expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Paused manually' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
+
+  await act(async () => {
+    cacheCtl.addLive!(makeTelegram({
+      timestamp: new Date().toISOString(),
+      source_address: '1.2.77',
+      raw_hex: '0xforward',
+    }));
+  });
+  expect(screen.queryByRole('button', { name: /newer telegram/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
+  await waitFor(() => {
+    expect(readMonitorViewPref()).toMatchObject({
+      direction: 'forward',
+      pauseMode: 'off',
+      follow: false,
+    });
+  });
+});
+
+test('popstate normalizes a forward view that was playing', async () => {
+  render(<App />);
+  expect(await screen.findByRole('button', { name: 'Playing' })).toBeInTheDocument();
+  await act(() => new Promise(r => setTimeout(r, 600)));
+
+  window.history.pushState(null, '', '/?view=monitor&rd=forward&anchor=9000');
+  act(() => window.dispatchEvent(new PopStateEvent('popstate')));
+
+  expect(await screen.findByRole('button', { name: 'Stop' })).toBeDisabled();
+  await waitFor(() => {
+    expect(readMonitorViewPref()).toMatchObject({
+      direction: 'forward',
+      anchorTs: 9000,
+      follow: false,
+      pauseMode: 'off',
+    });
+  });
+});
+
+test('switching forward to backward without a timestamp parks on the edge', async () => {
+  writeMonitorViewPref({
+    direction: 'forward',
+    anchorTs: 5000,
+    follow: true,
+    pauseMode: 'playing',
+  });
+  render(<App />);
+  await screen.findByRole('button', { name: 'Stop' });
+  const before = cacheCtl.loadRangeCalls.length;
+  fireEvent.click(screen.getByRole('button', { name: 'Reading forward' }));
+  expect(await screen.findByRole('button', { name: 'Paused automatically' })).toBeInTheDocument();
+  const edge = Date.parse('2024-01-01T10:00:00.000000Z');
+  await waitFor(() => {
+    expect(readMonitorViewPref()).toMatchObject({
+      direction: 'backward',
+      anchorTs: null,
+      follow: false,
+      pauseMode: 'auto',
+    });
+  });
+  expect(cacheCtl.loadRangeCalls.slice(before)).toEqual([[edge - 60 * 60_000, edge]]);
+});
+
+test('the pill shows Offline while the socket is down and Lädt nach during a gap fill', async () => {
+  render(<App />);
+  expect(await screen.findByRole('button', { name: 'Playing' })).toBeInTheDocument();
+  setWsConnected(false);
+  expect(screen.getByRole('button', { name: 'Offline' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
+
+  setWsConnected(true);
+  expect(screen.getByRole('button', { name: 'Playing' })).toBeInTheDocument();
+  act(() => { cacheCtl.setFillingGaps!(true); });
+  expect(screen.getByRole('button', { name: 'Lädt nach' })).toBeDisabled();
+  act(() => { cacheCtl.setFillingGaps!(false); });
+  expect(screen.getByRole('button', { name: 'Playing' })).toBeInTheDocument();
 });

@@ -138,6 +138,12 @@ interface TelegramTableProps {
   // Lifted Follow / Anchor state (#203, #341)
   listFollow?: boolean;
   onListFollowChange?: (follow: boolean) => void;
+  /**
+   * Live follow, the pause backlog and the newer pill. Off while reading
+   * forward: new rows stay where the buffer admitted them, and nothing
+   * scrolls to the newest edge or resumes Play.
+   */
+  liveFollow?: boolean;
   listAnchorKey?: string | null;
   onListAnchorKeyChange?: (key: string | null) => void;
   /** Buffer snapshot is frozen; the pause backlog feeds the jump-to-live pill. */
@@ -535,7 +541,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   quickColumnEnabled: quickColumnEnabledProp, onQuickColumnEnabledChange,
   onDeltaContextChange,
   onDeltaContextEnabledChange,
-  listFollow, onListFollowChange, listAnchorKey, onListAnchorKeyChange,
+  listFollow, onListFollowChange, liveFollow = true, listAnchorKey, onListAnchorKeyChange,
   isPaused = false, isManualPause = false, filtersEnabled = true, pausedCount = 0,
   pausedTelegrams = EMPTY_PAUSED,
   onPauseFlush, onPauseReveal, onJumpToLive,
@@ -1438,7 +1444,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     t0: number;
     duration: number;
   } | null>(null);
-  const atEdgeRef = useRef(listFollow ?? true);
+  const atEdgeRef = useRef(liveFollow && (listFollow ?? true));
+  if (!liveFollow) atEdgeRef.current = false;
   // After an intentional unfollow, ignore newestFullyVisible until the newest
   // row has left full visibility once — otherwise a short list or edge-row
   // click would re-enable follow immediately.
@@ -1599,6 +1606,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // are at the edge — that would scrollToEdge on the next pause-buffer flush.
   // jumpToLive / handleScroll set atEdge themselves.
   useEffect(() => {
+    if (!liveFollow) {
+      setFollowingLive(false);
+      atEdgeRef.current = false;
+      detachedFromEdgeRef.current = true;
+      return;
+    }
     if (listFollow === undefined) return;
     setFollowingLive(listFollow);
     if (!listFollow) {
@@ -1607,7 +1620,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     } else {
       detachedFromEdgeRef.current = false;
     }
-  }, [listFollow]);
+  }, [listFollow, liveFollow]);
 
   useEffect(() => {
     if (listAnchorKey !== undefined) {
@@ -1962,6 +1975,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   };
 
   const enableLiveFollow = () => {
+    if (!liveFollow) return;
     detachedFromEdgeRef.current = false;
     atEdgeRef.current = true;
     setFollowingLive(true);
@@ -2053,6 +2067,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       onPauseFlush?.();
       return;
     }
+    if (!liveFollow) return;
     detachedFromEdgeRef.current = false;
     enableLiveFollow();
     scheduleRubberBand();
@@ -2406,7 +2421,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     if (atEdgeRef.current) {
       atEdgeRef.current = false;
       setFollowingLive(false);
-      onListFollowChange?.(false);
+      if (liveFollow) onListFollowChange?.(false);
       detachedFromEdgeRef.current = true;
     }
     captureAnchor();
@@ -2610,6 +2625,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     return true;
   };
   const detachLiveFollow = () => {
+    if (!liveFollow) return;
     if (!(isTimeSort && atEdgeRef.current)) return;
     atEdgeRef.current = false;
     detachedFromEdgeRef.current = true;
@@ -2773,6 +2789,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   };
 
   const jumpToLive = (releaseManual = false, revealBacklog = false) => {
+    if (!liveFollow) return;
     // Pill path wants the jump to the merged newest — not a seamless pin.
     flushPinRef.current = false;
     pendingFlushScrollDeltaRef.current = null;
@@ -3311,7 +3328,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     if (restoredRef.current || telegramRows.length === 0) return;
     restoredRef.current = true;
 
-    if (atEdgeRef.current) {
+    if (liveFollow && atEdgeRef.current) {
       scrollToEdge();
     } else if (listAnchorKey) {
       const idx = telegramRows.findIndex(t => anchorKey(t) === listAnchorKey);
@@ -3325,10 +3342,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             pinAnchor();
           }
         }));
-      } else {
+      } else if (liveFollow) {
         jumpToLive();
       }
-    } else {
+    } else if (liveFollow) {
       scrollToEdge();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4830,7 +4847,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
       {/* Jump-to-live pill — telegrams newer than the newest one on screen
           (including pause-buffer backlog while follow is still on). */}
-      {isTimeSort && displayNewerCount > 0 && (() => {
+      {liveFollow && isTimeSort && displayNewerCount > 0 && (() => {
         // Live/fill edge is the chronologically newer end for time sort
         // (desc→top, asc→bottom). "older" would apply if that edge faced the
         // older end (keep-oldest follow).

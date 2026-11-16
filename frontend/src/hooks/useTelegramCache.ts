@@ -166,6 +166,12 @@ export interface TelegramCache {
   addLive: (t: Telegram) => void;
   /** Reflect the WS connection so offline windows become coverage gaps. */
   setConnected: (connected: boolean) => void;
+  /**
+   * True while a reconnect is re-fetching coverage gaps. The first connect
+   * and ordinary history loads do not set this. Cleared when those gap
+   * fills settle, including when one of them fails.
+   */
+  fillingGaps: boolean;
   /** Freeze/unfreeze the published snapshot; ingestion continues while paused. */
   setPaused: (paused: boolean) => void;
   /** Telegrams ingested since the snapshot was frozen. */
@@ -389,6 +395,10 @@ export function useTelegramCache(
   const rangeMinutesRef = useRef(60);
   const [activeLoads, setActiveLoads] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** Reconnect gap fills still in flight. The first connect is not one. */
+  const [fillingGaps, setFillingGaps] = useState(false);
+  const gapFillRunsRef = useRef(0);
+  const hasConnectedRef = useRef(false);
 
   /**
    * Sets the hidden-count and trims the backlog tail to match. Does not read
@@ -1030,12 +1040,26 @@ export function useTelegramCache(
       connectedRef.current = connected;
       const coverage = coverageRef.current!;
       if (connected) {
+        // The first transition to connected is not a reconnect. Later ones
+        // are, because a repeat `true` returns above.
+        const reconnecting = hasConnectedRef.current;
+        hasConnectedRef.current = true;
         // Anchor the live interval at the (re)connect instant and pull in
         // whatever happened while the stream was down.
         const now = Date.now();
         coverage.extendLive(now);
         const coveredStart = coverage.covered[0]?.[0];
-        if (coveredStart !== undefined) void runLoad(() => fillGaps(coveredStart, now));
+        if (coveredStart !== undefined) {
+          const job = runLoad(() => fillGaps(coveredStart, now));
+          if (reconnecting) {
+            gapFillRunsRef.current += 1;
+            setFillingGaps(true);
+            void job.finally(() => {
+              gapFillRunsRef.current = Math.max(0, gapFillRunsRef.current - 1);
+              if (gapFillRunsRef.current === 0) setFillingGaps(false);
+            });
+          }
+        }
       } else {
         // Everything up to this instant was seen; afterwards is a gap.
         coverage.extendLive(Date.now());
@@ -1188,6 +1212,7 @@ export function useTelegramCache(
     ingested,
     addLive,
     setConnected,
+    fillingGaps,
     setPaused,
     pausedCount,
     pausedTelegrams,

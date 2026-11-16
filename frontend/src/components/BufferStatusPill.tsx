@@ -9,6 +9,7 @@ import {
   Trash2,
   Play,
   Pause,
+  Square,
 } from 'lucide-react';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 import { SecondsField } from './SecondsField';
@@ -84,6 +85,11 @@ export interface BufferStatusPillProps {
   rateMode: 's' | 'm' | 'h';
   onCycleRateMode: () => void;
   wsConnected: boolean;
+  /**
+   * Reconnect gap fill from the cache hook. Shown as "Lädt nach" until it
+   * settles. Offline wins while the socket is down.
+   */
+  fillingGaps?: boolean;
   isHistoryLoading: boolean;
   historyLoadError: string | null;
   onOldestCommit: (ms: number) => void;
@@ -153,6 +159,7 @@ export function BufferStatusPill({
   rateMode,
   onCycleRateMode,
   wsConnected,
+  fillingGaps = false,
   isHistoryLoading,
   historyLoadError,
   onOldestCommit,
@@ -277,6 +284,18 @@ export function BufferStatusPill({
 
   // Backward: icon left, value+unit right. Forward: value+unit left, icon right.
   const rangeIconLeft = readDirection === 'backward';
+  // Offline and a reconnect gap fill replace Play/Pause/Stop on this control.
+  // Offline wins: a dropped socket is the fact that matters, and the fill
+  // cannot finish until the socket is back. The WS LED stays beside it.
+  // Forward has no live control — a visible, non-clickable Stop. A wrapper
+  // carries the tooltip, because a disabled button does not show its own.
+  const forwardStop = readDirection === 'forward';
+  const linkLabel = !wsConnected ? 'Offline' : fillingGaps ? 'Lädt nach' : null;
+  const linkLocked = linkLabel != null || forwardStop;
+  const controlLabel = linkLabel ?? (forwardStop ? 'Stop' : pauseTitle);
+  const controlTitle = linkLabel
+    ?? (forwardStop ? 'Kein Live in Leserichtung vorwärts' : pauseTitle);
+  const controlDisabled = linkLocked || pauseDisabled;
 
   return (
     <div data-buffer-status-pill="" style={pillStyle}>
@@ -406,24 +425,40 @@ export function BufferStatusPill({
         <FastForward size={15} />
       </button>
 
-      <button
-        type="button"
-        className="icon-button"
-        onClick={onTogglePause}
-        title={pauseTitle}
-        aria-label={pauseTitle}
-        disabled={pauseDisabled}
-        style={{
-          color: pauseColor,
-          padding: '0.15rem',
-          opacity: pauseDisabled ? 0.45 : 1,
-          cursor: pauseDisabled ? 'not-allowed' : 'pointer',
-        }}
-      >
-        {pauseMode === 'playing'
-          ? <Play size={15} fill="currentColor" />
-          : <Pause size={15} fill="currentColor" />}
-      </button>
+      <span title={controlTitle} style={{ display: 'inline-flex' }}>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={onTogglePause}
+          title={controlTitle}
+          aria-label={controlLabel}
+          disabled={controlDisabled}
+          style={{
+            color: linkLabel === 'Offline'
+              ? 'var(--error)'
+              : linkLabel
+                ? 'var(--accent-primary)'
+                : forwardStop
+                  ? 'var(--text-dim)'
+                  : pauseColor,
+            padding: '0.15rem',
+            opacity: controlDisabled ? 0.45 : 1,
+            cursor: controlDisabled ? 'not-allowed' : 'pointer',
+          }}
+        >
+          {linkLabel
+            ? (
+              <span style={{ fontSize: '0.68rem', fontWeight: 600, whiteSpace: 'nowrap', lineHeight: 1 }}>
+                {linkLabel}
+              </span>
+            )
+            : forwardStop
+              ? <Square size={15} fill="currentColor" />
+              : pauseMode === 'playing'
+                ? <Play size={15} fill="currentColor" />
+                : <Pause size={15} fill="currentColor" />}
+        </button>
+      </span>
 
       <span
         style={{

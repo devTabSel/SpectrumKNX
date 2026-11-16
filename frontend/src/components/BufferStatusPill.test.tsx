@@ -155,6 +155,43 @@ test('rewind and fast-forward call load handlers', () => {
   expect(onLoadFromDbNewest).toHaveBeenCalledTimes(1);
 });
 
+test('forward shows a disabled Stop and no play control', () => {
+  const onTogglePause = vi.fn();
+  render(
+    <BufferStatusPill
+      {...baseProps}
+      readDirection="forward"
+      pauseMode="playing"
+      pauseTitle="Playing"
+      onTogglePause={onTogglePause}
+    />,
+  );
+  const stop = screen.getByRole('button', { name: 'Stop' });
+  expect(stop).toBeDisabled();
+  expect(stop).toHaveAttribute('title', 'Kein Live in Leserichtung vorwärts');
+  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
+  fireEvent.click(stop);
+  expect(onTogglePause).not.toHaveBeenCalled();
+});
+
+test('offline and reconnect backfill replace the pause control', () => {
+  const { rerender } = render(<BufferStatusPill {...baseProps} wsConnected={false} />);
+  const offline = screen.getByRole('button', { name: 'Offline' });
+  expect(offline).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
+
+  rerender(<BufferStatusPill {...baseProps} wsConnected fillingGaps />);
+  expect(screen.getByRole('button', { name: 'Lädt nach' })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
+
+  rerender(
+    <BufferStatusPill {...baseProps} wsConnected={false} fillingGaps readDirection="forward" />,
+  );
+  expect(screen.getByRole('button', { name: 'Offline' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Lädt nach' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+});
+
 test('clear ctrl-click asks for auto pause', () => {
   const onClear = vi.fn();
   render(<BufferStatusPill {...baseProps} onClear={onClear} />);
