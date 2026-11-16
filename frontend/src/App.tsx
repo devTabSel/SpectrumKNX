@@ -34,9 +34,9 @@ import {
   type MonitorView,
 } from './utils/monitorView';
 import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTelegramView';
-import { matchVisibleTelegram } from './utils/selectVisibleTelegrams';
+import { pinnedVisibleKeys } from './utils/selectVisibleTelegrams';
 import { activeQuickFilter } from './utils/quickFilter';
-import { bufferBacklogCounts } from './utils/telegramDisplay';
+import { backlogStatusCount, bufferBacklogCounts, statusViewRowCount } from './utils/telegramDisplay';
 import { LayoutDashboard, History, Settings, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
@@ -1200,15 +1200,6 @@ function App() {
     telegramMouseSelectedKeys, lastSelectedTelegramKey,
   ]);
 
-  // Backlog rows are mutated in place; pausedCount is the render signal.
-  const filteredBacklogCount = useMemo(() => {
-    if (pausedCount <= 0 || pausedTelegrams.length === 0) return 0;
-    const match = matchVisibleTelegram(visibleOpts);
-    let n = 0;
-    for (const t of pausedTelegrams) if (match(t)) n += 1;
-    return n;
-  }, [pausedCount, pausedTelegrams, visibleOpts]);
-
   // Orange quick-filter bar: the bar is open, the filter is enabled, and at
   // least one enabled non-delta cell has a pattern. Closed, disabled, or
   // empty does not filter the list.
@@ -1216,15 +1207,7 @@ function App() {
     quickFilterOpen, quickFilterEnabled, quickPatterns, quickColumnEnabled,
   ) != null;
   const sidePanelActive = filtersEnabled && hasActiveFilters(appliedFilters);
-
-  const sidePanelBacklogCount = useMemo(() => {
-    if (pausedCount <= 0 || pausedTelegrams.length === 0) return 0;
-    if (!sidePanelActive) return pausedTelegrams.length;
-    const match = matchVisibleTelegram(sidePanelOpts);
-    let n = 0;
-    for (const t of pausedTelegrams) if (match(t)) n += 1;
-    return n;
-  }, [pausedCount, pausedTelegrams, sidePanelActive, sidePanelOpts]);
+  const forceVisibleKeys = useMemo(() => pinnedVisibleKeys(visibleOpts), [visibleOpts]);
 
   const liveViewRef = useRef<LiveTelegramView | null>(null);
   const sidePanelViewRef = useRef<LiveTelegramView | null>(null);
@@ -1237,6 +1220,9 @@ function App() {
   liveViewRef.current = liveView;
   const sortedLiveTelegrams = liveView.sorted;
   const filteredLiveTelegrams = liveView.items;
+  // Keys of rows shown only as unfiltered context around a match/flag (#343).
+  const contextTelegramKeys = liveView.contextKeys;
+  const contextTelegramParents = liveView.contextParents;
   // y while the quick filter is also on: today's list with the quick filter
   // forced off (side panel, context rows, force-visible marks). A second view
   // so a live prepend does not rescan the buffer. It is not published.
@@ -1248,20 +1234,36 @@ function App() {
     : null;
   // eslint-disable-next-line react-hooks/refs
   sidePanelViewRef.current = sidePanelView;
+  // Backlog rows are mutated in place; pausedCount is the render signal.
+  // x: side panel + quick filter, no context rows, force-visible rows stay.
+  // y: the side-panel selection with the quick filter off, context included.
+  const quickBacklogCount = useMemo(() => {
+    if (!quickFilterActive || pausedCount <= 0 || pausedTelegrams.length === 0) return 0;
+    // x ignores context, so the buffer is not an input. Match and force-visible
+    // are decided on the backlog row alone.
+    return backlogStatusCount([], pausedTelegrams, visibleOpts, true);
+  }, [quickFilterActive, pausedCount, pausedTelegrams, visibleOpts]);
+  const sidePanelBacklogCount = useMemo(() => {
+    if (pausedCount <= 0 || pausedTelegrams.length === 0) return 0;
+    if (!sidePanelActive) return pausedTelegrams.length;
+    return backlogStatusCount(liveTelegrams, pausedTelegrams, sidePanelOpts, false);
+  }, [pausedCount, pausedTelegrams, sidePanelActive, liveTelegrams, sidePanelOpts]);
   const backlogCount = pausedCount > 0 ? pausedTelegrams.length : 0;
   const pillCounts = bufferBacklogCounts({
     bufferCount: liveTelegrams.length,
     backlogCount,
     sidePanelBufferCount: sidePanelView ? sidePanelView.items.length : filteredLiveTelegrams.length,
     sidePanelBacklogCount,
-    quickBufferCount: filteredLiveTelegrams.length,
-    quickBacklogCount: filteredBacklogCount,
+    quickBufferCount: statusViewRowCount(
+      filteredLiveTelegrams,
+      contextTelegramKeys,
+      forceVisibleKeys,
+      true,
+    ),
+    quickBacklogCount,
     sidePanelActive,
     quickFilterActive,
   });
-  // Keys of rows shown only as unfiltered context around a match/flag (#343).
-  const contextTelegramKeys = liveView.contextKeys;
-  const contextTelegramParents = liveView.contextParents;
   const filterCounts = liveView.counts;
 
   const activeFilterCount = countSelections(appliedFilters);

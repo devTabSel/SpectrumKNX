@@ -72,9 +72,9 @@ export interface BufferStatusPillProps {
   /** Editable time window in minutes. */
   rangeMinutes: number;
   onRangeMinutesChange: (n: number) => void;
-  /** x: rows after the side panel and the quick filter. */
+  /** x: rows after the side panel and the quick filter, without context rows. */
   filteredCount: number;
-  /** y: rows after the side panel, or the raw total when the side panel is off. */
+  /** y: rows the side panel would show with the quick filter off, or the raw total when it is off. */
   totalCount: number;
   /**
    * Raw buffer plus backlog. The range tooltip and the empty-buffer clear

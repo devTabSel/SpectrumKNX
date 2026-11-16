@@ -1,4 +1,12 @@
+import type { Telegram } from '../hooks/useWebSocket';
 import type { Interval } from '../services/telegram-coverage-service';
+import { anchorKey } from './anchorKey';
+import {
+  matchVisibleTelegram,
+  pinnedVisibleKeys,
+  selectVisibleTelegrams,
+  type SelectVisibleOpts,
+} from './selectVisibleTelegrams';
 
 /**
  * Why the reading end stopped. The cache hook derives this from coverage,
@@ -234,14 +242,15 @@ export function statusPillCount(
 /**
  * Inputs for the header status-pill digits.
  *
- * `total` (y) is the row count after the side-panel filter only: buffer rows
- * the list would show with the quick filter off (matches, context, and
- * force-visible marks) plus backlog rows that match the side panel. With the
- * side panel off, y is the raw buffer plus the raw backlog.
+ * `total` (y) is the row count after the side-panel filter only: the buffer
+ * list with the quick filter off (matches, context, and force-visible rows)
+ * plus backlog rows that pass that same selection. With the side panel off,
+ * y is the raw buffer plus the raw backlog.
  *
  * `filtered` (x) is the row count after the side panel and the quick filter,
- * counted the same way, with backlog limited to direct hits. The pill shows
- * `x / y` only while the quick filter is effective; otherwise it shows y.
+ * excluding context rows. Force-visible rows still count, in the buffer and
+ * in the backlog. The pill shows `x / y` only while the quick filter is
+ * effective; otherwise it shows y.
  *
  * `unfiltered` is the raw buffer plus the raw backlog. The range tooltip and
  * the empty-buffer clear stay on this figure.
@@ -249,12 +258,76 @@ export function statusPillCount(
 export interface BufferBacklogCountInput {
   bufferCount: number;
   backlogCount: number;
+  /** Buffer rows the side-panel list shows with the quick filter off. */
   sidePanelBufferCount: number;
+  /** Backlog rows under that same side-panel selection. */
   sidePanelBacklogCount: number;
+  /** Buffer rows after the side panel and the quick filter, without context rows. */
   quickBufferCount: number;
+  /** Backlog rows under that same quick-filter selection. */
   quickBacklogCount: number;
   sidePanelActive: boolean;
   quickFilterActive: boolean;
+}
+
+/**
+ * Status-pill length of one filtered buffer view.
+ *
+ * With `excludeContext`, rows listed only as Time-Delta context drop out
+ * (`contextKeys`). A force-visible row (marked, mouse-selected, or last
+ * selected) stays even when that key is also a context key.
+ */
+export function statusViewRowCount(
+  items: readonly Telegram[],
+  contextKeys: ReadonlySet<string>,
+  forceVisibleKeys: ReadonlySet<string>,
+  excludeContext: boolean,
+): number {
+  if (!excludeContext || contextKeys.size === 0) return items.length;
+  let n = 0;
+  for (const t of items) {
+    const key = anchorKey(t);
+    if (contextKeys.has(key) && !forceVisibleKeys.has(key)) continue;
+    n++;
+  }
+  return n;
+}
+
+/**
+ * Backlog rows for the status pill, under the same selection as the buffer.
+ *
+ * `excludeContext` false (y, quick filter off): a backlog row counts when the
+ * side-panel selection would show it, including context and force-visible rows.
+ * The expansion sees the published buffer and the backlog together, so a
+ * backlog row's context window is the same one the list uses. Row order does
+ * not change membership.
+ *
+ * `excludeContext` true (x): context-only rows drop out. A row counts when it
+ * matches the side panel and the quick filter, or when it is force-visible.
+ * Both are known on the backlog row itself, so this path does not consult the
+ * buffer. A context key shared with a buffer row cannot hide a direct hit.
+ */
+export function backlogStatusCount(
+  buffer: readonly Telegram[],
+  backlog: readonly Telegram[],
+  opts: SelectVisibleOpts,
+  excludeContext: boolean,
+): number {
+  if (backlog.length === 0) return 0;
+  if (excludeContext) {
+    const match = matchVisibleTelegram(opts);
+    const pinned = pinnedVisibleKeys(opts);
+    let n = 0;
+    for (const t of backlog) {
+      if (match(t) || pinned.has(anchorKey(t))) n++;
+    }
+    return n;
+  }
+  const visible = selectVisibleTelegrams(buffer.concat(backlog), opts);
+  const inBacklog = new Set<Telegram>(backlog);
+  let n = 0;
+  for (const t of visible.items) if (inBacklog.has(t)) n++;
+  return n;
 }
 
 export function bufferBacklogCounts(

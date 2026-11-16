@@ -1,15 +1,21 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_FILTERS } from '../types/filters';
+import { makeTelegram } from '../test/telegramFactory';
+import { anchorKey } from './anchorKey';
+import { pinnedVisibleKeys, selectVisibleTelegrams, type SelectVisibleOpts } from './selectVisibleTelegrams';
 import {
   END_MARKER_PX,
   DISPLAY_ROW_PX,
   DISPLAY_RUBBER_PX,
   anchorDisplayEdge,
   anchorEdgeCount,
+  backlogStatusCount,
   contiguousFromAnchor,
   readingEndCause,
   spacerVariantA,
   bufferBacklogCounts,
   statusPillCount,
+  statusViewRowCount,
   type ReadingEndInput,
 } from './telegramDisplay';
 
@@ -181,7 +187,7 @@ describe('status and anchor-edge counts', () => {
     expect(anchorEdgeCount(2, 3, 'backward')).not.toBe(10);
   });
 
-  it('shows x / y only while the quick filter is effective, with the backlog in both', () => {
+  it('shows x / y only while the quick filter is effective', () => {
     const counts = {
       bufferCount: 20,
       backlogCount: 5,
@@ -193,14 +199,174 @@ describe('status and anchor-edge counts', () => {
     // Quick filter on: x is side panel + quick filter, y is the side-panel count.
     expect(bufferBacklogCounts({ ...counts, sidePanelActive: true, quickFilterActive: true }))
       .toEqual({ filtered: 4, total: 10, unfiltered: 25 });
-    // Side panel only: the pill shows y, the side-panel length, not x / y.
+    // Side panel only: the pill shows y, not x / y.
     expect(bufferBacklogCounts({ ...counts, sidePanelActive: true, quickFilterActive: false }))
       .toEqual({ filtered: 10, total: 10, unfiltered: 25 });
     // Neither filter: y is the raw buffer plus backlog.
     expect(bufferBacklogCounts({ ...counts, sidePanelActive: false, quickFilterActive: false }))
       .toEqual({ filtered: 25, total: 25, unfiltered: 25 });
-    // Quick filter only: y stays the raw total.
+    // Quick filter only: y stays the raw total. The tooltip stays on that sum.
     expect(bufferBacklogCounts({ ...counts, sidePanelActive: false, quickFilterActive: true }))
       .toEqual({ filtered: 4, total: 25, unfiltered: 25 });
+  });
+});
+
+describe('status pill x / y rows', () => {
+  const filters = {
+    ...DEFAULT_FILTERS,
+    sources: ['1.1.1'],
+    deltaBeforeMs: 0,
+    deltaAfterMs: 1000,
+    deltaContextEnabled: true,
+  };
+  const match = makeTelegram({
+    timestamp: '2024-01-01T10:00:00.000Z',
+    source_address: '1.1.1',
+    target_name: 'EG Licht',
+    raw_hex: '0xmatch',
+  });
+  const context = makeTelegram({
+    timestamp: '2024-01-01T10:00:00.400Z',
+    source_address: '9.9.9',
+    target_name: 'OG Jalousie',
+    raw_hex: '0xctx',
+  });
+  const markedNear = makeTelegram({
+    timestamp: '2024-01-01T10:00:00.200Z',
+    source_address: '9.9.9',
+    target_name: 'OG Jalousie',
+    raw_hex: '0xmark',
+  });
+  const other = makeTelegram({
+    timestamp: '2024-01-01T10:00:09.000Z',
+    source_address: '9.9.9',
+    target_name: 'OG Jalousie',
+    raw_hex: '0xother',
+  });
+  const buffer = [match, markedNear, context, other];
+  const bNear = makeTelegram({
+    timestamp: '2024-01-01T10:00:00.800Z',
+    source_address: '9.9.9',
+    target_name: 'OG Jalousie',
+    raw_hex: '0xbnear',
+  });
+  const bFar = makeTelegram({
+    timestamp: '2024-01-01T10:00:20.000Z',
+    source_address: '9.9.9',
+    target_name: 'OG Jalousie',
+    raw_hex: '0xbfar',
+  });
+  const bDirect = makeTelegram({
+    timestamp: '2024-01-01T10:00:30.000Z',
+    source_address: '1.1.1',
+    target_name: 'EG Licht',
+    raw_hex: '0xbdirect',
+  });
+  const bSideOnly = makeTelegram({
+    timestamp: '2024-01-01T10:00:40.000Z',
+    source_address: '1.1.1',
+    target_name: 'Keller',
+    raw_hex: '0xbside',
+  });
+  const bMarked = makeTelegram({
+    timestamp: '2024-01-01T10:00:50.000Z',
+    source_address: '9.9.9',
+    target_name: 'Keller',
+    raw_hex: '0xbmark',
+  });
+  const backlog = [bNear, bFar, bDirect, bSideOnly, bMarked];
+
+  const qfOpts: SelectVisibleOpts = {
+    filters,
+    filtersEnabled: true,
+    quickFilterOpen: true,
+    quickFilterEnabled: true,
+    quickPatterns: { target: { top: '', bottom: 'EG' } },
+    flaggedBeforeKeys: [],
+    flaggedAfterKeys: [anchorKey(match)],
+    markedKeys: [anchorKey(markedNear), anchorKey(bMarked)],
+    mouseSelectedKeys: [],
+    lastSelectedKey: null,
+  };
+  const sideOpts: SelectVisibleOpts = {
+    ...qfOpts,
+    quickFilterOpen: false,
+    quickFilterEnabled: false,
+    quickPatterns: {},
+  };
+
+  function backlogRowsIn(items: readonly { raw_hex?: string | null }[]): string[] {
+    const want = new Set(backlog.map(t => t.raw_hex));
+    return items.filter(t => want.has(t.raw_hex)).map(t => t.raw_hex ?? '');
+  }
+
+  it('counts x without context rows and still counts a force-visible context row', () => {
+    const shown = selectVisibleTelegrams(buffer, qfOpts);
+    expect(shown.contextKeys).toEqual(new Set([anchorKey(context), anchorKey(markedNear)]));
+    const pinned = pinnedVisibleKeys(qfOpts);
+    const x = statusViewRowCount(shown.items, shown.contextKeys, pinned, true);
+    // Match plus the marked row. The pure context row is out.
+    expect(x).toBe(2);
+    expect(shown.items).toHaveLength(3);
+  });
+
+  it('counts y as the quick filter off, including context, for the buffer and the backlog', () => {
+    const side = selectVisibleTelegrams(buffer, sideOpts);
+    expect(side.items.map(t => t.raw_hex)).toEqual(['0xmatch', '0xmark', '0xctx']);
+    const combined = selectVisibleTelegrams(buffer.concat(backlog), sideOpts);
+    expect(backlogRowsIn(combined.items).sort()).toEqual(['0xbdirect', '0xbmark', '0xbnear', '0xbside']);
+    expect(backlogStatusCount(buffer, backlog, sideOpts, false)).toBe(4);
+    // The published buffer is newest-first. Membership does not depend on that order.
+    expect(backlogStatusCount([...buffer].reverse(), [...backlog].reverse(), sideOpts, false)).toBe(4);
+  });
+
+  it('counts the backlog with the same rules: x drops context, y keeps the side-panel list', () => {
+    expect(backlogStatusCount(buffer, backlog, qfOpts, true)).toBe(2);
+    expect(backlogStatusCount(buffer, backlog, sideOpts, false)).toBe(4);
+    const pinned = pinnedVisibleKeys(qfOpts);
+    const quick = selectVisibleTelegrams(buffer, qfOpts);
+    const side = selectVisibleTelegrams(buffer, sideOpts);
+    const counts = bufferBacklogCounts({
+      bufferCount: buffer.length,
+      backlogCount: backlog.length,
+      sidePanelBufferCount: side.items.length,
+      sidePanelBacklogCount: backlogStatusCount(buffer, backlog, sideOpts, false),
+      quickBufferCount: statusViewRowCount(quick.items, quick.contextKeys, pinned, true),
+      quickBacklogCount: backlogStatusCount(buffer, backlog, qfOpts, true),
+      sidePanelActive: true,
+      quickFilterActive: true,
+    });
+    // x = (match + marked) + (direct QF hit + marked backlog) = 4
+    // y = (match + marked + context) + (near + direct + side-only + marked) = 7
+    expect(counts).toEqual({ filtered: 4, total: 7, unfiltered: 9 });
+  });
+
+  it('shows only y when the side panel is on and the quick filter is off', () => {
+    const side = selectVisibleTelegrams(buffer, sideOpts);
+    const yBacklog = backlogStatusCount(buffer, backlog, sideOpts, false);
+    const y = side.items.length + yBacklog;
+    expect(bufferBacklogCounts({
+      bufferCount: buffer.length,
+      backlogCount: backlog.length,
+      sidePanelBufferCount: side.items.length,
+      sidePanelBacklogCount: yBacklog,
+      quickBufferCount: 0,
+      quickBacklogCount: 0,
+      sidePanelActive: true,
+      quickFilterActive: false,
+    })).toEqual({ filtered: y, total: y, unfiltered: buffer.length + backlog.length });
+  });
+
+  it('keeps a mouse-selected or last-selected backlog row when it misses the filter', () => {
+    const picked = makeTelegram({
+      timestamp: '2024-01-01T11:00:00.000Z',
+      source_address: '9.9.9',
+      target_name: 'Keller',
+      raw_hex: '0xpick',
+    });
+    const base: SelectVisibleOpts = { ...qfOpts, markedKeys: [], flaggedAfterKeys: [] };
+    expect(backlogStatusCount([], [picked], { ...base, mouseSelectedKeys: [anchorKey(picked)] }, true)).toBe(1);
+    expect(backlogStatusCount([], [picked], { ...base, lastSelectedKey: anchorKey(picked) }, true)).toBe(1);
+    expect(backlogStatusCount([], [picked], base, true)).toBe(0);
   });
 });

@@ -12,6 +12,16 @@ import {
 
 const EMPTY_KEY_SET: ReadonlySet<string> = new Set();
 
+/** Rows the filter must keep: marks, the mouse selection, and the last selected row. */
+export function pinnedVisibleKeys(
+  opts: Pick<SelectVisibleOpts, 'markedKeys' | 'mouseSelectedKeys' | 'lastSelectedKey'>,
+): Set<string> {
+  return new Set(addKeys(
+    addKeys(opts.markedKeys, opts.mouseSelectedKeys),
+    opts.lastSelectedKey ? [opts.lastSelectedKey] : [],
+  ));
+}
+
 export interface SelectVisibleOpts {
   /** Applied filters (typically already through `enabledFilters`). */
   filters: ActiveFilters;
@@ -95,10 +105,7 @@ export function selectVisibleTelegrams(
     before: f.deltaContextEnabled ? new Set(opts.flaggedBeforeKeys) : EMPTY_KEY_SET,
     after: f.deltaContextEnabled ? new Set(opts.flaggedAfterKeys) : EMPTY_KEY_SET,
   };
-  const pinned = new Set(addKeys(
-    addKeys(opts.markedKeys, opts.mouseSelectedKeys),
-    opts.lastSelectedKey ? [opts.lastSelectedKey] : [],
-  ));
+  const pinned = pinnedVisibleKeys(opts);
 
   const expanded = expandWithDeltaContext(
     sorted as Telegram[], matches, anchorKey, sideFlags, before, after, {
