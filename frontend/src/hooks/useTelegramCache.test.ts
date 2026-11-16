@@ -830,17 +830,19 @@ describe('useTelegramCache', () => {
     expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.c', '1.2.b']);
   });
 
-  it('fillForwardFrom pages ascending from the target up to the buffer oldest', async () => {
+  it('fillForwardFrom pages the anchor window instead of stopping at the buffer oldest', async () => {
     // restoreFromCache=false: no startup fetch; responses are for fill only.
     const { result } = renderHook(() => useTelegramCache(1000, false));
     await settle(result);
 
     act(() => {
+      result.current.setBufferRangeMinutes(1);
       result.current.addLive(tg(5000, 'live'));
     });
     expect(result.current.oldestTs).toBe(5000);
 
-    // Ascending chunk older than the live edge.
+    // Ascending chunk older than the live edge. The live millisecond is covered,
+    // so the window continues past it up to x + range.
     telegramResponses.push({
       telegrams: [tg(1000, 'old1'), tg(2000, 'old2'), tg(3000, 'old3')],
     });
@@ -849,16 +851,69 @@ describe('useTelegramCache', () => {
     await act(async () => {
       await result.current.fillForwardFrom(1000);
     });
-    const loadCall = fetchCalls.filter(u => u.includes('/api/telegrams')).slice(before).at(-1)!;
-    const params = new URLSearchParams(loadCall.split('?')[1]);
-    expect(params.get('order')).toBe('asc');
-    expect(Date.parse(params.get('start_time')!)).toBe(1000);
-    // The buffer edge millisecond is already covered by the live row, so the
-    // fill stops on the previous millisecond instead of refetching it.
-    expect(Date.parse(params.get('end_time')!)).toBe(4999);
+    const loadCalls = fetchCalls.filter(u => u.includes('/api/telegrams')).slice(before);
+    const first = new URLSearchParams(loadCalls[0].split('?')[1]);
+    expect(first.get('order')).toBe('asc');
+    expect(Date.parse(first.get('start_time')!)).toBe(1000);
+    const ends = loadCalls.map(u => Date.parse(new URLSearchParams(u.split('?')[1]).get('end_time')!));
+    expect(Math.max(...ends)).toBe(1000 + 60_000);
     expect(result.current.telegrams.map(t => t.source_address)).toEqual([
       '1.2.live', '1.2.old3', '1.2.old2', '1.2.old1',
     ]);
+  });
+
+  it('fillForwardFrom fills the tail past the buffer when x lies inside it', async () => {
+    const { result } = renderHook(() => useTelegramCache(100, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferRangeMinutes(1);
+      result.current.addLive(tg(10_000, 'a'));
+      result.current.addLive(tg(20_000, 'b'));
+    });
+
+    telegramResponses.push({ telegrams: [tg(30_000, 'c')] });
+    const before = fetchCalls.filter(u => u.includes('/api/telegrams')).length;
+    await act(async () => {
+      await result.current.fillForwardFrom(15_000);
+    });
+    const call = fetchCalls.filter(u => u.includes('/api/telegrams')).slice(before).at(0)!;
+    const params = new URLSearchParams(call.split('?')[1]);
+    // Live coverage already holds [10_000, 20_000]; the gap starts after it
+    // and runs to x + range, not to the old oldest edge.
+    expect(Date.parse(params.get('start_time')!)).toBe(20_001);
+    expect(Date.parse(params.get('end_time')!)).toBe(15_000 + 60_000);
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual([
+      '1.2.c', '1.2.b', '1.2.a',
+    ]);
+  });
+
+  it('fillForwardFrom treats a known-empty stretch as already filled', async () => {
+    const { result } = renderHook(() => useTelegramCache(100, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferRangeMinutes(1);
+      result.current.addLive(tg(1000, 'a'));
+    });
+    telegramResponses.push({ telegrams: [] });
+    await act(async () => {
+      await result.current.loadRange(1001, 3000, 'forward');
+    });
+
+    telegramResponses.push({ telegrams: [tg(4000, 'b')] });
+    const before = fetchCalls.filter(u => u.includes('/api/telegrams')).length;
+    await act(async () => {
+      await result.current.fillForwardFrom(1000);
+    });
+    const calls = fetchCalls.filter(u => u.includes('/api/telegrams')).slice(before);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const call of calls) {
+      const params = new URLSearchParams(call.split('?')[1]);
+      const start = Date.parse(params.get('start_time')!);
+      const end = Date.parse(params.get('end_time')!);
+      const overlapsEmpty = start <= 3000 && end >= 1001;
+      expect(overlapsEmpty).toBe(false);
+    }
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.b', '1.2.a']);
   });
 
   it('fillBackwardTo loads newest-first covering [endMs, now]', async () => {
@@ -1138,6 +1193,138 @@ describe('buffer anchor', () => {
       result.current.adoptAnchorDirection('backward');
     });
     expect(result.current.bufferAnchor).toEqual({ direction: 'backward', ts: 9 });
+  });
+
+  it('switches direction by trimming to the buffer edge and filling the gap, without clearing', async () => {
+    const { result } = renderHook(() => useTelegramCache(100, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferRangeMinutes(1);
+    });
+    telegramResponses.push({ telegrams: [tg(30_000, 'b'), tg(0, 'a')] });
+    await act(async () => {
+      await result.current.loadRange(0, 30_000);
+    });
+    act(() => {
+      result.current.addLive(tg(90_000, 'c'));
+    });
+    expect(sources(result.current.telegrams)).toEqual(['1.2.c', '1.2.b', '1.2.a']);
+
+    // Pill direction change: anchor = oldest edge, window [oldest, oldest+range].
+    act(() => {
+      result.current.adoptAnchorDirection('forward');
+      result.current.enforceTimeWindow('forward', 1);
+    });
+    expect(sources(result.current.telegrams)).toEqual(['1.2.b', '1.2.a']);
+    telegramResponses.push({ telegrams: [tg(45_000, 'gap')] });
+    await act(async () => {
+      await result.current.fillForwardFrom(result.current.oldestTs!);
+    });
+
+    expect(sources(result.current.telegrams)).toEqual(['1.2.gap', '1.2.b', '1.2.a']);
+    expect(result.current.bufferAnchor).toEqual({ direction: 'forward', ts: null });
+    // The trimmed row and the kept rows are still in IndexedDB: this was not a clear.
+    expect(_idb.has(toEntry(tg(0, 'a')).id)).toBe(true);
+    expect(_idb.has(toEntry(tg(30_000, 'b')).id)).toBe(true);
+    const saved = savedCoverage();
+    expect(saved.some(([s, e]) => s <= 0 && 0 <= e)).toBe(true);
+    expect(saved.some(([s, e]) => s <= 30_000 && 30_000 <= e)).toBe(true);
+    expect(saved.some(([s, e]) => s <= 45_000 && 45_000 <= e)).toBe(true);
+  });
+
+  it('goto outside the buffer trims to the new window and fills it without clearing', async () => {
+    const { result } = renderHook(() => useTelegramCache(100, false));
+    await settle(result);
+    telegramResponses.push({ telegrams: [tg(120_000, 'n'), tg(100_000, 'o')] });
+    await act(async () => {
+      await result.current.loadRange(100_000, 120_000);
+    });
+    expect(_idb.has(toEntry(tg(100_000, 'o')).id)).toBe(true);
+
+    act(() => {
+      result.current.setBufferAnchor({ direction: 'forward', ts: 0 });
+      result.current.enforceTimeWindow('forward', 1);
+    });
+    expect(result.current.telegrams).toEqual([]);
+
+    telegramResponses.push({ telegrams: [tg(10_000, 'g')] });
+    await act(async () => {
+      await result.current.fillForwardFrom(0);
+    });
+    expect(sources(result.current.telegrams)).toEqual(['1.2.g']);
+    expect(result.current.bufferAnchor).toEqual({ direction: 'forward', ts: 0 });
+    // Old rows and their coverage survived the retarget.
+    expect(_idb.has(toEntry(tg(100_000, 'o')).id)).toBe(true);
+    expect(_idb.has(toEntry(tg(120_000, 'n')).id)).toBe(true);
+    const saved = savedCoverage();
+    expect(saved.some(([s, e]) => s <= 100_000 && 120_000 <= e)).toBe(true);
+    expect(saved.some(([s, e]) => s <= 10_000 && 10_000 <= e)).toBe(true);
+  });
+
+  it('clear resets the anchor timestamp and keeps its direction', async () => {
+    const { result } = renderHook(() => useTelegramCache(10, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferAnchor({ direction: 'forward', ts: 5000 });
+      result.current.addLive(tg(5000, 'a'));
+    });
+    expect(result.current.bufferAnchor).toEqual({ direction: 'forward', ts: 5000 });
+
+    await act(async () => {
+      await result.current.clear();
+    });
+    expect(result.current.telegrams).toEqual([]);
+    expect(result.current.bufferAnchor).toEqual({ direction: 'forward', ts: null });
+    expect(_idb.size).toBe(0);
+  });
+
+  it('does not cover an unbuffered forward telegram until the IDB write succeeds', async () => {
+    const { result } = renderHook(() => useTelegramCache(10, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferAnchor({ direction: 'forward', ts: 0 });
+      result.current.setBufferRangeMinutes(1);
+      result.current.addLive(tg(0, 'edge'));
+    });
+    act(() => {
+      result.current.addLive(tg(120_000, 'out'));
+    });
+    expect(sources(result.current.telegrams)).toEqual(['1.2.edge']);
+
+    // Still inside the flush window: the miss must be a gap, not covered.
+    telegramResponses.push({ telegrams: [tg(120_000, 'fromdb')] });
+    const before = fetchCalls.filter(u => u.includes('/api/telegrams')).length;
+    await act(async () => {
+      await result.current.loadRange(120_000, 120_000, 'forward');
+    });
+    expect(fetchCalls.filter(u => u.includes('/api/telegrams')).length).toBeGreaterThan(before);
+    expect(sources(result.current.telegrams)).toContain('1.2.fromdb');
+  });
+
+  it('leaves a forward miss uncovered when the IDB write fails', async () => {
+    const { result } = renderHook(() => useTelegramCache(10, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferAnchor({ direction: 'forward', ts: 0 });
+      result.current.setBufferRangeMinutes(1);
+      result.current.addLive(tg(0, 'edge'));
+    });
+    storeShouldFail = true;
+    await act(async () => {
+      for (let i = 0; i < 200; i++) result.current.addLive(tg(120_000 + i, `o${i}`));
+      await new Promise(r => setTimeout(r, 20));
+    });
+    expect(_idb.has(toEntry(tg(120_000, 'o0')).id)).toBe(false);
+    expect(localStorage.getItem(COVERAGE_STORAGE_KEY)).toBeNull();
+
+    storeShouldFail = false;
+    telegramResponses.push({ telegrams: [tg(120_000, 'fromdb')] });
+    const before = fetchCalls.filter(u => u.includes('/api/telegrams')).length;
+    await act(async () => {
+      await result.current.loadRange(120_000, 120_000, 'forward');
+    });
+    expect(fetchCalls.filter(u => u.includes('/api/telegrams')).length).toBeGreaterThan(before);
+    expect(sources(result.current.telegrams)).toContain('1.2.fromdb');
   });
 });
 

@@ -1131,23 +1131,39 @@ function App() {
     });
   }, []);
 
-  /** Clear buffer and switch fill/eviction axis; optionally run a fill afterward. */
+  /**
+   * Trim to the anchor window, then fill its gaps from the anchor outward.
+   * Matching rows stay. IndexedDB is read before the database, and only new
+   * rows spend the shared load budget.
+   */
+  const fillAnchorWindow = useCallback(async (
+    dir: 'forward' | 'backward',
+    anchorTs: number,
+  ) => {
+    enforceTimeWindow(dir, bufferRangeMinutes);
+    if (dir === 'forward') {
+      await fillForwardFrom(anchorTs);
+      return;
+    }
+    await loadRange(anchorTs - bufferRangeMinutes * 60_000, anchorTs);
+  }, [bufferRangeMinutes, enforceTimeWindow, fillForwardFrom, loadRange]);
+
+  /**
+   * Switch the fill/eviction axis without wiping the buffer. `after` runs once
+   * the anchor direction has been adopted (timestamp cleared when it changed).
+   */
   const changeReadDirection = useCallback(async (
     dir: 'forward' | 'backward',
     after?: () => Promise<void>,
-    opts?: { forceClear?: boolean },
   ) => {
-    const changed = readDirection !== dir;
-    if (changed) {
+    if (readDirection !== dir) {
       setReadDirection(dir);
       setEvictionMode(dir === 'forward' ? 'keepOldest' : 'keepNewest');
       adoptAnchorDirection(dir);
       syncSortToReadDirection(dir);
     }
-    // Rewind / FF / Goto-outside always wipe; pill direction only clears on change.
-    if (changed || opts?.forceClear) await clearTelegrams();
     await after?.();
-  }, [readDirection, setEvictionMode, adoptAnchorDirection, syncSortToReadDirection, clearTelegrams]);
+  }, [readDirection, setEvictionMode, adoptAnchorDirection, syncSortToReadDirection]);
 
   /** Apply a new minute window: trim when shrinking, fill gaps when expanding. */
   const applyBufferRange = useCallback(async (nextMinutes: number) => {
@@ -1240,7 +1256,15 @@ function App() {
                   oldestMs={bufferOldestTs}
                   newestMs={bufferNewestTs}
                   readDirection={readDirection}
-                  onReadDirectionChange={dir => { void changeReadDirection(dir); }}
+                  onReadDirectionChange={dir => {
+                    void changeReadDirection(dir, async () => {
+                      // No timestamp: the anchor is the buffer edge (oldest
+                      // forward, newest backward), then trim and fill.
+                      const edge = dir === 'forward' ? bufferOldestTs : bufferNewestTs;
+                      if (edge == null) return;
+                      await fillAnchorWindow(dir, edge);
+                    });
+                  }}
                   loadLimit={loadLimit}
                   rangeMinutes={bufferRangeMinutes}
                   onRangeMinutesChange={n => { void applyBufferRange(n); }}
@@ -1253,6 +1277,7 @@ function App() {
                       setPauseMode('auto');
                       setCachePaused(true);
                     }
+                    // Real wipe. clear() also drops the anchor timestamp.
                     void clearTelegrams();
                   }}
                   onCancelLoad={cancelLoad}
@@ -1268,21 +1293,16 @@ function App() {
                   isHistoryLoading={isHistoryLoading}
                   historyLoadError={historyLoadError}
                   onOldestCommit={ms => {
-                    void (async () => {
-                      await changeReadDirection('forward');
+                    void changeReadDirection('forward', async () => {
                       setBufferAnchor({ direction: 'forward', ts: ms });
-                      await fillForwardFrom(ms);
-                      enforceTimeWindow('forward', bufferRangeMinutes);
-                    })();
+                      await fillAnchorWindow('forward', ms);
+                    });
                   }}
                   onNewestCommit={ms => {
-                    void (async () => {
-                      await changeReadDirection('backward');
+                    void changeReadDirection('backward', async () => {
                       setBufferAnchor({ direction: 'backward', ts: ms });
-                      const start = ms - bufferRangeMinutes * 60_000;
-                      await loadRange(start, ms);
-                      enforceTimeWindow('backward', bufferRangeMinutes);
-                    })();
+                      await fillAnchorWindow('backward', ms);
+                    });
                   }}
                   onLoadFromDbOldest={() => {
                     void (async () => {
@@ -1296,9 +1316,8 @@ function App() {
                         if (Number.isNaN(ms)) return;
                         await changeReadDirection('forward', async () => {
                           setBufferAnchor({ direction: 'forward', ts: ms });
-                          await fillForwardFrom(ms);
-                          enforceTimeWindow('forward', bufferRangeMinutes);
-                        }, { forceClear: true });
+                          await fillAnchorWindow('forward', ms);
+                        });
                         handleListFollowChange(false);
                         setActivePanel('list');
                         listGotoSeq.current += 1;
@@ -1320,9 +1339,8 @@ function App() {
                         if (Number.isNaN(ms)) return;
                         await changeReadDirection('backward', async () => {
                           setBufferAnchor({ direction: 'backward', ts: ms });
-                          await loadRange(ms - bufferRangeMinutes * 60_000, ms);
-                          enforceTimeWindow('backward', bufferRangeMinutes);
-                        }, { forceClear: true });
+                          await fillAnchorWindow('backward', ms);
+                        });
                         handleListFollowChange(false);
                         setActivePanel('list');
                         listGotoSeq.current += 1;
@@ -1863,16 +1881,14 @@ function App() {
                     onGotoFillOlder={async ms => {
                       await changeReadDirection('forward', async () => {
                         setBufferAnchor({ direction: 'forward', ts: ms });
-                        await fillForwardFrom(ms);
-                        enforceTimeWindow('forward', bufferRangeMinutes);
-                      }, { forceClear: true });
+                        await fillAnchorWindow('forward', ms);
+                      });
                     }}
                     onGotoFillNewer={async ms => {
                       await changeReadDirection('backward', async () => {
                         setBufferAnchor({ direction: 'backward', ts: ms });
-                        await loadRange(ms - bufferRangeMinutes * 60_000, ms);
-                        enforceTimeWindow('backward', bufferRangeMinutes);
-                      }, { forceClear: true });
+                        await fillAnchorWindow('backward', ms);
+                      });
                     }}
                     listAnchorKey={listAnchorKey}
                     onListAnchorKeyChange={setListAnchorKey}

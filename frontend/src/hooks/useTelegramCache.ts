@@ -191,9 +191,11 @@ export interface TelegramCache {
    */
   loadRange: (startMs: number, endMs: number, direction?: FillDirection) => Promise<void>;
   /**
-   * Fill the buffer ascending from `startMs` toward now / the existing buffer
-   * (oldest-first). Shares the same `maxSize` budget as `loadRange`. Used by
-   * the oldest datetime field and goto-older.
+   * Fill gaps in `[startMs, startMs + range]`, oldest-first. `range` is the
+   * monitor minute window; the far end is capped at now. Shares the same
+   * `maxSize` budget as `loadRange`. Covered slices, including known-empty
+   * ranges, are not requested again. Used by the oldest datetime field,
+   * goto-older and a forward retarget.
    */
   fillForwardFrom: (startMs: number) => Promise<void>;
   /**
@@ -247,6 +249,17 @@ interface FetchResult {
   limitReached: boolean;
   /** Rows matching the window before the limit, when the backend reports it. */
   totalCount: number;
+}
+
+/** One live row waiting for the next IndexedDB batch. */
+interface PendingLive {
+  entry: TelegramEntry;
+  /**
+   * The row is not in the buffer. Coverage waits until `store` resolves, so a
+   * load during the flush window still sees a gap. A failed write leaves no
+   * coverage for this row.
+   */
+  deferCoverage: boolean;
 }
 
 /**
@@ -305,8 +318,10 @@ async function fetchWholeMillisecond(
  *
  * - On mount, cached telegrams and coverage gaps up to "now" share one
  *   `maxSize` budget, newest-first (#211, #222).
- * - Live telegrams extend the open coverage interval and are flushed to
- *   IndexedDB in batches, including rows the forward window does not keep.
+ * - Live telegrams that stay in the buffer extend the open coverage interval
+ *   immediately and are flushed to IndexedDB in batches. Rows the forward
+ *   window does not keep take the same batch, but extend coverage only after
+ *   that write succeeds.
  * - Disconnect/close windows become gaps that are re-fetched on reconnect.
  *
  * The persistent cache is advisory: every IDB/backend failure degrades to
@@ -333,7 +348,7 @@ export function useTelegramCache(
   /** Ids currently in the buffer — O(1) dedup for the live path. */
   const idsRef = useRef<Set<string>>(new Set());
   /** Live telegrams awaiting the next IDB flush. */
-  const pendingRef = useRef<TelegramEntry[]>([]);
+  const pendingRef = useRef<PendingLive[]>([]);
   const connectedRef = useRef(false);
   const pausedRef = useRef(false);
   /** Bumped by clear() to invalidate any background load still in flight (#339). */
@@ -756,18 +771,15 @@ export function useTelegramCache(
   );
 
   /**
-   * Pages oldest-first from `startMs` toward the existing buffer edge (or now
-   * when the buffer is empty). IDB and the database share `maxSize`.
+   * Pages oldest-first across `[startMs, startMs + range]`, capped at now.
+   * IDB and the database share `maxSize`. A start inside the current buffer
+   * still fills the uncovered tail of that window.
    */
   const fillForwardFrom = useCallback(
     (startMs: number) =>
       runLoad(() => {
-        const now = Date.now();
-        // Cap the forward fill at the prior buffer edge so we only close the
-        // older hole; when the buffer is empty, fill up to now.
-        const connectTs = bufferRef.current!.oldestTs;
-        const endMs = connectTs != null ? Math.min(connectTs, now) : now;
-        if (startMs > endMs) return Promise.resolve();
+        const endMs = Math.min(startMs + rangeMsOf(rangeMinutesRef.current), Date.now());
+        if (endMs < startMs) return Promise.resolve();
         return loadBudgeted(startMs, endMs, 'forward', maxSize, /* skipBufferFullBreak */ true);
       }),
     [runLoad, loadBudgeted, maxSize],
@@ -830,22 +842,51 @@ export function useTelegramCache(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * Writes one live batch. Buffered rows already extended coverage. Rows that
+   * never entered the buffer extend it only after the write resolves; a
+   * rejection leaves them uncovered and closes the open live interval so a
+   * later quiet tick cannot paint across the missing timestamps.
+   * A clear that bumped the load generation must not resurrect coverage.
+   */
+  const commitPendingStore = useCallback((batch: PendingLive[]) => {
+    if (batch.length === 0) return;
+    const gen = loadGenerationRef.current;
+    const entries = batch.map(p => p.entry);
+    const deferredTs = batch.filter(p => p.deferCoverage).map(p => p.entry.ts);
+    pendingStoreCountRef.current++;
+    cacheRef.current!.store(entries).then(
+      () => {
+        pendingStoreCountRef.current--;
+        if (loadGenerationRef.current === gen) {
+          const coverage = coverageRef.current!;
+          for (const ts of deferredTs) coverage.extendLive(ts);
+        }
+        saveCoverage();
+      },
+      () => {
+        pendingStoreCountRef.current--;
+        if (deferredTs.length > 0 && loadGenerationRef.current === gen) {
+          coverageRef.current!.closeLive();
+        }
+      },
+    );
+  }, [saveCoverage]);
+
   // ── Periodic flush: IDB batch, coverage save, size eviction ─────────────────
   useEffect(() => {
     let ticks = 0;
 
     const flush = () => {
       const pending = pendingRef.current;
+      // Don't let the quiet tick cover timestamps whose rows are not in IDB yet.
+      const deferQuiet = pending.some(p => p.deferCoverage);
       if (pending.length > 0) {
         pendingRef.current = [];
-        pendingStoreCountRef.current++;
-        cacheRef.current!.store(pending).then(
-          () => { pendingStoreCountRef.current--; saveCoverage(); },
-          () => { pendingStoreCountRef.current--; },
-        );
+        commitPendingStore(pending);
       }
       // A quiet-but-connected stream still covers the elapsed time.
-      if (connectedRef.current) coverageRef.current!.extendLive(Date.now());
+      if (connectedRef.current && !deferQuiet) coverageRef.current!.extendLive(Date.now());
       saveCoverage();
     };
 
@@ -870,7 +911,7 @@ export function useTelegramCache(
       window.removeEventListener('pagehide', flush);
       flush();
     };
-  }, [saveCoverage]);
+  }, [saveCoverage, commitPendingStore]);
 
   // Shrink/grow the buffer when the configured load limit changes.
   useEffect(() => {
@@ -882,24 +923,19 @@ export function useTelegramCache(
   }, [maxSize, trackRemoved, publish]);
 
   /**
-   * Remember a live telegram for IndexedDB and extend coverage. Rows that never
-   * enter the buffer still take this path so a discard cannot drop them or
-   * leave coverage claiming a range the cache does not hold. Coverage is
-   * persisted only after the store succeeds (see the flush effect).
+   * Remember a live telegram for IndexedDB. Buffered rows extend coverage
+   * immediately. Rows that never enter the buffer defer coverage until the
+   * batch write succeeds, so a load in that window still fetches the gap.
    */
-  const queueLivePersist = useCallback((entry: TelegramEntry) => {
-    coverageRef.current!.extendLive(entry.ts);
-    pendingRef.current.push(entry);
+  const queueLivePersist = useCallback((entry: TelegramEntry, deferCoverage = false) => {
+    if (!deferCoverage) coverageRef.current!.extendLive(entry.ts);
+    pendingRef.current.push({ entry, deferCoverage });
     if (pendingRef.current.length >= FLUSH_BATCH_SIZE) {
       const batch = pendingRef.current;
       pendingRef.current = [];
-      pendingStoreCountRef.current++;
-      cacheRef.current!.store(batch).then(
-        () => { pendingStoreCountRef.current--; saveCoverage(); },
-        () => { pendingStoreCountRef.current--; },
-      );
+      commitPendingStore(batch);
     }
-  }, [saveCoverage]);
+  }, [commitPendingStore]);
 
   /** Backward live: y follows the newest buffered telegram and never moves back. */
   const slideBackwardAnchor = useCallback((newest: number) => {
@@ -950,16 +986,16 @@ export function useTelegramCache(
         const x = anchor.ts != null ? anchor.ts : buf.oldestTs;
         const inWindow = x == null || (entry.ts >= x && entry.ts <= x + rangeMs);
         if (!inWindow || buf.length >= buf.maxSize) {
-          queueLivePersist(entry);
+          queueLivePersist(entry, true);
           return;
         }
       }
       const removed = buf.add(entry);
       trackRemoved(removed);
-      // Overflow dropped this row immediately. Do not publish it, but do not
-      // drop it from IndexedDB or coverage either.
+      // Overflow dropped this row immediately. Keep it for IndexedDB, but do
+      // not claim coverage until that write succeeds.
       if (removed.some(e => e.id === entry.id)) {
-        queueLivePersist(entry);
+        queueLivePersist(entry, true);
         return;
       }
       idsRef.current.add(entry.id);
@@ -1072,6 +1108,14 @@ export function useTelegramCache(
     pendingDropRef.current = 0;
     structuralWhilePausedRef.current = false;
     setTelegrams([]);
+    // The pill Clear is a real wipe: the next window is measured from the
+    // buffer edge, not from the anchor that pointed at the deleted rows.
+    const anchor = anchorRef.current;
+    if (anchor.ts != null) {
+      const next: BufferAnchor = { direction: anchor.direction, ts: null };
+      anchorRef.current = next;
+      setAnchorState(next);
+    }
     await cacheRef.current!.clear().catch(() => {});
   }, [trackRemoved, saveCoverage, updatePausedCount]);
 
