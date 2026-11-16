@@ -14,6 +14,36 @@ import { clear, createStore, delMany, entries, setMany } from 'idb-keyval';
 import type { Telegram } from '../hooks/useWebSocket';
 import type { TelegramEntry } from '../utils/telegramId';
 
+/** Read direction for a capped cache load. Backward keeps the newest rows. */
+export type CacheReadDirection = 'backward' | 'forward';
+
+/**
+ * Keeps at most `limit` entries from the anchor in `direction`.
+ * Backward keeps the newest, forward the oldest. Every row that shares the
+ * millisecond of the cut is kept too, so a millisecond is never split; that
+ * tail may be longer than `limit`. The returned list is newest first.
+ * `truncated` is true when in-range rows were left out.
+ */
+export function capCachedEntries(
+  entries: readonly TelegramEntry[],
+  direction: CacheReadDirection,
+  limit: number,
+): { entries: TelegramEntry[]; truncated: boolean } {
+  const cap = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : entries.length;
+  if (cap <= 0) return { entries: [], truncated: entries.length > 0 };
+  const readOrder = [...entries].sort((a, b) => (direction === 'forward' ? a.ts - b.ts : b.ts - a.ts));
+  if (readOrder.length <= cap) {
+    readOrder.sort((a, b) => b.ts - a.ts);
+    return { entries: readOrder, truncated: false };
+  }
+  let end = cap;
+  const edgeTs = readOrder[cap - 1].ts;
+  while (end < readOrder.length && readOrder[end].ts === edgeTs) end++;
+  const kept = readOrder.slice(0, end);
+  kept.sort((a, b) => b.ts - a.ts);
+  return { entries: kept, truncated: end < readOrder.length };
+}
+
 /** Maximum number of telegrams kept in the persistent cache. */
 export const MAX_CACHE_SIZE = 100_000;
 
@@ -39,14 +69,26 @@ export class TelegramCacheService {
 
   /**
    * Returns cached entries whose timestamp falls within [startMs, endMs],
-   * sorted newest first.
+   * newest first.
+   *
+   * Without `limit`, every match is returned. With `limit`, the result is
+   * capped from the anchor in `direction` (see `capCachedEntries`).
    */
-  async loadRange(startMs: number, endMs: number): Promise<TelegramEntry[]> {
+  async loadRange(
+    startMs: number,
+    endMs: number,
+    direction: CacheReadDirection = 'backward',
+    limit?: number,
+  ): Promise<TelegramEntry[]> {
     const all = await entries<string, CachedEntry>(IDB_STORE);
-    return all
+    const inRange = all
       .filter(([, entry]) => entry.ts >= startMs && entry.ts <= endMs)
-      .map(([id, entry]) => ({ id, ts: entry.ts, telegram: entry.telegram }))
-      .sort((a, b) => b.ts - a.ts);
+      .map(([id, entry]) => ({ id, ts: entry.ts, telegram: entry.telegram }));
+    if (limit == null || !Number.isFinite(limit)) {
+      inRange.sort((a, b) => b.ts - a.ts);
+      return inRange;
+    }
+    return capCachedEntries(inRange, direction, limit).entries;
   }
 
   /** Returns all cached entries, newest first. */

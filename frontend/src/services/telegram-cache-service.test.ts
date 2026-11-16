@@ -138,6 +138,43 @@ describe('TelegramCacheService', () => {
       await svc.store([entry('a', 100)]);
       expect(await svc.loadRange(500, 1000)).toEqual([]);
     });
+
+    it('caps a backward read to the newest rows', async () => {
+      await svc.store([entry('a', 100), entry('b', 200), entry('c', 300), entry('d', 400)]);
+      const result = await svc.loadRange(100, 400, 'backward', 2);
+      expect(result.map(e => e.ts)).toEqual([400, 300]);
+    });
+
+    it('caps a forward read to the oldest rows', async () => {
+      await svc.store([entry('a', 100), entry('b', 200), entry('c', 300), entry('d', 400)]);
+      const result = await svc.loadRange(100, 400, 'forward', 2);
+      expect(result.map(e => e.ts)).toEqual([200, 100]);
+    });
+
+    it('keeps the rest of the edge millisecond when the cap lands inside it', async () => {
+      await svc.store([
+        entry('a', 100),
+        entry('b', 200),
+        entry('c1', 300),
+        entry('c2', 300),
+        entry('c3', 300),
+        entry('d', 400),
+      ]);
+      const backward = await svc.loadRange(100, 400, 'backward', 2);
+      expect(backward.map(e => e.ts)).toEqual([400, 300, 300, 300]);
+
+      const forward = await svc.loadRange(100, 400, 'forward', 2);
+      expect(forward.map(e => e.ts)).toEqual([200, 100]);
+
+      // 100, 200, and every row of the 300ms the cut touches. 400 stays out.
+      const forwardEdge = await svc.loadRange(100, 400, 'forward', 4);
+      expect(forwardEdge.map(e => e.ts)).toEqual([300, 300, 300, 200, 100]);
+    });
+
+    it('returns nothing when the limit is zero', async () => {
+      await svc.store([entry('a', 100), entry('b', 200)]);
+      expect(await svc.loadRange(100, 200, 'backward', 0)).toEqual([]);
+    });
   });
 
   describe('count / clear', () => {

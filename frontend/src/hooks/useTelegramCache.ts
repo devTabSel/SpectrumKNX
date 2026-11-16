@@ -4,7 +4,11 @@ import { apiUrl } from '../utils/basePath';
 import { toEntry, telegramTs, type TelegramEntry } from '../utils/telegramId';
 import { tagListEdge } from '../utils/listEdge';
 import { TelegramBufferService, type EvictionMode } from '../services/telegram-buffer-service';
-import { TelegramCacheService, MAX_CACHE_SIZE } from '../services/telegram-cache-service';
+import {
+  TelegramCacheService,
+  MAX_CACHE_SIZE,
+  capCachedEntries,
+} from '../services/telegram-cache-service';
 import {
   TelegramCoverageService,
   loadCoverageIntervals,
@@ -17,14 +21,6 @@ const FLUSH_INTERVAL_MS = 2000;
 const FLUSH_BATCH_SIZE = 200;
 /** Cache size enforcement cadence (in flush ticks: 30 × 2 s = every minute). */
 const EVICT_EVERY_TICKS = 30;
-/**
- * Telegrams pulled in for the first paint on startup (#284). We hydrate only
- * the newest slice from cache and fetch at most this many from the backend,
- * newest-first; older history stays in IDB and is loaded on demand via the
- * history loader. Keeps startup cheap on low-power hosts (e.g. RasPi4) and the
- * buffer off its capacity ceiling, where eviction churn lives (#297).
- */
-const INITIAL_LOAD_LIMIT = 5000;
 /**
  * Rows fetched per backend request while the Monitor fills a gap (#284).
  * History loads page in chunks of this size and paint after every chunk.
@@ -85,6 +81,29 @@ export type FullBufferPagingAction =
   | { action: 'break' }
   | { action: 'skip'; cursor: number };
 
+/**
+ * Covered slices and gaps of `[startMs, endMs]`, in read order.
+ * Backward starts at `endMs` (the new edge); forward starts at `startMs`.
+ * Cache slices are the complement of `gaps` and stay covered even when a
+ * budget cap does not copy every cached row into the buffer.
+ */
+export function budgetSegments(
+  startMs: number,
+  endMs: number,
+  gaps: readonly (readonly [number, number])[],
+  direction: FillDirection,
+): { kind: 'cache' | 'gap'; start: number; end: number }[] {
+  const parts: { kind: 'cache' | 'gap'; start: number; end: number }[] = [];
+  let cursor = startMs;
+  for (const [gs, ge] of gaps) {
+    if (gs > cursor) parts.push({ kind: 'cache', start: cursor, end: gs - 1 });
+    parts.push({ kind: 'gap', start: gs, end: ge });
+    cursor = ge + 1;
+  }
+  if (cursor <= endMs) parts.push({ kind: 'cache', start: cursor, end: endMs });
+  return direction === 'backward' ? parts.reverse() : parts;
+}
+
 export function resolveFullBufferPaging(opts: {
   forward: boolean;
   bufferFull: boolean;
@@ -128,13 +147,16 @@ export interface TelegramCache {
    */
   revealPaused: (n: number) => number;
   /**
-   * Load a time range: cache hits appear immediately, gaps fetch in background.
-   * `direction` selects paging order (default backward = newest-first).
+   * Load a time range. IndexedDB and the database together contribute at most
+   * `maxSize` new buffer rows (a finished millisecond may run past that).
+   * `direction` selects the anchor: backward reads from `endMs`, forward from
+   * `startMs`. Default is backward (newest-first).
    */
   loadRange: (startMs: number, endMs: number, direction?: FillDirection) => Promise<void>;
   /**
    * Fill the buffer ascending from `startMs` toward now / the existing buffer
-   * (oldest-first DB pages). Used by the oldest datetime field and goto-older.
+   * (oldest-first). Shares the same `maxSize` budget as `loadRange`. Used by
+   * the oldest datetime field and goto-older.
    */
   fillForwardFrom: (startMs: number) => Promise<void>;
   /**
@@ -229,8 +251,8 @@ async function fetchWholeMillisecond(
  * Composes the buffer, IndexedDB cache and coverage services (#246) into the
  * Group Monitor's telegram state:
  *
- * - On mount, cached telegrams paint immediately; only coverage gaps up to
- *   "now" are fetched from the backend, in the background (#211, #222).
+ * - On mount, cached telegrams and coverage gaps up to "now" share one
+ *   `maxSize` budget, newest-first (#211, #222).
  * - Live telegrams extend the open coverage interval and are flushed to
  *   IndexedDB in batches.
  * - Disconnect/close windows become gaps that are re-fetched on reconnect.
@@ -355,13 +377,21 @@ export function useTelegramCache(
     for (const e of removed) idsRef.current.delete(e.id);
   }, []);
 
-  /** Merges entries into the buffer; returns whether anything changed. */
+  /**
+   * Merges entries into the buffer. Returns how many ids were new.
+   * `consumed` remembers those ids for the rest of the load, including rows
+   * that eviction drops immediately, so a later cache slice cannot count them
+   * again.
+   */
   const mergeIntoBuffer = useCallback(
-    (entries: TelegramEntry[]): boolean => {
+    (entries: TelegramEntry[], consumed?: Set<string>): number => {
       const { added, removed } = bufferRef.current!.merge(entries);
-      for (const e of added) idsRef.current.add(e.id);
+      for (const e of added) {
+        idsRef.current.add(e.id);
+        consumed?.add(e.id);
+      }
       trackRemoved(removed);
-      return added.length > 0 || removed.length > 0;
+      return added.length;
     },
     [trackRemoved],
   );
@@ -378,18 +408,19 @@ export function useTelegramCache(
    * `aborted` means a clear/cancel invalidated the load; do not advance.
    */
   const loadCompleteMillisecond = useCallback(
-    async (edgeTs: number, direction: FillDirection, gen: number) => {
+    async (edgeTs: number, direction: FillDirection, gen: number, consumed?: Set<string>) => {
       const full = await fetchWholeMillisecond(edgeTs, direction, chunkSize);
       if (loadGenerationRef.current !== gen) {
-        return { entries: [] as TelegramEntry[], stored: false, aborted: true };
+        return { entries: [] as TelegramEntry[], stored: false, aborted: true, added: 0 };
       }
-      if (mergeIntoBuffer(full.entries)) publish();
+      const added = mergeIntoBuffer(full.entries, consumed);
+      if (added > 0) publish();
       pendingStoreCountRef.current++;
       const stored = await cacheRef.current!.store(full.entries).then(
         () => { pendingStoreCountRef.current--; return true; },
         () => { pendingStoreCountRef.current--; return false; },
       );
-      return { entries: full.entries, stored, aborted: false };
+      return { entries: full.entries, stored, aborted: false, added };
     },
     [chunkSize, mergeIntoBuffer, publish],
   );
@@ -397,7 +428,8 @@ export function useTelegramCache(
   /**
    * Progressively fills one uncovered sub-range, publishing after every chunk
    * so the UI builds as data streams in (#284). Pages in `chunkSize` requests
-   * until the gap is exhausted or `budget` rows have been fetched.
+   * until the gap is exhausted or `budget` new rows have been merged.
+   * Rows already in the buffer do not count.
    *
    * - `backward` (default): newest-first; budget cut-off leaves the older remainder
    * - `forward`: oldest-first; budget cut-off leaves the newer remainder
@@ -418,6 +450,7 @@ export function useTelegramCache(
       budget: number,
       skipBufferFullBreak = false,
       direction: FillDirection = 'backward',
+      consumed?: Set<string>,
     ): Promise<number> => {
       const gen = loadGenerationRef.current;
       const forward = direction === 'forward';
@@ -457,7 +490,8 @@ export function useTelegramCache(
           else coverageRef.current!.addCovered(gapStart, cursor);
           break;
         }
-        if (mergeIntoBuffer(entries)) publish();
+        const added = mergeIntoBuffer(entries, consumed);
+        if (added > 0) publish();
         // Mark the range covered only once its rows are actually persisted. If
         // the cache write fails (e.g. IndexedDB quota), leaving coverage claiming
         // a range the cache can't serve surfaces later as a permanent gap (#317).
@@ -466,15 +500,15 @@ export function useTelegramCache(
           () => { pendingStoreCountRef.current--; return true; },
           () => { pendingStoreCountRef.current--; return false; },
         );
-        fetched += entries.length;
+        fetched += added;
         // Desc: newest-first → last is oldest. Asc: oldest-first → last is newest.
         const edgeTs = entries[entries.length - 1].ts;
         if (isSameMillisecondStall(forward, cursor, entries, limitReached)) {
           // Do not mark this millisecond covered from the short page — coverage
           // is time-based and would hide the rows the page did not include.
-          const full = await loadCompleteMillisecond(edgeTs, direction, gen);
+          const full = await loadCompleteMillisecond(edgeTs, direction, gen, consumed);
           if (full.aborted) return fetched;
-          fetched += Math.max(0, full.entries.length - entries.length);
+          fetched += full.added;
           if (full.stored) coverageRef.current!.addCovered(edgeTs, edgeTs);
           cursor = forward ? edgeTs + 1 : edgeTs - 1;
           continue;
@@ -519,8 +553,8 @@ export function useTelegramCache(
 
   /**
    * Fills the uncovered sub-ranges of [startMs, endMs] in `direction`, chunk by
-   * chunk, up to `budget` telegrams total. The far-side remainder of the gap
-   * where the budget runs out stays uncovered for on-demand loading (#284).
+   * chunk, up to `budget` new rows. The far-side remainder of the gap where
+   * the budget runs out stays uncovered for on-demand loading (#284).
    *
    * `skipBufferFullBreak` is forwarded to `fetchGapProgressive` (#317).
    */
@@ -580,88 +614,103 @@ export function useTelegramCache(
     [],
   );
 
+  /**
+   * One range load. Walks `[startMs, endMs]` from the anchor in `direction`
+   * and admits at most `budget` rows that are new to the buffer, counting
+   * IndexedDB and the database together. Finishing a millisecond the database
+   * page could not split may run past `budget`.
+   *
+   * Covered slices are served from IDB and are not requested again. When the
+   * cap stops inside a covered slice, the unread tail stays covered: it remains
+   * in IDB, is not copied into the buffer, and the database does not fetch it.
+   * After a gap is fully resolved, IDB-only rows in that gap still fill any
+   * residual budget, so a cache hit paints when the database returns nothing.
+   */
+  const loadBudgeted = useCallback(
+    async (
+      startMs: number,
+      endMs: number,
+      direction: FillDirection,
+      budget: number,
+      skipBufferFullBreak: boolean,
+      preloaded?: readonly TelegramEntry[],
+    ) => {
+      if (budget <= 0 || endMs < startMs) return;
+      const gen = loadGenerationRef.current;
+      const cached = preloaded !== undefined
+        ? preloaded.filter(e => e.ts >= startMs && e.ts <= endMs)
+        : await cacheRef.current!.loadRange(startMs, endMs).catch(() => [] as TelegramEntry[]);
+      // A buffer clear during the cache read invalidates this load (#339).
+      if (loadGenerationRef.current !== gen) return;
+
+      const consumed = new Set<string>();
+      const segments = budgetSegments(
+        startMs,
+        endMs,
+        coverageRef.current!.gaps(startMs, endMs),
+        direction,
+      );
+      let remaining = budget;
+      for (const seg of segments) {
+        if (remaining <= 0) break;
+        if (loadGenerationRef.current !== gen) return;
+        const inSeg = (rows: readonly TelegramEntry[]) => rows.filter(e =>
+          e.ts >= seg.start && e.ts <= seg.end && !idsRef.current.has(e.id) && !consumed.has(e.id),
+        );
+        if (seg.kind === 'cache') {
+          const capped = capCachedEntries(inSeg(cached), direction, remaining);
+          const added = mergeIntoBuffer(capped.entries, consumed);
+          if (added > 0) publish();
+          remaining -= added;
+          // The far side of this slice stays covered and out of the buffer.
+          if (capped.truncated) break;
+          continue;
+        }
+        const fetched = await fetchGapProgressive(
+          seg.start, seg.end, remaining, skipBufferFullBreak, direction, consumed,
+        );
+        if (loadGenerationRef.current !== gen) return;
+        remaining -= fetched;
+        if (remaining <= 0) break;
+        if (!coverageRef.current!.isCovered(seg.start, seg.end)) {
+          // Paging stopped before the gap was finished. Leave its far side
+          // unloaded; a full buffer must not keep walking into older slices.
+          if (!skipBufferFullBreak && bufferRef.current!.length >= maxSize) break;
+          continue;
+        }
+        const capped = capCachedEntries(inSeg(cached), direction, remaining);
+        const added = mergeIntoBuffer(capped.entries, consumed);
+        if (added > 0) publish();
+        remaining -= added;
+        if (capped.truncated) break;
+      }
+      saveCoverage();
+    },
+    [mergeIntoBuffer, publish, fetchGapProgressive, saveCoverage, maxSize],
+  );
+
   const loadRange = useCallback(
     (startMs: number, endMs: number, direction: FillDirection = 'backward') =>
-      runLoad(async () => {
-        const gen = loadGenerationRef.current;
-        // Cache hits paint immediately; the backend only fills the gaps.
-        const cached = await cacheRef.current!.loadRange(startMs, endMs).catch(() => []);
-        // A buffer clear during the cache read invalidates this load (#339).
-        if (loadGenerationRef.current !== gen) return;
-        if (cached.length > 0 && mergeIntoBuffer(cached)) publish();
-        // User-initiated: bypass the full-buffer early break (#317).
-        await fillGaps(startMs, endMs, /* skipBufferFullBreak */ true, direction);
-      }),
-    [runLoad, mergeIntoBuffer, publish, fillGaps],
+      runLoad(() => loadBudgeted(startMs, endMs, direction, maxSize, /* skipBufferFullBreak */ true)),
+    [runLoad, loadBudgeted, maxSize],
   );
 
   /**
-   * Pages oldest-first from `startMs` toward now (or the existing buffer's
-   * oldest edge). Merges each chunk and marks coverage as it goes.
+   * Pages oldest-first from `startMs` toward the existing buffer edge (or now
+   * when the buffer is empty). IDB and the database share `maxSize`.
    */
   const fillForwardFrom = useCallback(
     (startMs: number) =>
-      runLoad(async () => {
-        const gen = loadGenerationRef.current;
+      runLoad(() => {
         const now = Date.now();
         // Cap the forward fill at the prior buffer edge so we only close the
         // older hole; when the buffer is empty, fill up to now.
         const connectTs = bufferRef.current!.oldestTs;
         const endMs = connectTs != null ? Math.min(connectTs, now) : now;
-        if (startMs > endMs) return;
-
-        const cached = await cacheRef.current!.loadRange(startMs, endMs).catch(() => []);
-        if (loadGenerationRef.current !== gen) return;
-        if (cached.length > 0 && mergeIntoBuffer(cached)) publish();
-
-        let cursor = startMs;
-        let fetched = 0;
-        while (cursor <= endMs && fetched < maxSize) {
-          if (loadGenerationRef.current !== gen) return;
-
-          const limit = Math.min(chunkSize, maxSize - fetched);
-          const { entries, limitReached } = await fetchRange(cursor, endMs, limit, 'forward');
-          if (loadGenerationRef.current !== gen) return;
-          if (entries.length === 0) {
-            coverageRef.current!.addCovered(cursor, endMs);
-            break;
-          }
-          // Ascending response: first = oldest, last = newest in the chunk.
-          if (mergeIntoBuffer(entries)) publish();
-          pendingStoreCountRef.current++;
-          const stored = await cacheRef.current!.store(entries).then(
-            () => { pendingStoreCountRef.current--; return true; },
-            () => { pendingStoreCountRef.current--; return false; },
-          );
-          fetched += entries.length;
-          const newestInChunk = entries[entries.length - 1].ts;
-          const oldestInChunk = entries[0].ts;
-          if (isSameMillisecondStall(true, cursor, entries, limitReached)) {
-            const full = await loadCompleteMillisecond(newestInChunk, 'forward', gen);
-            if (full.aborted) return;
-            // Extra rows count toward the budget and may exceed maxSize, only
-            // so this one millisecond is complete before the cursor moves on.
-            fetched += Math.max(0, full.entries.length - entries.length);
-            if (full.stored) coverageRef.current!.addCovered(newestInChunk, newestInChunk);
-            cursor = newestInChunk + 1;
-            continue;
-          }
-          const finishingMs = limitReached
-            && oldestInChunk === newestInChunk
-            && fetched < maxSize
-            && newestInChunk > cursor;
-          // Leave the unfinished millisecond uncovered until the next pass
-          // re-reads it. The empty span before it was not marked before either.
-          if (stored && !finishingMs) coverageRef.current!.addCovered(oldestInChunk, newestInChunk);
-          if (!limitReached || newestInChunk >= endMs) {
-            if (stored) coverageRef.current!.addCovered(cursor, endMs);
-            break;
-          }
-          cursor = newestInChunk > cursor ? newestInChunk : cursor + 1;
-        }
-        saveCoverage();
+        if (startMs > endMs) return Promise.resolve();
+        return loadBudgeted(startMs, endMs, 'forward', maxSize, /* skipBufferFullBreak */ true);
       }),
-    [runLoad, mergeIntoBuffer, publish, maxSize, saveCoverage, chunkSize, loadCompleteMillisecond],
+    [runLoad, loadBudgeted, maxSize],
   );
 
   /** Newest-first fill covering `[endMs, now]` (backward toward older history). */
@@ -704,21 +753,14 @@ export function useTelegramCache(
 
       const cached = await cacheRef.current!.loadAll().catch(() => [] as TelegramEntry[]);
       if (cancelled || loadGenerationRef.current !== gen) return;
-      // Hydrate only the newest slice for a fast first paint; the older cached
-      // remainder stays in IDB and is pulled in on demand via the history
-      // loader / lazy loads (#284). Never exceed the configured buffer size.
-      const budget = Math.min(INITIAL_LOAD_LIMIT, maxSize);
-      const initialCached = cached.slice(0, budget);
-      if (initialCached.length > 0 && mergeIntoBuffer(initialCached)) publish();
-
-      // Fill the most recent gaps up to the budget (#211): the dashboard-switch
-      // / closed-tab window arrives without user action, but older history is
-      // deferred so startup stays cheap on low-power hosts.
+      // Startup shares the buffer budget with every other load: IDB and the
+      // database together admit at most `maxSize` new rows, newest-first.
+      // The unread cached tail stays in IDB (and stays covered) for a later load.
       const coveredStart = coverage.covered[0]?.[0];
       const oldestCached = cached.length > 0 ? cached[cached.length - 1].ts : undefined;
       const start = Math.min(coveredStart ?? Infinity, oldestCached ?? Infinity);
       if (Number.isFinite(start)) {
-        await fillGapsBudgeted(start, Date.now(), budget);
+        await loadBudgeted(start, Date.now(), 'backward', maxSize, /* skipBufferFullBreak */ false, cached);
       }
     });
     return () => {

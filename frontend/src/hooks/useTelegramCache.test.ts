@@ -6,6 +6,7 @@ import {
   MONITOR_PAGE_SIZE_DEFAULT,
   MONITOR_PAGE_SIZE_MAX,
   MONITOR_PAGE_SIZE_MIN,
+  budgetSegments,
   resolveFullBufferPaging,
   useTelegramCache,
 } from './useTelegramCache';
@@ -90,6 +91,24 @@ afterEach(() => {
 const settle = async (result: { current: { isLoading: boolean } }) => {
   await waitFor(() => expect(result.current.isLoading).toBe(false));
 };
+
+describe('budgetSegments', () => {
+  it('walks backward from the new edge and forward from the start', () => {
+    const gaps: [number, number][] = [[0, 99], [200, 300]];
+    expect(budgetSegments(0, 400, gaps, 'backward')).toEqual([
+      { kind: 'cache', start: 301, end: 400 },
+      { kind: 'gap', start: 200, end: 300 },
+      { kind: 'cache', start: 100, end: 199 },
+      { kind: 'gap', start: 0, end: 99 },
+    ]);
+    expect(budgetSegments(0, 400, gaps, 'forward')).toEqual([
+      { kind: 'gap', start: 0, end: 99 },
+      { kind: 'cache', start: 100, end: 199 },
+      { kind: 'gap', start: 200, end: 300 },
+      { kind: 'cache', start: 301, end: 400 },
+    ]);
+  });
+});
 
 describe('resolveFullBufferPaging (#313)', () => {
   it('continues when the buffer is not full', () => {
@@ -193,28 +212,31 @@ describe('useTelegramCache', () => {
     ]);
   });
 
-  it('hydrates only the newest slice of a large cache on startup, keeping the rest loadable (#284)', async () => {
-    // Seed more than the 5000 initial-load budget, all already covered so no
-    // gap fetch masks the cap.
-    const count = 5100;
-    seedIdb(Array.from({ length: count }, (_, i) => tg(i + 1, `c${i + 1}`)));
-    localStorage.setItem(COVERAGE_STORAGE_KEY, JSON.stringify([[1, count]]));
-    telegramResponses.push({ telegrams: [] }); // trailing [covered…now] gap is empty
+  it('startup admits at most loadLimit new rows from the cache and the database together', async () => {
+    const limit = 4;
+    seedIdb(Array.from({ length: 6 }, (_, i) => tg(i + 1, `c${i + 1}`)));
+    localStorage.setItem(COVERAGE_STORAGE_KEY, JSON.stringify([[1, 6]]));
+    // Newer than the covered cache, so the backward walk takes these first.
+    telegramResponses.push({
+      telegrams: [tg(9, 'n3'), tg(8, 'n2'), tg(7, 'n1')],
+    });
 
-    const { result } = renderHook(() => useTelegramCache(100_000));
+    const { result } = renderHook(() => useTelegramCache(limit));
     await settle(result);
 
-    // Only the newest 5000 paint; the older remainder stays in IDB untouched.
-    expect(result.current.telegrams).toHaveLength(5000);
-    expect(result.current.telegrams[0].source_address).toBe(`1.2.c${count}`);
-    expect(_idb.size).toBe(count);
+    // 3 database rows + the 1 newest cached row. The older cache stays in IDB.
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual([
+      '1.2.n3', '1.2.n2', '1.2.n1', '1.2.c6',
+    ]);
+    const startupCall = fetchCalls.find(u => u.includes('/api/telegrams'));
+    expect(new URLSearchParams(startupCall!.split('?')[1]).get('limit')).toBe(String(limit));
+    expect(_idb.size).toBe(9);
 
-    // The older cached rows are still reachable on demand, from cache alone.
+    // The covered tail is not asked of the database again.
     const before = fetchCalls.filter(u => u.includes('/api/telegrams')).length;
     await act(async () => {
-      await result.current.loadRange(1, 100);
+      await result.current.loadRange(1, 2);
     });
-    expect(result.current.telegrams).toHaveLength(count);
     expect(fetchCalls.filter(u => u.includes('/api/telegrams')).length).toBe(before);
   });
 
@@ -831,7 +853,9 @@ describe('useTelegramCache', () => {
     const params = new URLSearchParams(loadCall.split('?')[1]);
     expect(params.get('order')).toBe('asc');
     expect(Date.parse(params.get('start_time')!)).toBe(1000);
-    expect(Date.parse(params.get('end_time')!)).toBe(5000);
+    // The buffer edge millisecond is already covered by the live row, so the
+    // fill stops on the previous millisecond instead of refetching it.
+    expect(Date.parse(params.get('end_time')!)).toBe(4999);
     expect(result.current.telegrams.map(t => t.source_address)).toEqual([
       '1.2.live', '1.2.old3', '1.2.old2', '1.2.old1',
     ]);
@@ -1057,4 +1081,102 @@ describe('monitor paging', () => {
       expect(new Set(seen)).toEqual(new Set(rows.map(t => t.source_address)));
     },
   );
+});
+
+describe('shared load budget', () => {
+  it('counts a new cached row and gives the database only the residual budget', async () => {
+    const rows = [tg(100, 'a'), tg(200, 'b'), tg(300, 'c'), tg(400, 'd'), tg(500, 'e')];
+    installTelegramStore(rows);
+    const { result } = renderHook(() => useTelegramCache(4, false));
+    await settle(result);
+
+    await act(async () => {
+      await result.current.loadRange(400, 500);
+    });
+    // Covered [400, 500] already holds d and e. This row is new to the buffer.
+    seedIdb([tg(450, 'cached')]);
+
+    const before = telegramUrls().length;
+    await act(async () => {
+      await result.current.loadRange(100, 500);
+    });
+    const urls = telegramUrls().slice(before);
+    const params = new URLSearchParams(urls[0].split('?')[1]);
+    // Backward anchor is the covered slice: 1 new cache row, then 3 from the DB.
+    expect(params.get('limit')).toBe('3');
+    expect(params.get('order')).toBe('desc');
+    expect(Date.parse(params.get('end_time')!)).toBe(399);
+    expect(urls).toHaveLength(1);
+    const stored = [..._idb.values()].map(e => e.telegram.source_address);
+    expect(stored).toEqual(expect.arrayContaining(['1.2.cached', '1.2.a', '1.2.b', '1.2.c']));
+  });
+
+  it('forward load keeps the oldest new cache rows and gives the database the rest', async () => {
+    const rows = [tg(100, 'a'), tg(200, 'b'), tg(300, 'c'), tg(400, 'd'), tg(500, 'e')];
+    installTelegramStore(rows);
+    const { result } = renderHook(() => useTelegramCache(4, false));
+    await settle(result);
+
+    await act(async () => {
+      await result.current.loadRange(100, 200, 'forward');
+    });
+    seedIdb([tg(150, 'cached')]);
+
+    const before = telegramUrls().length;
+    await act(async () => {
+      await result.current.loadRange(100, 500, 'forward');
+    });
+    const params = new URLSearchParams(telegramUrls().slice(before)[0].split('?')[1]);
+    expect(params.get('limit')).toBe('3');
+    expect(params.get('order')).toBe('asc');
+    expect(Date.parse(params.get('start_time')!)).toBe(201);
+  });
+
+  it('does not count rows already in the buffer toward the load budget', async () => {
+    const rows = [tg(100, 'a'), tg(200, 'b'), tg(300, 'c'), tg(400, 'd'), tg(500, 'e')];
+    installTelegramStore(rows);
+    const { result } = renderHook(() => useTelegramCache(3, false));
+    await settle(result);
+
+    await act(async () => {
+      await result.current.loadRange(400, 500);
+    });
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.e', '1.2.d']);
+
+    const before = telegramUrls().length;
+    await act(async () => {
+      await result.current.loadRange(100, 500);
+    });
+    const urls = telegramUrls().slice(before);
+    // The two covered rows are duplicates. The older gap still gets the full budget.
+    expect(urls).toHaveLength(1);
+    expect(new URLSearchParams(urls[0].split('?')[1]).get('limit')).toBe('3');
+    const stored = new Set([..._idb.values()].map(e => e.telegram.source_address));
+    expect(stored).toEqual(new Set(['1.2.a', '1.2.b', '1.2.c', '1.2.d', '1.2.e']));
+  });
+
+  it('may exceed the budget to finish the millisecond already started', async () => {
+    const sameMs = 5_000;
+    const older = 4_000;
+    // Oldest first so the mock's descending page is the newer millisecond.
+    const rows = [
+      ...Array.from({ length: 5 }, (_, i) => tg(older, `o${i}`)),
+      ...Array.from({ length: 5 }, (_, i) => tg(sameMs, `s${i}`)),
+    ];
+    installTelegramStore(rows);
+    const { result } = renderHook(() => useTelegramCache(2, false, 200));
+    await settle(result);
+
+    await act(async () => {
+      await result.current.loadRange(older, sameMs);
+    });
+
+    const storedAtMs = [..._idb.values()].filter(e => e.ts === sameMs);
+    expect(storedAtMs).toHaveLength(5);
+    expect([..._idb.values()].filter(e => e.ts === older)).toHaveLength(0);
+    // Eviction is unchanged: the buffer itself still stops at maxSize.
+    expect(result.current.telegrams).toHaveLength(2);
+    // The completion read uses the page size, which is larger than the budget.
+    expect(telegramUrls().some(u => new URLSearchParams(u.split('?')[1]).get('limit') === '200')).toBe(true);
+  });
 });
