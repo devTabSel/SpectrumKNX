@@ -314,6 +314,26 @@ async def test_query_telegrams(server):
 
 
 @pytest.mark.asyncio
+async def test_query_telegrams_order_matches_api(server):
+    """`order` is asc|desc, like /api/telegrams, and replaces `order_descending`."""
+    tools = {tool.name: tool for tool in await server.list_tools()}
+    tool = tools["query_telegrams"]
+    description = tool.description or ""
+    assert "order_descending" not in description
+    assert '"desc"' in description
+    props = tool.input_schema["properties"]
+    assert "order_descending" not in props
+    assert props["order"]["default"] == "desc"
+
+    newest = await _structured(server, "query_telegrams", {})
+    assert newest["telegrams"][0]["destination"] == "1/2/2"
+    oldest = await _structured(server, "query_telegrams", {"order": "asc"})
+    assert [row["destination"] for row in oldest["telegrams"]] == ["1/1/1", "1/2/2"]
+    explicit = await _structured(server, "query_telegrams", {"order": "DESC"})
+    assert explicit["telegrams"][0]["destination"] == "1/2/2"
+
+
+@pytest.mark.asyncio
 async def test_query_dpt_subtype_and_type_alias(server):
     # DPT subtype filter reaches the store (only the 9.001 temperature telegram).
     by_dpt = await _structured(server, "query_telegrams", {"dpts": ["9.001"]})

@@ -26,11 +26,48 @@ const EVICT_EVERY_TICKS = 30;
  */
 const INITIAL_LOAD_LIMIT = 5000;
 /**
- * Rows fetched per backend request while filling a gap (#284). History loads
- * page backward in chunks of this size and paint after every chunk, so the list
- * and charts build progressively instead of blocking on one large fetch.
+ * Rows fetched per backend request while the Monitor fills a gap (#284).
+ * History loads page in chunks of this size and paint after every chunk.
+ * The settings field "Seitengröße Monitor-Laden" overrides it (clamped).
+ * History search is not paged and does not use this value.
  */
-const HISTORY_CHUNK_SIZE = 2000;
+export const MONITOR_PAGE_SIZE_DEFAULT = 2000;
+export const MONITOR_PAGE_SIZE_MIN = 200;
+export const MONITOR_PAGE_SIZE_MAX = 10_000;
+
+/** Clamp a Monitor DB page size into `[MIN, MAX]`. Non-finite values use the default. */
+export function clampMonitorPageSize(value: number): number {
+  if (!Number.isFinite(value)) return MONITOR_PAGE_SIZE_DEFAULT;
+  return Math.min(MONITOR_PAGE_SIZE_MAX, Math.max(MONITOR_PAGE_SIZE_MIN, Math.round(value)));
+}
+
+/**
+ * A full page whose rows all share the cursor millisecond. Moving the cursor
+ * onto that timestamp would repeat the page; stepping past it would drop the
+ * rest of the millisecond.
+ */
+export function isSameMillisecondStall(
+  forward: boolean,
+  cursor: number,
+  entries: readonly { ts: number }[],
+  limitReached: boolean,
+): boolean {
+  if (!limitReached || entries.length === 0) return false;
+  const edgeTs = entries[entries.length - 1].ts;
+  for (const entry of entries) {
+    if (entry.ts !== edgeTs) return false;
+  }
+  return forward ? edgeTs <= cursor : edgeTs >= cursor;
+}
+
+/**
+ * Inclusive ISO-8601 bounds of the millisecond `ms`, through its last
+ * microsecond (`edgeMs` .. `edgeMs+0.999`).
+ */
+function millisecondBoundsIso(ms: number): { startIso: string; endIso: string } {
+  const startIso = new Date(ms).toISOString();
+  return { startIso, endIso: startIso.replace(/Z$/, '999Z') };
+}
 
 /** Gap / loadRange paging direction. Default remains backward (newest-first). */
 export type FillDirection = 'backward' | 'forward';
@@ -134,6 +171,8 @@ export interface TelegramCache {
 interface FetchResult {
   entries: TelegramEntry[];
   limitReached: boolean;
+  /** Rows matching the window before the limit, when the backend reports it. */
+  totalCount: number;
 }
 
 /**
@@ -145,20 +184,45 @@ async function fetchRange(
   endMs: number,
   limit: number,
   direction: FillDirection = 'backward',
+  isoBounds?: { startIso: string; endIso: string },
 ): Promise<FetchResult> {
   const params = new URLSearchParams({
     limit: String(limit),
-    start_time: new Date(startMs).toISOString(),
-    end_time: new Date(endMs).toISOString(),
+    start_time: isoBounds?.startIso ?? new Date(startMs).toISOString(),
+    end_time: isoBounds?.endIso ?? new Date(endMs).toISOString(),
     order: direction === 'forward' ? 'asc' : 'desc',
   });
   const res = await fetch(apiUrl(`/api/telegrams?${params}`));
   if (!res.ok) throw new Error(`Server error: ${res.status}`);
   const data = await res.json();
+  const telegrams = (data.telegrams || []) as Telegram[];
+  const reported = data.metadata?.total_count;
   return {
-    entries: ((data.telegrams || []) as Telegram[]).map(toEntry),
+    entries: telegrams.map(toEntry),
     limitReached: data.metadata?.limit_reached ?? false,
+    totalCount: typeof reported === 'number' ? reported : telegrams.length,
   };
+}
+
+/**
+ * Every row in one millisecond. Probes the exact window, then repeats with
+ * `limit = total_count` when the probe was short.
+ *
+ * Callers add the extra rows (beyond the page already counted) to `fetched`.
+ * That can exceed the load budget; the overage is only for finishing this
+ * single millisecond, so the cursor can move past it without dropping rows.
+ */
+async function fetchWholeMillisecond(
+  edgeTs: number,
+  direction: FillDirection,
+  probeLimit: number,
+): Promise<FetchResult> {
+  const bounds = millisecondBoundsIso(edgeTs);
+  const probe = await fetchRange(edgeTs, edgeTs, Math.max(1, probeLimit), direction, bounds);
+  if (probe.totalCount > probe.entries.length) {
+    return fetchRange(edgeTs, edgeTs, probe.totalCount, direction, bounds);
+  }
+  return probe;
 }
 
 /**
@@ -179,7 +243,12 @@ async function fetchRange(
  * calls (the history loader) populate it. Live telegrams are still flushed to
  * the cache, so re-enabling the setting restores them on the next reload.
  */
-export function useTelegramCache(maxSize: number, restoreFromCache = true): TelegramCache {
+export function useTelegramCache(
+  maxSize: number,
+  restoreFromCache = true,
+  monitorPageSize = MONITOR_PAGE_SIZE_DEFAULT,
+): TelegramCache {
+  const chunkSize = clampMonitorPageSize(monitorPageSize);
   const bufferRef = useRef<TelegramBufferService | null>(null);
   bufferRef.current ??= new TelegramBufferService(maxSize);
   const cacheRef = useRef<TelegramCacheService | null>(null);
@@ -305,12 +374,38 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
   }, []);
 
   /**
+   * Re-reads one millisecond a full page could not finish, merges and stores it.
+   * `aborted` means a clear/cancel invalidated the load; do not advance.
+   */
+  const loadCompleteMillisecond = useCallback(
+    async (edgeTs: number, direction: FillDirection, gen: number) => {
+      const full = await fetchWholeMillisecond(edgeTs, direction, chunkSize);
+      if (loadGenerationRef.current !== gen) {
+        return { entries: [] as TelegramEntry[], stored: false, aborted: true };
+      }
+      if (mergeIntoBuffer(full.entries)) publish();
+      pendingStoreCountRef.current++;
+      const stored = await cacheRef.current!.store(full.entries).then(
+        () => { pendingStoreCountRef.current--; return true; },
+        () => { pendingStoreCountRef.current--; return false; },
+      );
+      return { entries: full.entries, stored, aborted: false };
+    },
+    [chunkSize, mergeIntoBuffer, publish],
+  );
+
+  /**
    * Progressively fills one uncovered sub-range, publishing after every chunk
-   * so the UI builds as data streams in (#284). Pages in `HISTORY_CHUNK_SIZE`
-   * requests until the gap is exhausted or `budget` rows have been fetched.
+   * so the UI builds as data streams in (#284). Pages in `chunkSize` requests
+   * until the gap is exhausted or `budget` rows have been fetched.
    *
    * - `backward` (default): newest-first; budget cut-off leaves the older remainder
    * - `forward`: oldest-first; budget cut-off leaves the newer remainder
+   *
+   * A full page that sits entirely on the cursor's millisecond is re-read in
+   * full (see `fetchWholeMillisecond`) before the cursor steps past it. The
+   * extra rows count toward `fetched` and may exceed `budget`; that overage
+   * is only allowed to finish the one millisecond.
    *
    * When `skipBufferFullBreak` is true (user-initiated loads), the full-buffer
    * early break (#313) is disabled so the entire requested range is fetched and
@@ -348,7 +443,7 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
             continue;
           }
         }
-        const limit = Math.min(HISTORY_CHUNK_SIZE, budget - fetched);
+        const limit = Math.min(chunkSize, budget - fetched);
         const windowStart = forward ? cursor : gapStart;
         const windowEnd = forward ? gapEnd : cursor;
         const { entries, limitReached } = await fetchRange(windowStart, windowEnd, limit, direction);
@@ -374,9 +469,31 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
         fetched += entries.length;
         // Desc: newest-first → last is oldest. Asc: oldest-first → last is newest.
         const edgeTs = entries[entries.length - 1].ts;
+        if (isSameMillisecondStall(forward, cursor, entries, limitReached)) {
+          // Do not mark this millisecond covered from the short page — coverage
+          // is time-based and would hide the rows the page did not include.
+          const full = await loadCompleteMillisecond(edgeTs, direction, gen);
+          if (full.aborted) return fetched;
+          fetched += Math.max(0, full.entries.length - entries.length);
+          if (full.stored) coverageRef.current!.addCovered(edgeTs, edgeTs);
+          cursor = forward ? edgeTs + 1 : edgeTs - 1;
+          continue;
+        }
         if (stored) {
-          if (forward) coverageRef.current!.addCovered(cursor, edgeTs);
-          else coverageRef.current!.addCovered(edgeTs, cursor);
+          const allOnEdge = entries.every(e => e.ts === edgeTs);
+          // More pages remain and this one is a single millisecond we have not
+          // finished. Cover only the empty lead-in; the next iteration re-reads
+          // the millisecond and marks it once every row is stored.
+          const deferMs = limitReached && allOnEdge && fetched < budget;
+          if (deferMs && forward && cursor < edgeTs) {
+            coverageRef.current!.addCovered(cursor, edgeTs - 1);
+          } else if (deferMs && !forward && edgeTs < cursor) {
+            coverageRef.current!.addCovered(edgeTs + 1, cursor);
+          } else if (forward) {
+            coverageRef.current!.addCovered(cursor, edgeTs);
+          } else {
+            coverageRef.current!.addCovered(edgeTs, cursor);
+          }
         }
         if (!limitReached) {
           // The whole remaining window came back — the gap is fully covered.
@@ -387,8 +504,8 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
           break;
         }
         // Advance the cursor. Re-including `edgeTs` (dedup handles the repeat)
-        // avoids dropping siblings that share that millisecond; step past it only
-        // when a whole chunk sat on one timestamp, to guarantee progress.
+        // avoids dropping siblings that share that millisecond. A page that is
+        // entirely that millisecond is handled above, before this step.
         if (forward) {
           cursor = edgeTs > cursor ? edgeTs : cursor + 1;
         } else {
@@ -397,7 +514,7 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
       }
       return fetched;
     },
-    [mergeIntoBuffer, publish, maxSize],
+    [mergeIntoBuffer, publish, maxSize, chunkSize, loadCompleteMillisecond],
   );
 
   /**
@@ -502,7 +619,7 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
         while (cursor <= endMs && fetched < maxSize) {
           if (loadGenerationRef.current !== gen) return;
 
-          const limit = Math.min(HISTORY_CHUNK_SIZE, maxSize - fetched);
+          const limit = Math.min(chunkSize, maxSize - fetched);
           const { entries, limitReached } = await fetchRange(cursor, endMs, limit, 'forward');
           if (loadGenerationRef.current !== gen) return;
           if (entries.length === 0) {
@@ -519,7 +636,23 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
           fetched += entries.length;
           const newestInChunk = entries[entries.length - 1].ts;
           const oldestInChunk = entries[0].ts;
-          if (stored) coverageRef.current!.addCovered(oldestInChunk, newestInChunk);
+          if (isSameMillisecondStall(true, cursor, entries, limitReached)) {
+            const full = await loadCompleteMillisecond(newestInChunk, 'forward', gen);
+            if (full.aborted) return;
+            // Extra rows count toward the budget and may exceed maxSize, only
+            // so this one millisecond is complete before the cursor moves on.
+            fetched += Math.max(0, full.entries.length - entries.length);
+            if (full.stored) coverageRef.current!.addCovered(newestInChunk, newestInChunk);
+            cursor = newestInChunk + 1;
+            continue;
+          }
+          const finishingMs = limitReached
+            && oldestInChunk === newestInChunk
+            && fetched < maxSize
+            && newestInChunk > cursor;
+          // Leave the unfinished millisecond uncovered until the next pass
+          // re-reads it. The empty span before it was not marked before either.
+          if (stored && !finishingMs) coverageRef.current!.addCovered(oldestInChunk, newestInChunk);
           if (!limitReached || newestInChunk >= endMs) {
             if (stored) coverageRef.current!.addCovered(cursor, endMs);
             break;
@@ -528,7 +661,7 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
         }
         saveCoverage();
       }),
-    [runLoad, mergeIntoBuffer, publish, maxSize, saveCoverage],
+    [runLoad, mergeIntoBuffer, publish, maxSize, saveCoverage, chunkSize, loadCompleteMillisecond],
   );
 
   /** Newest-first fill covering `[endMs, now]` (backward toward older history). */

@@ -21,8 +21,10 @@ const cacheCtl = vi.hoisted(() => ({
 }));
 
 /** Controllable cache so pause/clear tests can leave the empty-buffer lock. */
-vi.mock('./hooks/useTelegramCache', () => {
+vi.mock('./hooks/useTelegramCache', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./hooks/useTelegramCache')>();
   return {
+    ...actual,
     useTelegramCache: () => {
       const [telegrams, setTelegrams] = React.useState(() => [makeTelegram({ raw_hex: '0xseed' })]);
       const [pausedCount, setPausedCount] = React.useState(0);

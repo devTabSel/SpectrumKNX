@@ -1,7 +1,8 @@
 """API tests for the telegram import/export endpoints (see DESIGN_IMPORT_EXPORT.md)."""
 
+import csv
 import io
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -181,3 +182,89 @@ def test_export_csv(mock_query):
 def test_export_rejects_unknown_format(mock_query):
     assert client.get("/api/export?format=json").status_code == 400
     assert client.get("/api/export?format=csv&delimiter=tab").status_code == 400
+
+
+def _export_row(ts: datetime, n: int) -> StoredTelegram:
+    return StoredTelegram(
+        timestamp=ts,
+        source="1.1.1",
+        destination="1/1/1",
+        telegramtype="GroupValueWrite",
+        direction="Incoming",
+        dpt_main=5,
+        dpt_sub=1,
+        payload=None,
+        value=float(n),
+        raw_data=f"{n:04x}",
+    )
+
+
+def _query_side_effect(rows: list[StoredTelegram]):
+    seen: list = []
+
+    async def fake_query(query, flush_first=True):
+        seen.append(query)
+        matched = [
+            row
+            for row in rows
+            if (query.start_time is None or row.timestamp >= query.start_time)
+            and (query.end_time is None or row.timestamp <= query.end_time)
+        ]
+        matched.sort(key=lambda row: row.timestamp, reverse=query.order_descending)
+        total = len(matched)
+        page = matched[query.offset : query.offset + query.limit]
+        return TelegramQueryResult(
+            telegrams=page,
+            total_count=total,
+            limit_reached=total > query.offset + query.limit,
+        )
+
+    return fake_query, seen
+
+
+def _csv_raws(response) -> list[str]:
+    text = response.content.decode("utf-8-sig")
+    table = list(csv.reader(io.StringIO(text)))
+    assert table[0][-1] == "raw"
+    return [row[-1] for row in table[1:]]
+
+
+@patch("api.EXPORT_PAGE_SIZE", 2)
+@patch("database.store.query", new_callable=AsyncMock)
+def test_export_pages_distinct_timestamps_once(mock_query):
+    base = datetime(2026, 3, 5, tzinfo=UTC)
+    rows = [_export_row(base + timedelta(milliseconds=i), i) for i in range(5)]
+    fake_query, seen = _query_side_effect(rows)
+    mock_query.side_effect = fake_query
+
+    raws = _csv_raws(client.get("/api/export?format=csv&limit=100"))
+    assert raws == [f"0x{i:04x}" for i in range(5)]
+    assert all(query.offset == 0 and query.order_descending is False for query in seen)
+    # Distinct timestamps never collapse into an exact-timestamp re-query.
+    # An omitted bound is None, and None == None, so compare only set bounds.
+    assert all(query.start_time is None or query.start_time != query.end_time for query in seen)
+
+
+@patch("api.EXPORT_PAGE_SIZE", 3)
+@patch("database.store.query", new_callable=AsyncMock)
+def test_export_same_timestamp_across_pages_once(mock_query):
+    """A timestamp wider than a page, including one that splits a page boundary, is exported once."""
+    base = datetime(2026, 3, 5, tzinfo=UTC)
+    t0 = base
+    t1 = base + timedelta(milliseconds=5)
+    t2 = base + timedelta(milliseconds=10)
+    rows = (
+        [_export_row(t0, n) for n in range(2)]
+        + [_export_row(t1, n) for n in range(2, 7)]
+        + [_export_row(t2, n) for n in range(7, 9)]
+    )
+    fake_query, seen = _query_side_effect(rows)
+    mock_query.side_effect = fake_query
+
+    raws = _csv_raws(client.get("/api/export?format=csv&limit=100"))
+    assert raws == [f"0x{i:04x}" for i in range(9)]
+    assert len(raws) == len(set(raws))
+    assert all(query.offset == 0 and query.order_descending is False for query in seen)
+    exact = [query for query in seen if query.start_time == t1 and query.end_time == t1]
+    assert exact
+    assert any(query.limit == 5 for query in exact)

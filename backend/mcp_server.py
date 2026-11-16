@@ -205,7 +205,10 @@ def _build_server() -> MCPServer:
         )
 
     @mcp.tool()
-    @_describe(QueryTelegramsInput)
+    @_describe(
+        QueryTelegramsInput,
+        order='Sort order: "asc" (oldest first) or "desc" (newest first, default). Same values as /api/telegrams.',
+    )
     async def query_telegrams(
         start_time: str | None = None,
         end_time: str | None = None,
@@ -219,7 +222,7 @@ def _build_server() -> MCPServer:
         delta_after_ms: int = 0,
         limit: int = 100,
         offset: int = 0,
-        order_descending: bool = True,
+        order: str = "desc",
     ) -> dict[str, Any]:
         """Search stored KNX telegrams over a time range.
 
@@ -229,13 +232,14 @@ def _build_server() -> MCPServer:
 
         IMPORTANT — the result may be partial. `limit` (default 100) is applied
         *within* the requested range, and results are ordered newest-first by
-        default (`order_descending`), so a plain time-range query returns the
+        default (`order` = "desc"), so a plain time-range query returns the
         *newest* `limit` telegrams in that range, not the whole range. On a busy
         bus 100 telegrams can be a couple of minutes. Always check
         `limit_reached` in the result: when it is true you are looking at a
         subset and must either page with `next_offset` (pass it as `offset`) or
         narrow the range before drawing conclusions. `total_count` reports how
-        many telegrams match the filters overall.
+        many telegrams match the filters overall. `order` is "asc" or "desc"
+        (default "desc"), the same values as `/api/telegrams`.
 
         Address/type/direction filters are lists (OR within a filter, AND across
         filters). `telegram_types` accepts "Write"/"Read"/"Response" or the full
@@ -257,7 +261,7 @@ def _build_server() -> MCPServer:
                 delta_after_ms=delta_after_ms,
                 limit=limit,
                 offset=offset,
-                order_descending=order_descending,
+                order_descending=order.strip().lower() != "asc",
             ),
         )
         return asdict(result)

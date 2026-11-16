@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { resolveFullBufferPaging, useTelegramCache } from './useTelegramCache';
+import {
+  clampMonitorPageSize,
+  isSameMillisecondStall,
+  MONITOR_PAGE_SIZE_DEFAULT,
+  MONITOR_PAGE_SIZE_MAX,
+  MONITOR_PAGE_SIZE_MIN,
+  resolveFullBufferPaging,
+  useTelegramCache,
+} from './useTelegramCache';
 import { TelegramBufferService } from '../services/telegram-buffer-service';
 import { gaReadPhases } from '../utils/groupValueEvents';
 import { makeTelegram } from '../test/telegramFactory';
@@ -914,4 +922,139 @@ describe('useTelegramCache', () => {
       '1.2.b', '1.2.a',
     ]);
   });
+});
+
+describe('clampMonitorPageSize', () => {
+  it('defaults, clamps, and rounds', () => {
+    expect(clampMonitorPageSize(Number.NaN)).toBe(MONITOR_PAGE_SIZE_DEFAULT);
+    expect(clampMonitorPageSize(MONITOR_PAGE_SIZE_MIN - 1)).toBe(MONITOR_PAGE_SIZE_MIN);
+    expect(clampMonitorPageSize(MONITOR_PAGE_SIZE_MIN)).toBe(MONITOR_PAGE_SIZE_MIN);
+    expect(clampMonitorPageSize(MONITOR_PAGE_SIZE_DEFAULT)).toBe(MONITOR_PAGE_SIZE_DEFAULT);
+    expect(clampMonitorPageSize(MONITOR_PAGE_SIZE_MAX)).toBe(MONITOR_PAGE_SIZE_MAX);
+    expect(clampMonitorPageSize(MONITOR_PAGE_SIZE_MAX + 1)).toBe(MONITOR_PAGE_SIZE_MAX);
+    expect(clampMonitorPageSize(2500.4)).toBe(2500);
+  });
+});
+
+describe('isSameMillisecondStall', () => {
+  it('is true only when a full page sits on the cursor millisecond', () => {
+    expect(isSameMillisecondStall(true, 5, [{ ts: 5 }, { ts: 5 }], true)).toBe(true);
+    expect(isSameMillisecondStall(false, 5, [{ ts: 5 }, { ts: 5 }], true)).toBe(true);
+    expect(isSameMillisecondStall(true, 4, [{ ts: 5 }, { ts: 5 }], true)).toBe(false);
+    expect(isSameMillisecondStall(false, 6, [{ ts: 5 }, { ts: 5 }], true)).toBe(false);
+    expect(isSameMillisecondStall(true, 5, [{ ts: 5 }, { ts: 6 }], true)).toBe(false);
+    expect(isSameMillisecondStall(true, 5, [{ ts: 5 }], false)).toBe(false);
+  });
+});
+
+/** In-memory /api/telegrams: filters by the requested window, order, and limit. */
+const installTelegramStore = (rows: Telegram[]) => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: RequestInfo | URL) => {
+      const u = String(url);
+      fetchCalls.push(u);
+      if (u.includes('/api/database/info')) return jsonRes({ retention_days: null });
+      if (!u.includes('/api/telegrams')) return jsonRes({});
+      const params = new URLSearchParams(u.split('?')[1]);
+      const start = Date.parse(params.get('start_time')!);
+      const end = Date.parse(params.get('end_time')!);
+      const limit = Number(params.get('limit'));
+      const asc = params.get('order') === 'asc';
+      const inWindow = rows.filter(t => {
+        const ts = new Date(t.timestamp).getTime();
+        return ts >= start && ts <= end;
+      });
+      const ordered = asc ? inWindow : [...inWindow].reverse();
+      const page = ordered.slice(0, limit);
+      return jsonRes({
+        telegrams: page,
+        metadata: {
+          limit_reached: inWindow.length > limit,
+          total_count: inWindow.length,
+        },
+      });
+    }),
+  );
+};
+
+const telegramUrls = () => fetchCalls.filter(u => u.includes('/api/telegrams'));
+
+describe('monitor paging', () => {
+  it('requests the configured page size, clamped into range', async () => {
+    const { result } = renderHook(() => useTelegramCache(1000, false, 10));
+    await settle(result);
+    telegramResponses.push({ telegrams: [tg(1000, 'a')] });
+    await act(async () => {
+      await result.current.loadRange(1000, 1000);
+    });
+    const params = new URLSearchParams(telegramUrls().at(-1)!.split('?')[1]);
+    expect(params.get('limit')).toBe(String(MONITOR_PAGE_SIZE_MIN));
+
+    const { result: high } = renderHook(() => useTelegramCache(20_000, false, 50_000));
+    await settle(high);
+    telegramResponses.push({ telegrams: [tg(2000, 'b')] });
+    await act(async () => {
+      await high.current.loadRange(2000, 2000);
+    });
+    const highParams = new URLSearchParams(telegramUrls().at(-1)!.split('?')[1]);
+    expect(highParams.get('limit')).toBe(String(MONITOR_PAGE_SIZE_MAX));
+  });
+
+  it.each(['backward', 'forward'] as const)(
+    'pages %s across distinct milliseconds by re-including the edge, without a same-ms refill',
+    async (direction) => {
+      const pageSize = 200;
+      const count = 250;
+      const origin = 1_000_000;
+      const rows = Array.from({ length: count }, (_, i) => tg(origin + i, `n${i}`));
+      installTelegramStore(rows);
+      const { result } = renderHook(() => useTelegramCache(count + 10, false, pageSize));
+      await settle(result);
+      const before = telegramUrls().length;
+      await act(async () => {
+        await result.current.loadRange(origin, origin + count - 1, direction);
+      });
+      const urls = telegramUrls().slice(before);
+      expect(urls.length).toBe(2);
+      expect(urls.some(u => decodeURIComponent(u).includes('999Z'))).toBe(false);
+      // First page uses the configured size. The last page is only the budget remainder.
+      expect(new URLSearchParams(urls[0].split('?')[1]).get('limit')).toBe(String(pageSize));
+      const edge = origin + (direction === 'forward' ? pageSize - 1 : count - pageSize);
+      const second = new URLSearchParams(urls[1].split('?')[1]);
+      const bound = direction === 'forward' ? second.get('start_time') : second.get('end_time');
+      expect(Date.parse(bound!)).toBe(edge);
+      const seen = result.current.telegrams.map(t => t.source_address);
+      expect(seen).toHaveLength(count);
+      expect(new Set(seen)).toEqual(new Set(rows.map(t => t.source_address)));
+    },
+  );
+
+  it.each(['backward', 'forward'] as const)(
+    'returns every same-millisecond row exactly once when paging %s below the row count',
+    async (direction) => {
+      const pageSize = 2000;
+      const count = 5000;
+      const sameMs = 1_700_000_000_000;
+      const rows = Array.from({ length: count }, (_, i) => tg(sameMs, `s${i}`));
+      installTelegramStore(rows);
+      const { result } = renderHook(() => useTelegramCache(count + 1000, false, pageSize));
+      await settle(result);
+      const before = telegramUrls().length;
+      await act(async () => {
+        await result.current.loadRange(sameMs - 10_000, sameMs + 10_000, direction);
+      });
+      const urls = telegramUrls().slice(before);
+      const fullMs = urls.filter(u => {
+        const params = new URLSearchParams(u.split('?')[1]);
+        return decodeURIComponent(params.get('end_time') ?? '').includes('999Z')
+          && params.get('limit') === String(count);
+      });
+      expect(fullMs.length).toBeGreaterThan(0);
+      expect(fullMs.every(u => new URLSearchParams(u.split('?')[1]).get('order') === (direction === 'forward' ? 'asc' : 'desc'))).toBe(true);
+      const seen = result.current.telegrams.map(t => t.source_address);
+      expect(seen).toHaveLength(count);
+      expect(new Set(seen)).toEqual(new Set(rows.map(t => t.source_address)));
+    },
+  );
 });

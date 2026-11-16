@@ -5,7 +5,7 @@ import logging
 import os
 import subprocess
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -1439,6 +1439,106 @@ async def cancel_telegram_import():
     return {"status": "ok"}
 
 
+def _export_identity(telegram) -> tuple:
+    """Stable row key for export dedup at an inclusive page boundary."""
+    return (telegram.timestamp, telegram.source, telegram.destination, telegram.raw_data, telegram.telegramtype)
+
+
+def _unseen_export_rows(rows: list, boundary_ts, seen: set[tuple]) -> list:
+    """Drop rows already emitted at `boundary_ts`, and duplicates inside `rows`."""
+    fresh = []
+    page_seen: set[tuple] = set()
+    for row in rows:
+        key = _export_identity(row)
+        if key in page_seen:
+            continue
+        page_seen.add(key)
+        if boundary_ts is not None and row.timestamp == boundary_ts and key in seen:
+            continue
+        fresh.append(row)
+    return fresh
+
+
+async def _export_query(base: TelegramQuery, start, end, page_limit: int):
+    page = dataclasses.replace(
+        base,
+        start_time=start,
+        end_time=end,
+        limit=page_limit,
+        offset=0,
+        order_descending=False,
+    )
+    return await store.query(page, flush_first=True)
+
+
+async def _export_full_timestamp(base: TelegramQuery, edge, probe_limit: int):
+    """Every row at exactly `edge`. Probe, then re-query with limit=total_count."""
+    probed = await _export_query(base, edge, edge, probe_limit)
+    if probed.total_count > len(probed.telegrams):
+        return await _export_query(base, edge, edge, probed.total_count)
+    return probed
+
+
+async def _iter_export_pages(base: TelegramQuery, row_limit: int):
+    """Yield ascending pages, each stored row at most once.
+
+    The next page starts inclusive at the previous page's last timestamp.
+    Rows already emitted at that boundary are removed by
+    ``_export_identity``. A page that sits entirely on one timestamp is
+    re-read with ``limit=total_count`` (same rule as Monitor paging), then
+    the cursor moves one microsecond past it. ``row_limit`` stays a hard cap
+    on how many rows are yielded.
+    """
+    emitted = 0
+    cursor = base.start_time
+    end = base.end_time
+    boundary_ts = None
+    seen: set[tuple] = set()
+    while emitted < row_limit:
+        page_limit = min(EXPORT_PAGE_SIZE, row_limit - emitted)
+        result = await _export_query(base, cursor, end, page_limit)
+        rows = list(result.telegrams)
+        if not rows:
+            break
+        step_past = False
+        same_timestamp = result.limit_reached and all(row.timestamp == rows[0].timestamp for row in rows)
+        if same_timestamp:
+            completed = await _export_full_timestamp(base, rows[0].timestamp, page_limit)
+            completed_rows = list(completed.telegrams)
+            if completed_rows:
+                rows = completed_rows
+                step_past = True
+        fresh = _unseen_export_rows(rows, boundary_ts, seen)
+        if not fresh:
+            cursor = rows[-1].timestamp + timedelta(microseconds=1)
+            boundary_ts = None
+            seen = set()
+            if end is not None and cursor > end:
+                break
+            continue
+        room = row_limit - emitted
+        if len(fresh) > room:
+            fresh = fresh[:room]
+        yield fresh
+        emitted += len(fresh)
+        if emitted >= row_limit:
+            break
+        if step_past:
+            cursor = rows[-1].timestamp + timedelta(microseconds=1)
+            boundary_ts = None
+            seen = set()
+        elif not result.limit_reached:
+            break
+        else:
+            last_ts = rows[-1].timestamp
+            keys = {_export_identity(row) for row in fresh if row.timestamp == last_ts}
+            seen = seen | keys if boundary_ts == last_ts else keys
+            boundary_ts = last_ts
+            cursor = last_ts
+        if end is not None and cursor > end:
+            break
+
+
 @router.get("/api/export")
 async def export_telegrams(
     source_address: str | None = None,
@@ -1480,16 +1580,10 @@ async def export_telegrams(
 
     async def generate():
         yield telegram_export.csv_header(csv_delimiter) if format == "csv" else COMMUNICATION_LOG_HEADER
-        offset = 0
-        while offset < limit:
-            page = dataclasses.replace(query, limit=min(EXPORT_PAGE_SIZE, limit - offset), offset=offset)
-            result = await store.query(page, flush_first=True)
-            chunk = render_page(result.telegrams)
+        async for page in _iter_export_pages(query, limit):
+            chunk = render_page(page)
             if chunk:
                 yield chunk
-            if not result.limit_reached or len(result.telegrams) == 0:
-                break
-            offset += len(result.telegrams)
         if format == "xml":
             yield COMMUNICATION_LOG_FOOTER
 

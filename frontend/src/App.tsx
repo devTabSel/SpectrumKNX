@@ -32,7 +32,13 @@ import { getLabel, getFileName } from './utils/labels';
 import { useTheme } from './hooks/useTheme';
 import { apiUrl, wsUrl } from './utils/basePath';
 import { HistoryLoader } from './components/HistoryLoader';
-import { useTelegramCache } from './hooks/useTelegramCache';
+import {
+  useTelegramCache,
+  clampMonitorPageSize,
+  MONITOR_PAGE_SIZE_DEFAULT,
+  MONITOR_PAGE_SIZE_MIN,
+  MONITOR_PAGE_SIZE_MAX,
+} from './hooks/useTelegramCache';
 import {
   type PauseMode,
   pauseModeForListFollow,
@@ -335,6 +341,12 @@ function App() {
 
   // ── Settings & Persistence ──────────────────────────────────────────────────
   const [loadLimit, setLoadLimit] = useState(Number(getPref('loadLimit') || 100000));
+  const [monitorPageSize, setMonitorPageSize] = useState(() => {
+    const raw = getPref('monitorPageSize');
+    if (raw == null || raw.trim() === '') return MONITOR_PAGE_SIZE_DEFAULT;
+    const n = Number(raw);
+    return Number.isFinite(n) ? clampMonitorPageSize(n) : MONITOR_PAGE_SIZE_DEFAULT;
+  });
   const [bufferRangeMinutes, setBufferRangeMinutes] = useState(() => {
     const n = Number(getPref('bufferRangeMinutes') || 60);
     return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 60;
@@ -389,7 +401,7 @@ function App() {
     cancelLoad,
     setEvictionMode,
     enforceTimeWindow,
-  } = useTelegramCache(loadLimit, restoreOnStartup);
+  } = useTelegramCache(loadLimit, restoreOnStartup, monitorPageSize);
   const [pauseMode, setPauseMode] = useState<PauseMode>('playing');
   // Live-trim policy for handleTelegram (declared before filters; synced below).
   const liveTrimRef = useRef({
@@ -564,11 +576,12 @@ function App() {
   // ── Persist settings ────────────────────────────────────────────────────────
   useEffect(() => {
     setPref('loadLimit', loadLimit.toString());
+    setPref('monitorPageSize', String(monitorPageSize));
     setPref('bufferRangeMinutes', String(bufferRangeMinutes));
     setPref('visibleColumns', JSON.stringify(visibleColumns));
     setPref('rateMode', rateMode);
     setPref('restoreOnStartup', String(restoreOnStartup));
-  }, [loadLimit, bufferRangeMinutes, visibleColumns, rateMode, restoreOnStartup]);
+  }, [loadLimit, monitorPageSize, bufferRangeMinutes, visibleColumns, rateMode, restoreOnStartup]);
 
   // Keep buffer eviction aligned with the fill/read axis.
   useEffect(() => {
@@ -1407,6 +1420,27 @@ function App() {
                   style={{ width: '100%', padding: '0.75rem', fontSize: '0.85rem' }}
                   value={loadLimit}
                   onChange={e => setLoadLimit(Number(e.target.value))}
+                />
+              </div>
+
+              <h3 style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: '0.75rem', letterSpacing: '0.05em', marginTop: '1.5rem' }}>
+                Seitengröße Monitor-Laden
+              </h3>
+              <div className="input-group">
+                <input
+                  type="number"
+                  min={MONITOR_PAGE_SIZE_MIN}
+                  max={MONITOR_PAGE_SIZE_MAX}
+                  step={100}
+                  className="glass-input"
+                  style={{ width: '100%', padding: '0.75rem', fontSize: '0.85rem' }}
+                  value={monitorPageSize}
+                  title="Page size for Monitor database loads (200–10000). History search stays a single request."
+                  aria-label="Seitengröße Monitor-Laden"
+                  onChange={e => {
+                    const n = Number(e.target.value);
+                    if (Number.isFinite(n)) setMonitorPageSize(clampMonitorPageSize(n));
+                  }}
                 />
               </div>
 
