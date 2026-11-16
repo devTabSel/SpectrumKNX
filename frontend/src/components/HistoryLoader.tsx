@@ -215,7 +215,7 @@ export const HistoryLoader: React.FC<HistoryLoaderProps> = ({ onClose, onLoad, o
               <span className="section-label" style={{ marginBottom: 0 }}><Calendar size={12} /> Date Range</span>
               <div style={{ flex: 1, height: 1, background: 'var(--border-color)' }} />
             </div>
-             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '0.75rem' }}>
               <div>
                 <label style={{ display: 'block', fontSize: '0.65rem', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.35rem' }}>From</label>
                 <input

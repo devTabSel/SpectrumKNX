@@ -23,6 +23,9 @@ export function telegramEventType(telegram: Pick<Telegram, 'simplified_type' | '
   return raw;
 }
 
+/** Ctrl/Cmd adds to the selection; Shift ranges from the last selected row. */
+export type TelegramJumpMods = { additive?: boolean; range?: boolean };
+
 interface Props {
   /** ISO timestamp or Date of the bus event. */
   timestamp?: string | Date | null;
@@ -30,8 +33,9 @@ interface Props {
   eventType?: string | null;
   /** When the kind is a Read, color it green once a later Response has answered it. */
   readAnswered?: boolean;
-  /** When set, render the jump button immediately right of the timestamp. */
-  onJump?: () => void;
+  /** When set, render the jump button immediately right of the timestamp.
+   *  Ctrl/Cmd and Shift are forwarded as selection modifiers. */
+  onJump?: (mods?: TelegramJumpMods) => void;
   /** aria-label / title for the jump button. */
   jumpLabel?: string;
   /** Reserve the usual row height with no content (empty send-panel cells). */
@@ -73,7 +77,12 @@ export function TelegramWhenJump({
       className="quick-filter-bar-toggle"
       title={jumpLabel}
       aria-label={jumpLabel}
-      onClick={onJump}
+      onClick={e => {
+        const additive = e.ctrlKey || e.metaKey;
+        const range = e.shiftKey;
+        if (additive || range) onJump({ additive, range });
+        else onJump();
+      }}
       style={{ flexShrink: 0, margin: 0 }}
     >
       <Clock size={13} />

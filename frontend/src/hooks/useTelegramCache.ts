@@ -1,7 +1,8 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import type { Telegram } from './useWebSocket';
 import { apiUrl } from '../utils/basePath';
-import { toEntry, type TelegramEntry } from '../utils/telegramId';
+import { toEntry, telegramTs, type TelegramEntry } from '../utils/telegramId';
+import { tagListEdge } from '../utils/listEdge';
 import { TelegramBufferService } from '../services/telegram-buffer-service';
 import { TelegramCacheService, MAX_CACHE_SIZE } from '../services/telegram-cache-service';
 import {
@@ -77,6 +78,12 @@ export interface TelegramCache {
   /** Telegrams ingested since the snapshot was frozen. */
   pausedCount: number;
   /**
+   * Pause backlog as telegrams (newest first). Stable array, mutated in place —
+   * do not copy it into React state. `pausedCount` is what changes per arrival.
+   * Shorter than `pausedCount` once the buffer evicts older paused rows.
+   */
+  pausedTelegrams: Telegram[];
+  /**
    * Reveal the oldest `n` of the paused backlog while staying paused: the
    * published snapshot grows by those rows and `pausedCount` shrinks by `n`.
    * Returns the backlog still hidden. No-op (returns current backlog) when not
@@ -88,6 +95,20 @@ export interface TelegramCache {
    * `direction` selects paging order (default backward = newest-first).
    */
   loadRange: (startMs: number, endMs: number, direction?: FillDirection) => Promise<void>;
+  /**
+   * Fill the buffer ascending from `startMs` toward now / the existing buffer
+   * (oldest-first DB pages). Used by the oldest datetime field and goto-older.
+   */
+  fillForwardFrom: (startMs: number) => Promise<void>;
+  /**
+   * Fill newest-first from `endMs` backward to cover `[endMs, now]` (or the
+   * existing newest). Used by the newest datetime field.
+   */
+  fillBackwardTo: (endMs: number) => Promise<void>;
+  /** Oldest timestamp currently in the in-memory buffer, or null when empty. */
+  oldestTs: number | null;
+  /** Newest timestamp currently in the in-memory buffer, or null when empty. */
+  newestTs: number | null;
   /** True while any backend history fetch is in flight (#222). */
   isLoading: boolean;
   /** Last background load failure, cleared by the next successful load. */
@@ -164,36 +185,88 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
   const pendingStoreCountRef = useRef(0);
 
   const [telegrams, setTelegrams] = useState<Telegram[]>([]);
-  /** Full buffer, including the pause backlog. Not frozen by auto-pause. */
-  const [ingested, setIngested] = useState<Telegram[]>([]);
+  /** Mirrors `telegrams` for prepends that must not wait on the next render. */
+  const telegramsRef = useRef<Telegram[]>([]);
+  /**
+   * Oldest published rows the buffer has evicted since the last publish, while
+   * paused. Applied as a tail drop on the next reveal so the list stays the
+   * buffer minus the still-hidden newest entries.
+   */
+  const pendingDropRef = useRef(0);
+  /**
+   * A history merge or resize called `publish` while paused. The backlog
+   * prepend no longer describes the buffer, so the next reveal or resume
+   * copies the snapshot once.
+   */
+  const structuralWhilePausedRef = useRef(false);
   const [pausedCount, setPausedCount] = useState(0);
+  /**
+   * Newest-first pause backlog. One array for the life of the hook: arrivals
+   * unshift a single telegram, reveals drop the tail. Never a snapshot copy.
+   */
+  const pausedBacklogRef = useRef<Telegram[]>([]);
   /** Mirrors `pausedCount` for synchronous reads (addLive / revealPaused). */
   const pausedCountRef = useRef(0);
   const [activeLoads, setActiveLoads] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  /**
+   * Sets the hidden-count and trims the backlog tail to match. Does not read
+   * the buffer snapshot — callers that received a new telegram unshift it first.
+   */
   const updatePausedCount = useCallback((next: number) => {
-    pausedCountRef.current = next;
-    setPausedCount(next);
+    const n = Math.max(0, next);
+    pausedCountRef.current = n;
+    const list = pausedBacklogRef.current;
+    if (n <= 0) list.length = 0;
+    else if (list.length > n) list.length = n;
+    setPausedCount(n);
   }, []);
 
-  /** Publishes the buffer. The list snapshot stays frozen while paused; ingested does not. */
-  const publish = useCallback(() => {
-    const next = bufferRef.current!.snapshot.map(e => e.telegram).reverse();
-    setIngested(next);
-    if (pausedRef.current) return;
+  const commitTelegrams = useCallback((next: Telegram[]) => {
+    telegramsRef.current = next;
     setTelegrams(next);
   }, []);
 
   /**
-   * Publishes the buffer minus its newest `hidden` entries (the still-paused
-   * backlog). Used for the metered reveal while the snapshot stays frozen.
+   * Full newest-first copy of the buffer, minus its newest `hidden` entries.
+   * History loads, resizes, and a pause that merged other rows use this.
+   * Live appends and pause portions do not.
    */
-  const publishWithHidden = useCallback((hidden: number) => {
+  const publishFromBuffer = useCallback((hidden: number) => {
     const snap = bufferRef.current!.snapshot;
     const visible = Math.max(0, snap.length - Math.max(0, hidden));
-    setTelegrams(snap.slice(0, visible).map(e => e.telegram).reverse());
-  }, []);
+    pendingDropRef.current = 0;
+    commitTelegrams(snap.slice(0, visible).map(e => e.telegram).reverse());
+  }, [commitTelegrams]);
+
+  /**
+   * Prepends `head` (newest first) onto the published list and drops `drop`
+   * oldest rows. No-op when both are empty, so a resume after the last
+   * portion does not publish the buffer again.
+   */
+  const publishPrepend = useCallback((head: readonly Telegram[], drop: number) => {
+    if (head.length === 0 && drop <= 0) return;
+    const prev = telegramsRef.current;
+    const removed = Math.min(Math.max(0, drop), prev.length);
+    const keep = prev.length - removed;
+    const next = head.length === 0
+      ? prev.slice(0, keep)
+      : removed === 0
+        ? head.concat(prev)
+        : head.concat(prev.slice(0, keep));
+    pendingDropRef.current = 0;
+    commitTelegrams(tagListEdge(next, prev, 0, head.length, keep));
+  }, [commitTelegrams]);
+
+  /** Publishes the buffer as a newest-first snapshot unless frozen by pause. */
+  const publish = useCallback(() => {
+    if (pausedRef.current) {
+      structuralWhilePausedRef.current = true;
+      return;
+    }
+    publishFromBuffer(0);
+  }, [publishFromBuffer]);
 
   const trackRemoved = useCallback((removed: TelegramEntry[]) => {
     for (const e of removed) idsRef.current.delete(e.id);
@@ -391,6 +464,72 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     [runLoad, mergeIntoBuffer, publish, fillGaps],
   );
 
+  /**
+   * Pages oldest-first from `startMs` toward now (or the existing buffer's
+   * oldest edge). Merges each chunk and marks coverage as it goes.
+   */
+  const fillForwardFrom = useCallback(
+    (startMs: number) =>
+      runLoad(async () => {
+        const gen = loadGenerationRef.current;
+        const now = Date.now();
+        // Cap the forward fill at the prior buffer edge so we only close the
+        // older hole; when the buffer is empty, fill up to now.
+        const connectTs = bufferRef.current!.oldestTs;
+        const endMs = connectTs != null ? Math.min(connectTs, now) : now;
+        if (startMs > endMs) return;
+
+        const cached = await cacheRef.current!.loadRange(startMs, endMs).catch(() => []);
+        if (loadGenerationRef.current !== gen) return;
+        if (cached.length > 0 && mergeIntoBuffer(cached)) publish();
+
+        let cursor = startMs;
+        let fetched = 0;
+        while (cursor <= endMs && fetched < maxSize) {
+          if (loadGenerationRef.current !== gen) return;
+
+          const limit = Math.min(HISTORY_CHUNK_SIZE, maxSize - fetched);
+          const { entries, limitReached } = await fetchRange(cursor, endMs, limit, 'forward');
+          if (loadGenerationRef.current !== gen) return;
+          if (entries.length === 0) {
+            coverageRef.current!.addCovered(cursor, endMs);
+            break;
+          }
+          // Ascending response: first = oldest, last = newest in the chunk.
+          if (mergeIntoBuffer(entries)) publish();
+          pendingStoreCountRef.current++;
+          const stored = await cacheRef.current!.store(entries).then(
+            () => { pendingStoreCountRef.current--; return true; },
+            () => { pendingStoreCountRef.current--; return false; },
+          );
+          fetched += entries.length;
+          const newestInChunk = entries[entries.length - 1].ts;
+          const oldestInChunk = entries[0].ts;
+          if (stored) coverageRef.current!.addCovered(oldestInChunk, newestInChunk);
+          if (!limitReached || newestInChunk >= endMs) {
+            if (stored) coverageRef.current!.addCovered(cursor, endMs);
+            break;
+          }
+          cursor = newestInChunk > cursor ? newestInChunk : cursor + 1;
+        }
+        saveCoverage();
+      }),
+    [runLoad, mergeIntoBuffer, publish, maxSize, saveCoverage],
+  );
+
+  /** Newest-first fill covering `[endMs, now]` (backward toward older history). */
+  const fillBackwardTo = useCallback(
+    (endMs: number) => {
+      const now = Date.now();
+      const start = Math.min(endMs, now);
+      const end = Math.max(endMs, now);
+      // When the user picks a past instant as the newest bound, page that
+      // window newest-first so the buffer reaches back to it.
+      return loadRange(start, end);
+    },
+    [loadRange],
+  );
+
   // ── Startup: restore cache + coverage, then fill gaps up to now ─────────────
   useEffect(() => {
     // When restore is disabled the view starts empty; only live telegrams and
@@ -498,7 +637,8 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
       const entry = toEntry(t);
       // A gap fetch racing the live stream may already have delivered this row.
       if (idsRef.current.has(entry.id)) return;
-      trackRemoved(bufferRef.current!.add(entry));
+      const removed = bufferRef.current!.add(entry);
+      trackRemoved(removed);
       idsRef.current.add(entry.id);
       coverageRef.current!.extendLive(entry.ts);
       pendingRef.current.push(entry);
@@ -511,10 +651,24 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
           () => { pendingStoreCountRef.current--; },
         );
       }
-      if (pausedRef.current) updatePausedCount(pausedCountRef.current + 1);
-      publish();
+      if (pausedRef.current) {
+        if (!structuralWhilePausedRef.current) {
+          const room = telegramsRef.current.length - pendingDropRef.current;
+          pendingDropRef.current += Math.min(removed.length, Math.max(0, room));
+        }
+        const list = pausedBacklogRef.current;
+        list.unshift(entry.telegram);
+        const cap = bufferRef.current!.length;
+        if (list.length > cap) list.length = cap;
+        updatePausedCount(pausedCountRef.current + 1);
+      } else {
+        const head = telegramsRef.current[0];
+        const inOrder = head === undefined || entry.ts >= telegramTs(head);
+        if (inOrder) publishPrepend([entry.telegram], removed.length);
+        else publish();
+      }
     },
-    [trackRemoved, publish, saveCoverage, updatePausedCount],
+    [trackRemoved, publish, publishPrepend, saveCoverage, updatePausedCount],
   );
 
   const setConnected = useCallback(
@@ -543,11 +697,24 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     (paused: boolean) => {
       if (pausedRef.current === paused) return;
       pausedRef.current = paused;
+      if (paused) {
+        structuralWhilePausedRef.current = false;
+        pendingDropRef.current = 0;
+        updatePausedCount(0);
+        return;
+      }
+      const diverged = structuralWhilePausedRef.current;
+      const head = pausedBacklogRef.current.slice();
+      const drop = pendingDropRef.current;
+      structuralWhilePausedRef.current = false;
+      pendingDropRef.current = 0;
       updatePausedCount(0);
-      // Resuming reveals everything ingested while frozen.
-      if (!paused) publish();
+      // The last portion already published the full buffer. Copying it again
+      // is the stall at the end of a metered flush.
+      if (diverged) publishFromBuffer(0);
+      else publishPrepend(head, drop);
     },
-    [publish, updatePausedCount],
+    [publishFromBuffer, publishPrepend, updatePausedCount],
   );
 
   const revealPaused = useCallback(
@@ -555,11 +722,21 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
       const backlog = pausedCountRef.current;
       if (!pausedRef.current || n <= 0 || backlog <= 0) return backlog;
       const hidden = Math.max(0, backlog - Math.floor(n));
+      if (structuralWhilePausedRef.current) {
+        updatePausedCount(hidden);
+        publishFromBuffer(hidden);
+        return hidden;
+      }
+      const list = pausedBacklogRef.current;
+      const fromList = Math.max(0, list.length - hidden);
+      const revealed = fromList === 0 ? [] : list.slice(list.length - fromList);
+      const drop = pendingDropRef.current;
+      pendingDropRef.current = 0;
       updatePausedCount(hidden);
-      publishWithHidden(hidden);
+      publishPrepend(revealed, drop);
       return hidden;
     },
-    [publishWithHidden, updatePausedCount],
+    [publishFromBuffer, publishPrepend, updatePausedCount],
   );
 
   const clear = useCallback(async () => {
@@ -573,11 +750,38 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     // Drop the pause-backlog counter too — cleared telegrams must not keep the
     // jump-to-live pill alive with a count that can never appear in the list.
     updatePausedCount(0);
+    telegramsRef.current = [];
+    pendingDropRef.current = 0;
+    structuralWhilePausedRef.current = false;
     setTelegrams([]);
-    setIngested([]);
     await cacheRef.current!.clear().catch(() => {});
   }, [trackRemoved, saveCoverage, updatePausedCount]);
 
+  // Appended in place. `pausedCount` is the render signal — copying this array
+  // into React state on every telegram is what made the newer pill stall.
+  // eslint-disable-next-line react-hooks/refs
+  const pausedTelegrams = pausedBacklogRef.current;
+
+  // Full buffer for GA read phase. While playing this is the published list.
+  // While paused it is the in-place backlog plus that list, allocated only when
+  // one of those two changes — not a second snapshot on every live telegram.
+  /* eslint-disable react-hooks/refs -- backlog is mutated in place; pausedCount is the render signal */
+  const ingested = useMemo(() => {
+    if (pausedCount <= 0) return telegrams;
+    const backlog = pausedBacklogRef.current;
+    return backlog.length === 0 ? telegrams : backlog.concat(telegrams);
+  }, [pausedCount, telegrams]);
+  /* eslint-enable react-hooks/refs */
+
+  // Published list is newest-first; buffer bounds follow that order.
+  const oldestTs = telegrams.length > 0
+    ? telegramTs(telegrams[telegrams.length - 1])
+    : null;
+  const newestTs = telegrams.length > 0
+    ? telegramTs(telegrams[0])
+    : null;
+
+  /* eslint-disable react-hooks/refs -- pausedTelegrams is the stable backlog above */
   return {
     telegrams,
     ingested,
@@ -585,10 +789,16 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     setConnected,
     setPaused,
     pausedCount,
+    pausedTelegrams,
     revealPaused,
     loadRange,
+    fillForwardFrom,
+    fillBackwardTo,
+    oldestTs,
+    newestTs,
     isLoading: activeLoads > 0,
     loadError,
     clear,
   };
+  /* eslint-enable react-hooks/refs */
 }

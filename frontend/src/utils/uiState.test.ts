@@ -18,6 +18,7 @@ test('round-trip save/load works correctly', () => {
       open: true,
       enabled: true,
       patterns: { source: { top: '1.1.1', bottom: '' } },
+      columnEnabled: { time: true, delta: true, source: false, target: true, type: true, dpt: true, value: true },
     },
     listFollow: false,
     listAnchorKey: 'some-key',
@@ -29,11 +30,51 @@ test('round-trip save/load works correctly', () => {
     lastSeenLive: false,
     lastSeenSearch: 'lastseen',
     filtersEnabled: false,
+    markedKeys: ['k-1'],
+    mouseSelectedKeys: ['k-1'],
+    hiddenKeys: ['k-hide'],
+    markColorIndices: { 'k-1': 2 },
+    flaggedKeys: ['flag-a'],
+    contextForAllMatches: false,
+    individualContextWindows: { 'flag-a': { beforeMs: 1000, afterMs: 2000, enabled: true } },
   };
 
   saveUiState(state);
   const loaded = loadUiState();
   expect(loaded).toEqual(state);
+});
+
+test('sanitize keeps marked and mouse flags and drops goto/auto/context', () => {
+  localStorage.setItem(
+    UI_STORAGE_KEY,
+    JSON.stringify({
+      v: 1,
+      markReasons: {
+        a: ['manual', 'goto', 'context', 'auto', 'hidden', 'nope'],
+        b: ['mouse'],
+      },
+      markColorIndices: { a: 1, bad: 99 },
+      flaggedKeys: ['x', 'x', 3, ''],
+      contextForAllMatches: false,
+      individualContextWindows: {
+        ok: { beforeMs: 1500, afterMs: 0 },
+        legacy: { beforeSec: 1, afterSec: 2 },
+        bad: { beforeMs: -1, afterMs: 2 },
+        nope: { beforeMs: '1', afterMs: 2 },
+      },
+    }),
+  );
+  const loaded = loadUiState();
+  expect(loaded?.markedKeys).toEqual(['a']);
+  expect(loaded?.mouseSelectedKeys).toEqual(['b']);
+  expect(loaded?.hiddenKeys).toEqual(['a']);
+  expect(loaded?.markColorIndices).toEqual({ a: 1 });
+  expect(loaded?.flaggedKeys).toEqual(['x']);
+  expect(loaded?.contextForAllMatches).toBe(false);
+  expect(loaded?.individualContextWindows).toEqual({
+    ok: { beforeMs: 1500, afterMs: 0, enabled: true },
+    legacy: { beforeMs: 1000, afterMs: 2000, enabled: true },
+  });
 });
 
 test('returns null when storage is empty', () => {
@@ -79,6 +120,7 @@ test('sanitize drops invalid fields and fills defaults', () => {
       open: false,
       enabled: true,
       patterns: {},
+      columnEnabled: DEFAULT_UI_STATE.quickFilter.columnEnabled,
     },
     listFollow: true,
     zoomRange: null,
@@ -100,4 +142,25 @@ test('drops pre-#309 single-string pattern cells instead of guessing top/bottom'
 
   const loaded = loadUiState();
   expect(loaded?.quickFilter.patterns).toEqual({ target: { top: '1/2/3', bottom: 'kitchen' } });
+  expect(loaded?.quickFilter.columnEnabled).toEqual(DEFAULT_UI_STATE.quickFilter.columnEnabled);
+});
+
+test('sanitize keeps stored column filter on/off and fills missing columns', () => {
+  localStorage.setItem(
+    UI_STORAGE_KEY,
+    JSON.stringify({
+      v: 1,
+      quickFilter: {
+        open: true,
+        enabled: true,
+        patterns: {},
+        columnEnabled: { target: false, bogus: 'nope' },
+      },
+    }),
+  );
+  const loaded = loadUiState();
+  expect(loaded?.quickFilter.columnEnabled).toEqual({
+    ...DEFAULT_UI_STATE.quickFilter.columnEnabled,
+    target: false,
+  });
 });

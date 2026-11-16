@@ -173,7 +173,10 @@ test('comm object header shows the DPT-family mismatch and the newest value, fra
 
   const valueEl = await screen.findByText('on');
   // Framed border lives on the wrapper around BusValueText (KO sending-GA highlight).
-  expect(valueEl.parentElement?.style.border).toContain('var(--accent-primary)');
+  // The value text sits inside the toggle, so walk up to the element that carries it.
+  let framed: HTMLElement | null = valueEl;
+  while (framed && !framed.style.border) framed = framed.parentElement;
+  expect(framed?.style.border).toContain('var(--accent-primary)');
 });
 
 test('visualizing a single GA row inside the expanded comm-object table propagates through (#307)', async () => {

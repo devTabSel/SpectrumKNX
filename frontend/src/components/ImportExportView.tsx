@@ -4,6 +4,7 @@ import {
   XCircle, Ban, FileArchive,
 } from 'lucide-react';
 import { apiUrl } from '../utils/basePath';
+import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 import { defaultCsvDelimiter } from '../utils/telegramCsv';
 
 // Mirrors ImportJob.to_dict() in backend/telegram_import.py plus the read_only flag.
@@ -317,12 +318,22 @@ export function ImportExportView() {
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.75rem' }}>
               <Field label="Start time">
-                <input type="datetime-local" value={startTime} onChange={(e) => setStartTime(e.target.value)}
-                  className="glass-input" style={{ padding: '0.5rem', width: '100%' }} />
+                <ThemedDatetimePicker
+                  value={startTime}
+                  onChange={setStartTime}
+                  aria-label="Start time"
+                  className="glass-input"
+                  style={{ padding: '0.5rem', width: '100%' }}
+                />
               </Field>
               <Field label="End time">
-                <input type="datetime-local" value={endTime} onChange={(e) => setEndTime(e.target.value)}
-                  className="glass-input" style={{ padding: '0.5rem', width: '100%' }} />
+                <ThemedDatetimePicker
+                  value={endTime}
+                  onChange={setEndTime}
+                  aria-label="End time"
+                  className="glass-input"
+                  style={{ padding: '0.5rem', width: '100%' }}
+                />
               </Field>
               <Field label="Source (PA)">
                 <input value={sourceAddress} onChange={(e) => setSourceAddress(e.target.value)}

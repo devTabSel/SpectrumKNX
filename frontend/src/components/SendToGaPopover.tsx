@@ -84,7 +84,7 @@ export function SendToGaHost({
 }: {
   children: React.ReactNode;
   latestTelegram?: Telegram | null;
-  onGotoTelegram?: (telegram: Telegram) => void;
+  onGotoTelegram?: (telegram: Telegram, mods?: { additive?: boolean; range?: boolean }) => void;
   captureListScroll?: () => ListScrollSnapshot | null;
   restoreListScroll?: (snap: ListScrollSnapshot) => void | Promise<void>;
   linkedStatus?: LinkedRowStatus | null;
@@ -170,7 +170,7 @@ interface Props {
   /** Inline style for the trigger button. */
   buttonStyle?: React.CSSProperties;
   /** Jump the telegram list to the last-seen telegram shown in the popover. */
-  onGotoTelegram?: (telegram: Telegram) => void;
+  onGotoTelegram?: (telegram: Telegram, mods?: { additive?: boolean; range?: boolean }) => void;
   /** Live bus feed — ends a Read wait when a Response arrives. */
   latestTelegram?: Telegram | null;
   /** Host-owned panel (no trigger); survives virtualized row unmount. */
@@ -1230,6 +1230,7 @@ function SendToGaPopoverPanel({
       {open && pos && createPortal(
         <div
           ref={cardRef}
+          data-send-popover-panel=""
           onMouseDown={e => e.stopPropagation()}
           onClick={e => e.stopPropagation()}
           style={{
@@ -1249,25 +1250,33 @@ function SendToGaPopoverPanel({
             onPointerUp={onDragHandlePointerUp}
             onPointerCancel={onDragHandlePointerUp}
             style={{
-              display: 'flex', alignItems: 'baseline', gap: '0.4rem', flexWrap: 'wrap',
+              display: 'flex', flexDirection: 'column', gap: '0.35rem',
               cursor: 'grab', touchAction: 'none', userSelect: 'none',
             }}
             title="Drag to move"
           >
-            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.82rem', fontWeight: 600, color: 'var(--accent-primary)' }}>{address}</span>
-            {name && <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>{name}</span>}
-            {(listScrollAway || posAway) && (
-              <button
-                type="button"
-                className="quick-filter-bar-toggle"
-                title="Restore list position"
-                aria-label="Restore list position"
-                onClick={restoreOpenScroll}
-                style={{ flexShrink: 0, margin: 0, cursor: 'pointer' }}
-              >
-                <ChevronLeft size={13} />
-              </button>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+              <Send size={16} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} aria-hidden />
+              <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)', flex: 1, minWidth: 0 }}>
+                Send
+              </span>
+              {(listScrollAway || posAway) && (
+                <button
+                  type="button"
+                  className="quick-filter-bar-toggle"
+                  title="Restore list and popover position"
+                  aria-label="Restore list and popover position"
+                  onClick={restoreOpenScroll}
+                  style={{ flexShrink: 0, margin: 0, cursor: 'pointer' }}
+                >
+                  <ChevronLeft size={13} />
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: '0.4rem', flexWrap: 'wrap' }}>
+              <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: '0.82rem', fontWeight: 600, color: 'var(--accent-primary)' }}>{address}</span>
+              {name && <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)' }}>{name}</span>}
+            </div>
           </div>
 
           {lastHasValue && (
@@ -1285,7 +1294,10 @@ function SendToGaPopoverPanel({
               <TelegramWhenJump
                 timestamp={last.timestamp}
                 eventType={telegramEventType(last)}
-                onJump={onGotoTelegram ? () => { onGotoTelegram(last); } : undefined}
+                onJump={onGotoTelegram ? mods => {
+                  if (mods && (mods.additive || mods.range)) onGotoTelegram(last, mods);
+                  else onGotoTelegram(last);
+                } : undefined}
               />
             </div>
           )}
@@ -1467,8 +1479,10 @@ function SendToGaPopoverPanel({
                 onClearLinked?.(linkedStatus.rowId);
               }
             }}
-            onJump={() => {
-              if (statusTg && onGotoTelegram) onGotoTelegram(statusTg);
+            onJump={mods => {
+              if (!statusTg || !onGotoTelegram) return;
+              if (mods && (mods.additive || mods.range)) onGotoTelegram(statusTg, mods);
+              else onGotoTelegram(statusTg);
             }}
           />
         </div>,

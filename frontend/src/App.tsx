@@ -20,12 +20,13 @@ import {
   DEFAULT_UI_STATE,
 } from './utils/uiState';
 import { DeviceStatusOverlay } from './components/DeviceStatusOverlay';
+import { BufferStatusPill } from './components/BufferStatusPill';
 import { TelegramTable, type SortConfig, type SortKey, type ListGotoRequest } from './components/TelegramTable';
-import { expandWithDeltaContext } from './utils/deltaContextExpansion';
-import { activeQuickFilter } from './utils/quickFilter';
 import { anchorKey } from './utils/anchorKey';
-import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from './utils/sortConfig';
-import { LayoutDashboard, History, Settings, Play, Pause, Download, Trash2, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
+import type { MarkColorIndexMap } from './utils/markColors';
+import { readSortConfigPref, writeSortConfigPref, toggleSortLevel } from './utils/sortConfig';
+import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTelegramView';
+import { LayoutDashboard, History, Settings, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
 import { useTheme } from './hooks/useTheme';
@@ -71,13 +72,10 @@ import { useAuthStatus, loginRequired } from './hooks/useAuthStatus';
 import { useUpdateCheck } from './hooks/useUpdateCheck';
 import {
   DEFAULT_FILTERS,
-  countFilterOptions,
-  effectiveDeltaContext,
   hasActiveFilters,
   enabledFilters,
   pruneDisabled,
   countSelections,
-  matchesTelegram,
   type ActiveFilters,
   type FilterOptions,
 } from './types/filters';
@@ -90,7 +88,7 @@ const DISMISSED_UPDATE_PREF = 'dismissed_update_version';
 
 const EMPTY_FILTER_OPTIONS: FilterOptions = { sources: [], targets: [], types: [], dpts: [], ga_group_names: {}, pa_line_names: {} };
 
-const NavDropdown = ({ activeTab, isSettingsOpen, isDatabaseOpen, onChange }: { activeTab: string, isSettingsOpen: boolean, isDatabaseOpen: boolean, onChange: (id: string) => void }) => {
+const NavDropdown = ({ activeTab, isSettingsOpen, isDatabaseOpen, onChange }: { activeTab: string; isSettingsOpen: boolean; isDatabaseOpen: boolean; onChange: (id: string) => void }) => {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -229,8 +227,6 @@ const PanelSwitch = ({ active, onChange }: { active: MainPanel; onChange: (p: Ma
 );
 
 // Stable identity so passing "no flags" doesn't churn memo deps (#319).
-const EMPTY_KEY_SET: ReadonlySet<string> = new Set();
-
 /**
  * Settings-screen timestamp: locale date + time. ETS records its own
  * last-modified string, which is not always parseable — show it verbatim
@@ -256,6 +252,7 @@ function App() {
   const [quickFilterOpen, setQuickFilterOpen] = useState(initialUiState.quickFilter.open);
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(initialUiState.quickFilter.enabled);
   const [quickPatterns, setQuickPatterns] = useState(initialUiState.quickFilter.patterns);
+  const [quickColumnEnabled, setQuickColumnEnabled] = useState(initialUiState.quickFilter.columnEnabled);
   const [listFollow, setListFollow] = useState(initialUiState.listFollow);
   const [listAnchorKey, setListAnchorKey] = useState<string | null>(initialUiState.listAnchorKey);
   const [infoBarOpen, setInfoBarOpen] = useState(initialUiState.infoBarOpen);
@@ -268,6 +265,9 @@ function App() {
   // Master enable/disable of the filter set (#370): when off the list shows all
   // telegrams while activeFilters is preserved.
   const [filtersEnabled, setFiltersEnabled] = useState(initialUiState.filtersEnabled);
+  // Bumped when the main filter set changes the telegram list — TT pins + flashes.
+  const [ttViewChangeToken, setTtViewChangeToken] = useState(0);
+  const noteTtViewChange = useCallback(() => setTtViewChangeToken(n => n + 1), []);
   const [activeTab, setActiveTab] = useState<'live' | 'history' | 'import'>(
     initialView ? 'history' : initialWorkspace?.tab ?? 'live',
   );
@@ -367,8 +367,13 @@ function App() {
     setConnected: setCacheConnected,
     setPaused: setCachePaused,
     pausedCount,
+    pausedTelegrams,
     revealPaused,
     loadRange,
+    fillForwardFrom,
+    fillBackwardTo,
+    oldestTs: bufferOldestTs,
+    newestTs: bufferNewestTs,
     isLoading: isHistoryLoading,
     loadError: historyLoadError,
     clear: clearTelegrams,
@@ -392,11 +397,17 @@ function App() {
 
   // The Visualization is independent of the main filter (#361): editing the
   // filter changes only the telegram list, never the plotted target selection.
+  const handleFiltersEnabledChange = useCallback((enabled: boolean) => {
+    setFiltersEnabled(enabled);
+    noteTtViewChange();
+  }, [noteTtViewChange]);
+
   const handleFiltersChange = useCallback((newFilters: ActiveFilters | ((prev: ActiveFilters) => ActiveFilters)) => {
     // Every change passes through here, so a removed entry also loses its
     // switched-off marker (#437) and cannot come back switched off later.
     setActiveFilters(prev => pruneDisabled(typeof newFilters === 'function' ? newFilters(prev) : newFilters));
-  }, []);
+    noteTtViewChange();
+  }, [noteTtViewChange]);
   // The filters in effect: selections minus the ones switched off (#437).
   const appliedFilters = useMemo(() => enabledFilters(activeFilters), [activeFilters]);
 
@@ -596,44 +607,6 @@ function App() {
     return () => window.removeEventListener('popstate', onPopState);
   }, [initialView]);
 
-  // ── Persist UI Session State (#341) ──────────────────────────────────────────
-  useEffect(() => {
-    const handle = setTimeout(() => {
-      saveUiState({
-        quickFilter: {
-          open: quickFilterOpen,
-          enabled: quickFilterEnabled,
-          patterns: quickPatterns,
-        },
-        listFollow,
-        listAnchorKey,
-        infoBarOpen,
-        zoomRange,
-        statsSearch,
-        buildingSearch,
-        lastSeenLimit,
-        lastSeenLive,
-        lastSeenSearch,
-        filtersEnabled,
-      });
-    }, 500);
-    return () => clearTimeout(handle);
-  }, [
-    quickFilterOpen,
-    quickFilterEnabled,
-    quickPatterns,
-    listFollow,
-    listAnchorKey,
-    infoBarOpen,
-    zoomRange,
-    statsSearch,
-    buildingSearch,
-    lastSeenLimit,
-    lastSeenLive,
-    lastSeenSearch,
-    filtersEnabled,
-  ]);
-
   // ── Rate Calculation Loop ───────────────────────────────────────────────────
   useEffect(() => {
     const interval = setInterval(() => {
@@ -653,9 +626,12 @@ function App() {
   // Playing → Pause latches as manual. While paused, the Pause icon toggles
   // auto ↔ manual (stays frozen). Manual→Auto keeps the backlog in the pause
   // buffer; the table fills the fill-spacer with its oldest row and feeds the
-  // rest in as the user scrolls toward the live edge. Empty buffer ("No data
-  // available") locks Paused manually. Resume via jump-to-live, or auto
-  // edge-flush / follow-while-auto.
+  // rest in as the user scrolls toward the live edge. An empty buffer disables
+  // the pause toggle; a plain clear leaves play/pause as it was, Ctrl-click
+  // switches to automatic pause. Resume via the newer pill while
+  // auto-paused, Ctrl-click on that pill while manually paused, or an auto
+  // edge-flush / follow-while-auto. A plain pill click keeps manual pause and
+  // publishes the backlog so the view can land on the newest telegram.
   const bufferEmpty = liveTelegrams.length === 0;
   const togglePause = () => {
     if (bufferEmpty) return;
@@ -691,18 +667,20 @@ function App() {
   }, [pauseMode, setCachePaused]);
 
   // Metered flush: reveal the oldest `n` backlog rows while staying auto-paused,
-  // so the table can scroll them in line by line. Once the backlog is gone the
-  // mode returns to playing (same as a full flush). Manual pause never reveals.
+  // so the table can scroll them in line by line. Once that backlog is gone the
+  // mode returns to playing (same as a full flush). A plain newer-pill click
+  // while manually paused reveals the whole backlog and stays paused.
   const revealPauseBuffer = useCallback((n: number) => {
-    if (pauseMode !== 'auto') return;
+    if (pauseMode === 'playing') return;
     const remaining = revealPaused(n);
-    if (remaining <= 0) {
+    if (pauseMode === 'auto' && remaining <= 0) {
       setPauseMode('playing');
       setCachePaused(false);
     }
   }, [pauseMode, revealPaused, setCachePaused]);
 
-  // Newer-pill: always Play + follow + flush (including manual pause latch).
+  // Newer-pill resume. The table only calls this for auto-pause and for a
+  // Ctrl-click during manual pause; a plain click stays latched.
   const jumpToLiveResume = useCallback(() => {
     setPauseMode('playing');
     setCachePaused(false);
@@ -723,23 +701,96 @@ function App() {
   const toggleColumn = (col: string) =>
     setVisibleColumns(prev => ({ ...prev, [col]: !prev[col] }));
 
-  // ── Telegram list marks (#310) ──────────────────────────────────────────────
-  // Lifted above the conditionally-rendered panels so marked rows survive
-  // main-panel navigation. Keyed by the table's anchorKey identity.
-  const [markedTelegramKeys, setMarkedTelegramKeys] = useState<string[]>([]);
-  const [lastMarkedTelegramKey, setLastMarkedTelegramKey] = useState<string | null>(null);
-  // Write-to-bus "go to": center this telegram in the list. The table marks it
-  // only when the current filters still show that exact telegram.
+  // ── Telegram list flags (#310) ─────────────────────────────────────────────
+  // Lifted above the conditionally-rendered panels so they survive main-panel
+  // navigation. Marked and mouse selection restore from the ui session. Goto
+  // and last-selected are live only.
+  const [telegramMarkedKeys, setTelegramMarkedKeys] = useState<string[]>(
+    () => initialUiState.markedKeys,
+  );
+  const [telegramMouseSelectedKeys, setTelegramMouseSelectedKeys] = useState<string[]>(
+    () => initialUiState.mouseSelectedKeys,
+  );
+  const [telegramHiddenKeys, setTelegramHiddenKeys] = useState<string[]>(
+    () => initialUiState.hiddenKeys,
+  );
+  const [telegramMarkColorIndices, setTelegramMarkColorIndices] = useState<MarkColorIndexMap>(
+    () => initialUiState.markColorIndices,
+  );
+  const [lastSelectedTelegramKey, setLastSelectedTelegramKey] = useState<string | null>(null);
+  // Write-to-bus "go to": center this telegram in the list. The table selects
+  // it when that exact telegram is in the buffer.
   const listGotoSeq = useRef(0);
   const [listGoto, setListGoto] = useState<ListGotoRequest | null>(null);
 
   // ── Per-message Time-Delta-Context flags (#319) ─────────────────────────────
-  // Same lifting rationale as marks; each flagged telegram always anchors a
-  // context window around itself regardless of the active filters.
-  const [flaggedTelegramKeys, setFlaggedTelegramKeys] = useState<string[]>([]);
+  // Same lifting rationale as marks. A flagged button anchors a window; the
+  // row itself stays visible only when it matches, is pinned, or is context.
+  const [flaggedTelegramKeys, setFlaggedTelegramKeys] = useState<string[]>(
+    () => initialUiState.flaggedKeys,
+  );
+  const [individualContextWindows, setIndividualContextWindows] = useState(
+    () => initialUiState.individualContextWindows,
+  );
   // Global "all" state: every filter match anchors a window. Off, only the
   // flagged telegrams do.
-  const [contextForAllMatches, setContextForAllMatches] = useState(true);
+  const [contextForAllMatches, setContextForAllMatches] = useState(
+    () => initialUiState.contextForAllMatches,
+  );
+
+  // ── Persist UI Session State (#341) ──────────────────────────────────────────
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      saveUiState({
+        quickFilter: {
+          open: quickFilterOpen,
+          enabled: quickFilterEnabled,
+          patterns: quickPatterns,
+          columnEnabled: quickColumnEnabled,
+        },
+        listFollow,
+        listAnchorKey,
+        infoBarOpen,
+        zoomRange,
+        statsSearch,
+        buildingSearch,
+        lastSeenLimit,
+        lastSeenLive,
+        lastSeenSearch,
+        filtersEnabled,
+        markedKeys: telegramMarkedKeys,
+        mouseSelectedKeys: telegramMouseSelectedKeys,
+        hiddenKeys: telegramHiddenKeys,
+        markColorIndices: telegramMarkColorIndices,
+        flaggedKeys: flaggedTelegramKeys,
+        contextForAllMatches,
+        individualContextWindows,
+      });
+    }, 500);
+    return () => clearTimeout(handle);
+  }, [
+    quickFilterOpen,
+    quickFilterEnabled,
+    quickPatterns,
+    quickColumnEnabled,
+    listFollow,
+    listAnchorKey,
+    infoBarOpen,
+    zoomRange,
+    statsSearch,
+    buildingSearch,
+    lastSeenLimit,
+    lastSeenLive,
+    lastSeenSearch,
+    filtersEnabled,
+    telegramMarkedKeys,
+    telegramMouseSelectedKeys,
+    telegramHiddenKeys,
+    telegramMarkColorIndices,
+    flaggedTelegramKeys,
+    contextForAllMatches,
+    individualContextWindows,
+  ]);
 
   // ── Sorting (#311: multi-level, ctrl/cmd-click adds a level) ─────────────────
   const [sortConfig, setSortConfig] = useState<SortConfig>(readSortConfigPref);
@@ -797,9 +848,10 @@ function App() {
     setActivePanel('list');
   }, [liveTelegrams, handleListFollowChange]);
 
-  // Last value in a write row: open the telegram list and center that telegram.
-  // Marking happens in the table, and only if the telegram is not filtered out.
-  const handleGotoTelegram = useCallback((telegram: Telegram) => {
+  // Last value in a write row: open the telegram list on that telegram.
+  // Ctrl/Cmd and Shift are the same selection modifiers as a row click.
+  // The table selects it once the row is visible, and only if it is in the buffer.
+  const handleGotoTelegram = useCallback((telegram: Telegram, mods?: { additive?: boolean; range?: boolean }) => {
     handleListFollowChange(false);
     // Drop a restored anchor so mounting the list does not pin a different row
     // after this jump. The table captures a new anchor once it has centered.
@@ -807,7 +859,12 @@ function App() {
     setIsDatabaseOpen(false);
     setActivePanel('list');
     listGotoSeq.current += 1;
-    setListGoto({ id: listGotoSeq.current, telegram });
+    setListGoto({
+      id: listGotoSeq.current,
+      telegram,
+      additive: mods?.additive,
+      range: mods?.range,
+    });
   }, [handleListFollowChange]);
 
   const handleAltSend = useCallback(() => {
@@ -967,52 +1024,46 @@ function App() {
     handleFiltersChange(prev => ({ ...prev, deltaContextEnabled }));
   }, [handleFiltersChange]);
 
-  const sortedLiveTelegrams = useMemo(
-    () => sortTelegrams(liveTelegrams, sortConfig),
-    [liveTelegrams, sortConfig]
-  );
-
   // ── In-memory filtering (live view) ────────────────────────────────────────
-  const deltaExpandedLive = useMemo(() => {
-    const f = appliedFilters;
-    // Master toggle off (#370): show everything, keep the filter set intact.
-    const noFilter =
-      !filtersEnabled ||
-      (f.sources.length === 0 &&
-      f.targets.length === 0 &&
-      f.types.length === 0 &&
-      f.directions.length === 0 &&
-      f.dpts.length === 0);
+  const visibleOpts = useMemo(() => ({
+    filters: appliedFilters,
+    filtersEnabled,
+    quickFilterOpen,
+    quickFilterEnabled,
+    quickPatterns,
+    quickColumnEnabled,
+    flaggedKeys: flaggedTelegramKeys,
+    contextForAllMatches,
+    individualContextWindows,
+    markedKeys: telegramMarkedKeys,
+    mouseSelectedKeys: telegramMouseSelectedKeys,
+    lastSelectedKey: lastSelectedTelegramKey,
+  }), [
+    appliedFilters, filtersEnabled, quickFilterOpen, quickFilterEnabled, quickPatterns, quickColumnEnabled,
+    flaggedTelegramKeys, contextForAllMatches, individualContextWindows, telegramMarkedKeys, telegramMouseSelectedKeys,
+    lastSelectedTelegramKey,
+  ]);
 
-    // Quick-filter matches anchor the context like main-filter matches (#520).
-    const quick = activeQuickFilter(quickFilterOpen, quickFilterEnabled, quickPatterns);
-    const matches = sortedLiveTelegrams.map(t =>
-      (noFilter || matchesTelegram(t, f)) && (!quick || quick(t))
-    );
-
-    const { before: deltaBeforeMs, after: deltaAfterMs } = effectiveDeltaContext(f);
-    // The global toggle off (#318) suppresses per-message flags too, per its
-    // "preserving all per-message flags" — inert, not cleared, while off.
-    const flags = f.deltaContextEnabled ? new Set(flaggedTelegramKeys) : EMPTY_KEY_SET;
-
-    return expandWithDeltaContext(sortedLiveTelegrams, matches, anchorKey, flags, deltaBeforeMs, deltaAfterMs, contextForAllMatches);
-  }, [sortedLiveTelegrams, appliedFilters, filtersEnabled, flaggedTelegramKeys, contextForAllMatches, quickFilterOpen, quickFilterEnabled, quickPatterns]);
-  const filteredLiveTelegrams = deltaExpandedLive.items;
+  const liveViewRef = useRef<LiveTelegramView | null>(null);
+  // The previous view has to be read while rendering: an effect would apply the
+  // prepend a frame late. deriveLiveTelegramView is idempotent for the same
+  // source, so StrictMode's second render does not edit the list twice.
+  // eslint-disable-next-line react-hooks/refs
+  const liveView = deriveLiveTelegramView(liveViewRef.current, liveTelegrams, sortConfig, visibleOpts);
+  // eslint-disable-next-line react-hooks/refs
+  liveViewRef.current = liveView;
+  const sortedLiveTelegrams = liveView.sorted;
+  const filteredLiveTelegrams = liveView.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
-  const contextTelegramKeys = deltaExpandedLive.contextKeys;
-
-  // ── Count bubbles ───────────────────────────────────────────────
-  const filterCounts = useMemo(() => countFilterOptions(sortedLiveTelegrams), [sortedLiveTelegrams]);
+  const contextTelegramKeys = liveView.contextKeys;
+  const contextTelegramParents = liveView.contextParents;
+  const filterCounts = liveView.counts;
 
   const activeFilterCount = countSelections(appliedFilters);
 
   // The filter pane and its toggle are tied to the Telegram List (#374): only
   // that panel consumes the main filter, so the pane shows only when it is active.
   const showFilterPane = activePanel === 'list' && isFilterOpen;
-
-  // The buffer holds at most `loadLimit` (newest) telegrams; once it is at
-  // capacity there is no room to load older history (#313).
-  const bufferFull = liveTelegrams.length >= loadLimit;
 
   // Inline "buffer full" marker shown next to the count in the stats pill (#284).
   const bufferLimitWarning = filteredLiveTelegrams.length >= loadLimit ? (
@@ -1080,89 +1131,84 @@ function App() {
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexShrink: 0 }}>
             {activeTab === 'live' && !isSettingsOpen && (
               <>
-                {/* Embedded Stats */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginRight: '1rem', background: 'var(--bg-subtle)', padding: '0.4rem 0.85rem', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
-                  <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-dim)' }}>
-                    Rate: <span onClick={() => setRateMode(m => m === 's' ? 'm' : m === 'm' ? 'h' : 's')} style={{ color: 'var(--accent-primary)', fontWeight: 600, cursor: 'pointer' }}>{busRate.toFixed(1)}/{rateMode}</span>
-                  </span>
-                  <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--text-dim)' }}>
-                    Buffer:
-                    {/* Buffer-related actions live with the count (#284): clear + load history */}
-                    <button
-                      className="icon-button"
-                      onClick={() => {
-                        setPauseMode('manual');
-                        setCachePaused(true);
-                        setListFollow(false);
-                        void clearTelegrams();
-                      }}
-                      title="Clear (also wipes the local telegram cache)"
-                      style={{ color: 'var(--text-dim)', padding: '0.15rem' }}
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                    <button
-                      className="icon-button"
-                      onClick={() => setIsHistoryLoaderOpen(true)}
-                      disabled={bufferFull}
-                      title={
-                        bufferFull
-                          ? `Buffer full (${loadLimit.toLocaleString()}); clear it or raise the limit to load more history`
-                          : isHistoryLoading
-                            ? 'History read in progress…'
-                            : 'Load history'
+                <BufferStatusPill
+                  oldestMs={bufferOldestTs}
+                  newestMs={bufferNewestTs}
+                  readDirection={
+                    (sortConfig.find(l => l.key === 'timestamp')?.direction
+                      ?? sortConfig[0]?.direction
+                      ?? 'desc') === 'asc'
+                      ? 'forward'
+                      : 'backward'
+                  }
+                  loadLimit={loadLimit}
+                  onLoadLimitChange={setLoadLimit}
+                  filteredCount={filteredLiveTelegrams.length}
+                  totalCount={liveTelegrams.length}
+                  filterActive={activeFilterCount > 0}
+                  onClear={({ pauseAuto }) => {
+                    setListFollow(false);
+                    if (pauseAuto) {
+                      setPauseMode('auto');
+                      setCachePaused(true);
+                    }
+                    void clearTelegrams();
+                  }}
+                  pauseTitle={pauseTitle}
+                  pauseColor={pauseColor}
+                  pauseMode={pauseMode}
+                  pauseDisabled={bufferEmpty}
+                  onTogglePause={togglePause}
+                  busRate={busRate}
+                  rateMode={rateMode}
+                  onCycleRateMode={() => setRateMode(m => (m === 's' ? 'm' : m === 'm' ? 'h' : 's'))}
+                  wsConnected={isConnected}
+                  isHistoryLoading={isHistoryLoading}
+                  historyLoadError={historyLoadError}
+                  onOldestCommit={ms => { void fillForwardFrom(ms); }}
+                  onNewestCommit={ms => { void fillBackwardTo(ms); }}
+                  onLoadFromDbOldest={() => {
+                    void (async () => {
+                      try {
+                        const res = await fetch(apiUrl('/api/database/info'));
+                        if (!res.ok) return;
+                        const info = await res.json() as { oldest_timestamp?: string | null };
+                        const raw = info.oldest_timestamp;
+                        if (!raw) return;
+                        const ms = new Date(raw).getTime();
+                        if (Number.isNaN(ms)) return;
+                        await fillForwardFrom(ms);
+                        handleListFollowChange(false);
+                        setActivePanel('list');
+                        listGotoSeq.current += 1;
+                        setListGoto({ id: listGotoSeq.current, targetMs: ms });
+                      } catch {
+                        // Status pill already surfaces historyLoadError from the cache.
                       }
-                      style={{
-                        color: isHistoryLoading ? 'var(--accent-primary)' : 'var(--text-dim)',
-                        padding: '0.15rem',
-                        opacity: bufferFull ? 0.4 : 1,
-                        cursor: bufferFull ? 'not-allowed' : 'pointer',
-                      }}
-                    >
-                      <Download size={15} />
-                    </button>
-                    {/* Pausing holds back the buffer for every panel, not just
-                        the list, so it sits with the other buffer actions (#374). */}
-                    <button
-                      className="icon-button"
-                      onClick={togglePause}
-                      title={pauseTitle}
-                      disabled={bufferEmpty}
-                      style={{
-                        color: pauseColor,
-                        padding: '0.15rem',
-                        opacity: bufferEmpty ? 0.45 : 1,
-                        cursor: bufferEmpty ? 'not-allowed' : 'pointer',
-                      }}
-                    >
-                      {pauseMode === 'playing'
-                        ? <Play size={15} fill="currentColor" />
-                        : <Pause size={15} fill="currentColor" />}
-                    </button>
-                    <span style={{ color: 'var(--text-main)', fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: '0.3rem' }}>
-                      {activeFilterCount
-                        ? <>{filteredLiveTelegrams.length}{bufferLimitWarning}<span style={{ color: 'var(--text-dim)', fontWeight: 400 }}> / {liveTelegrams.length}</span></>
-                        : <>{liveTelegrams.length}{bufferLimitWarning}</>}
-                    </span>
-                  </span>
-                  <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--text-dim)' }}>
-                    WS: <span style={{ color: isConnected ? 'var(--success)' : 'var(--error)', fontWeight: 500 }}>{isConnected ? 'Active' : 'Offline'}</span>
-                  </span>
-                  {/* Background history reads run without blocking the UI (#222) */}
-                  {isHistoryLoading && (
-                    <span style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--accent-primary)' }}>
-                      <span className="chip-spinner" /> History: loading…
-                    </span>
-                  )}
-                  {!isHistoryLoading && historyLoadError && (
-                    <span
-                      title={historyLoadError}
-                      style={{ fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--error)' }}
-                    >
-                      <AlertTriangle size={13} /> History: failed
-                    </span>
-                  )}
-                </div>
+                    })();
+                  }}
+                  onLoadFromDbNewest={() => {
+                    void (async () => {
+                      try {
+                        const res = await fetch(apiUrl('/api/database/info'));
+                        if (!res.ok) return;
+                        const info = await res.json() as { newest_timestamp?: string | null };
+                        const raw = info.newest_timestamp;
+                        if (!raw) return;
+                        const ms = new Date(raw).getTime();
+                        if (Number.isNaN(ms)) return;
+                        await fillBackwardTo(ms);
+                        handleListFollowChange(false);
+                        setActivePanel('list');
+                        listGotoSeq.current += 1;
+                        setListGoto({ id: listGotoSeq.current, targetMs: ms });
+                      } catch {
+                        // Status pill already surfaces historyLoadError from the cache.
+                      }
+                    })();
+                  }}
+                  bufferLimitWarning={bufferLimitWarning}
+                />
 
                 {/* Main-panel switch (#374): the five panels close back to the
                     list; the Building opener also clears any drilled-in device. */}
@@ -1505,7 +1551,7 @@ function App() {
                     writeEnabled={serverConfig?.status?.write_enabled}
                     onGotoTelegram={handleGotoTelegram}
                     filtersEnabled={filtersEnabled}
-                    onFiltersEnabledChange={setFiltersEnabled}
+                    onFiltersEnabledChange={handleFiltersEnabledChange}
                   />
               </ResizablePane>
 
@@ -1613,7 +1659,10 @@ function App() {
                     </div>
                     <TelegramTable
                     telegrams={filteredLiveTelegrams}
+                    forceIncludeFrom={sortedLiveTelegrams}
                     readPhaseTelegrams={ingestedTelegrams}
+                    pausedTelegrams={pausedTelegrams}
+                    filtersEnabled={filtersEnabled}
                     visibleColumns={visibleColumns}
                     sortConfig={sortConfig}
                     onSort={handleSort}
@@ -1641,6 +1690,8 @@ function App() {
                     onQuickFilterEnabledChange={setQuickFilterEnabled}
                     quickPatterns={quickPatterns}
                     onQuickPatternsChange={setQuickPatterns}
+                    quickColumnEnabled={quickColumnEnabled}
+                    onQuickColumnEnabledChange={setQuickColumnEnabled}
                     onDeltaContextChange={handleDeltaContextChange}
                     onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
                     listFollow={listFollow}
@@ -1651,17 +1702,41 @@ function App() {
                     onPauseFlush={flushPauseBuffer}
                     onPauseReveal={revealPauseBuffer}
                     onJumpToLive={jumpToLiveResume}
+                    bufferOldestMs={bufferOldestTs}
+                    bufferNewestMs={bufferNewestTs}
+                    onGotoMergeNewer={() => {
+                      setListFollow(false);
+                      if (pauseMode === 'playing') {
+                        // Latch auto-pause so subsequent live rows buffer, then
+                        // merge whatever is already waiting toward newer.
+                        setPauseMode('auto');
+                        setCachePaused(true);
+                      }
+                      // Reveal the entire pause backlog into the published list.
+                      revealPaused(Number.MAX_SAFE_INTEGER);
+                    }}
+                    onGotoFillOlder={ms => fillForwardFrom(ms)}
                     listAnchorKey={listAnchorKey}
                     onListAnchorKeyChange={setListAnchorKey}
-                    markedKeys={markedTelegramKeys}
-                    onMarkedKeysChange={setMarkedTelegramKeys}
-                    lastMarkedKey={lastMarkedTelegramKey}
-                    onLastMarkedKeyChange={setLastMarkedTelegramKey}
+                    viewChangeToken={ttViewChangeToken}
+                    markedKeys={telegramMarkedKeys}
+                    onMarkedKeysChange={setTelegramMarkedKeys}
+                    mouseSelectedKeys={telegramMouseSelectedKeys}
+                    onMouseSelectedKeysChange={setTelegramMouseSelectedKeys}
+                    hiddenKeys={telegramHiddenKeys}
+                    onHiddenKeysChange={setTelegramHiddenKeys}
+                    markColorIndices={telegramMarkColorIndices}
+                    onMarkColorIndicesChange={setTelegramMarkColorIndices}
+                    lastSelectedKey={lastSelectedTelegramKey}
+                    onLastSelectedKeyChange={setLastSelectedTelegramKey}
                     flaggedKeys={flaggedTelegramKeys}
                     onFlaggedKeysChange={setFlaggedTelegramKeys}
                     contextForAllMatches={contextForAllMatches}
                     onContextForAllMatchesChange={setContextForAllMatches}
+                    individualContextWindows={individualContextWindows}
+                    onIndividualContextWindowsChange={setIndividualContextWindows}
                     contextKeys={contextTelegramKeys}
+                    contextParents={contextTelegramParents}
                     infoBarOpen={infoBarOpen}
                     onInfoBarOpenChange={setInfoBarOpen}
                     gotoRequest={listGoto}
@@ -1686,7 +1761,8 @@ function App() {
             onVisualizationTargetsChange={setSelectedVisualizationTargets}
             initialView={initialView}
             filtersEnabled={filtersEnabled}
-            onFiltersEnabledChange={setFiltersEnabled}
+            onFiltersEnabledChange={handleFiltersEnabledChange}
+            viewChangeToken={ttViewChangeToken}
           />
         )}
       </main>

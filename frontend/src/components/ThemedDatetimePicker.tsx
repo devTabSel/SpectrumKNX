@@ -8,7 +8,6 @@ import {
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type Ref,
-  type WheelEvent as ReactWheelEvent,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Play } from 'lucide-react';
@@ -51,7 +50,7 @@ interface Props {
   actions?: DatetimeActions;
   /** Optional Live action (before variant) — e.g. resume list follow. */
   onLive?: () => void;
-  /** Decorative field chevron (default true for variant=field). */
+  /** Decorative field chevron (default false). */
   showChevron?: boolean;
 }
 
@@ -221,8 +220,6 @@ const dayBtn = (selected: boolean, muted: boolean, disabled: boolean): CSSProper
   fontSize: '0.72rem',
   fontWeight: selected ? 600 : 400,
   opacity: disabled ? 0.35 : 1,
-  // Disabled native buttons swallow hits in some browsers; let the dialog keep the event.
-  pointerEvents: disabled ? 'none' : undefined,
 });
 
 /** Day-cell look for Now / Clear / OK. */
@@ -242,13 +239,9 @@ const chipBtn = (accent = false, disabled = false): CSSProperties => ({
   fontSize: '0.65rem',
   fontWeight: accent ? 600 : 500,
   opacity: disabled ? 0.35 : 1,
-  pointerEvents: disabled ? 'none' : undefined,
 });
 
-const iconBtnStyle = (disabled = false): CSSProperties => ({
-  ...iconBtn(disabled),
-  pointerEvents: disabled ? 'none' : undefined,
-});
+const iconBtnStyle = (disabled = false): CSSProperties => iconBtn(disabled);
 
 /** Comparable local instant string for clamping (date / datetime / time). */
 function partsCompareKey(p: Parts, mode: DatetimeMode, withSeconds: boolean): string {
@@ -548,6 +541,18 @@ export function ThemedDatetimePicker({
     pendingSelect.current = key;
   };
 
+  useEffect(() => {
+    const el = localInputRef.current;
+    if (!el || !fieldFocused || disabled) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      digitBuf.current = '';
+      bumpSeg(activeSeg, e.deltaY < 0 ? 1 : -1);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [fieldFocused, activeSeg, disabled, draft, mode, withSeconds]);
+
   const shiftFieldSeg = (dir: 1 | -1): boolean => {
     const keys = fieldSegKeys(mode, withSeconds);
     const idx = keys.indexOf(activeSeg);
@@ -611,6 +616,28 @@ export function ThemedDatetimePicker({
     selectSeg(key);
   };
 
+  useEffect(() => {
+    const card = cardRef.current;
+    if (!open || !card) return;
+    const onWheel = (e: WheelEvent) => {
+      const target = e.target as HTMLElement | null;
+      const monthNav = target?.closest?.('[data-cal-month-nav]');
+      if (monthNav) {
+        e.preventDefault();
+        shiftMonth(e.deltaY < 0 ? 1 : -1);
+        return;
+      }
+      const spin = target?.closest?.('[data-time-spin]');
+      if (!spin) return;
+      const key = spin.getAttribute('data-time-spin');
+      if (key !== 'h' && key !== 'mi' && key !== 's') return;
+      e.preventDefault();
+      setTimePart(key, draft[key] + (e.deltaY < 0 ? 1 : -1));
+    };
+    card.addEventListener('wheel', onWheel, { passive: false });
+    return () => card.removeEventListener('wheel', onWheel);
+  }, [open, pos, draft.h, draft.mi, draft.s, viewMo, viewY, minDate, maxDate]);
+
   const runClear = () => {
     setCleared(true);
     dirty.current = false;
@@ -623,14 +650,12 @@ export function ThemedDatetimePicker({
     closePicker();
   };
 
-  /** Set draft to current local now (does not commit — use OK). */
+  /** Apply current local now and close. */
   const runNow = () => {
     if (!todayAllowed) return;
     const p = todayParts();
-    markDirty();
-    setDraft(p);
-    setViewY(p.y);
-    setViewMo(p.mo);
+    commitDraft(p);
+    closePicker();
   };
 
   const runOk = () => {
@@ -683,7 +708,13 @@ export function ThemedDatetimePicker({
   };
 
   const useHostChrome = Boolean(className) && variant === 'field';
-  const chevronVisible = showChevron ?? variant === 'field';
+  const chevronVisible = showChevron === true;
+  const explicitWidth = style?.width;
+  const wrapWidth: CSSProperties['width'] = explicitWidth != null
+    ? 'fit-content'
+    : variant === 'bare'
+      ? undefined
+      : '100%';
   const fieldStyle: CSSProperties = variant === 'bare'
     ? {
         ...style,
@@ -703,7 +734,6 @@ export function ThemedDatetimePicker({
           boxSizing: 'border-box',
           outline: 'none',
           cursor: disabled ? 'default' : 'text',
-          ...(chevronVisible ? { paddingRight: '1.4rem' } : null),
           ...style,
         }
       : {
@@ -713,7 +743,6 @@ export function ThemedDatetimePicker({
           border: '1px solid var(--border-color)',
           borderRadius: 6,
           padding: '0.25rem 0.45rem',
-          ...(chevronVisible ? { paddingRight: '1.4rem' } : null),
           color: 'var(--text-main)',
           fontSize: '0.75rem',
           fontFamily: "'JetBrains Mono', monospace",
@@ -741,23 +770,7 @@ export function ThemedDatetimePicker({
       return;
     }
 
-    if (e.key === 'Tab') {
-      const keys = fieldSegKeys(mode, withSeconds);
-      const idx = keys.indexOf(activeSeg);
-      if (!e.shiftKey && idx >= 0 && idx < keys.length - 1) {
-        e.preventDefault();
-        if (!open && openOnFocus) openPicker();
-        selectSeg(keys[idx + 1]);
-        return;
-      }
-      if (e.shiftKey && idx > 0) {
-        e.preventDefault();
-        if (!open && openOnFocus) openPicker();
-        selectSeg(keys[idx - 1]);
-        return;
-      }
-      return;
-    }
+    // Tab / Shift-Tab leave the field (browser focus order). Segments use ←/→.
 
     if (/^\d$/.test(e.key)) {
       e.preventDefault();
@@ -815,8 +828,15 @@ export function ThemedDatetimePicker({
   const onWrapMouseDown = (e: ReactMouseEvent) => {
     if (disabled) return;
     const target = e.target as HTMLElement;
-    if (target === localInputRef.current || localInputRef.current?.contains(target)) {
-      if (!open) openPicker();
+    const onField = target === localInputRef.current || localInputRef.current?.contains(target);
+    if (onField) {
+      // Click on the value toggles popover visibility (Esc closes, Enter applies).
+      if (open) {
+        skipFocusOpen.current = true;
+        closePicker();
+      } else {
+        openPicker();
+      }
       return;
     }
     e.preventDefault();
@@ -833,6 +853,10 @@ export function ThemedDatetimePicker({
   const keepFieldFocus = (e: ReactMouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    // Keep the field focused so the picker cannot click through to another control.
+    if (document.activeElement !== localInputRef.current) {
+      localInputRef.current?.focus({ preventScroll: true });
+    }
   };
 
   const timeSpin = (key: 'h' | 'mi' | 's', label: string, cur: number, max: number) => (
@@ -857,10 +881,6 @@ export function ThemedDatetimePicker({
         aria-valuenow={cur}
         aria-valuemin={0}
         aria-valuemax={max}
-        onWheel={(e: ReactWheelEvent) => {
-          e.preventDefault();
-          setTimePart(key, cur + (e.deltaY < 0 ? 1 : -1));
-        }}
         style={{
           fontFamily: "'JetBrains Mono', monospace",
           fontSize: '0.85rem',
@@ -892,7 +912,15 @@ export function ThemedDatetimePicker({
     <>
       <div
         ref={wrapRef}
-        style={{ display: 'inline-flex', alignItems: 'center', width: '100%', minWidth: 0, position: 'relative', flex: variant === 'bare' ? '1 1 auto' : undefined }}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          width: wrapWidth,
+          minWidth: 0,
+          position: 'relative',
+          flex: variant === 'bare' ? '1 1 auto' : undefined,
+          flexShrink: explicitWidth != null ? 0 : undefined,
+        }}
         onMouseDown={onWrapMouseDown}
       >
         <input
@@ -982,20 +1010,24 @@ export function ThemedDatetimePicker({
           aria-label="Date and time picker"
           data-themed-datetime-picker
           data-active-seg={activeSeg}
-          style={{ ...popoverPanel, top: pos.top, left: pos.left }}
+          style={{ ...popoverPanel, top: pos.top, left: pos.left, pointerEvents: 'auto' }}
           onMouseDown={keepFieldFocus}
+          onClick={e => e.stopPropagation()}
         >
           <div style={{ display: 'flex', gap: '0.65rem', alignItems: 'stretch' }}>
             {mode !== 'time' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4 }}>
+                <div
+                  data-cal-month-nav
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4 }}
+                >
                   <button
                     type="button"
                     tabIndex={-1}
                     aria-label="Previous month"
-                    disabled={!canShiftMonth(-1)}
+                    aria-disabled={!canShiftMonth(-1)}
                     style={iconBtnStyle(!canShiftMonth(-1))}
-                    onClick={() => shiftMonth(-1)}
+                    onClick={() => { if (canShiftMonth(-1)) shiftMonth(-1); }}
                   >
                     <ChevronLeft size={16} />
                   </button>
@@ -1009,9 +1041,9 @@ export function ThemedDatetimePicker({
                     type="button"
                     tabIndex={-1}
                     aria-label="Next month"
-                    disabled={!canShiftMonth(1)}
+                    aria-disabled={!canShiftMonth(1)}
                     style={iconBtnStyle(!canShiftMonth(1))}
-                    onClick={() => shiftMonth(1)}
+                    onClick={() => { if (canShiftMonth(1)) shiftMonth(1); }}
                   >
                     <ChevronRight size={16} />
                   </button>
@@ -1043,7 +1075,7 @@ export function ThemedDatetimePicker({
                         key={`${c.y}-${c.mo}-${c.day}-${i}`}
                         type="button"
                         tabIndex={-1}
-                        disabled={!c.enabled}
+                        aria-disabled={!c.enabled}
                         aria-label={`${c.y}-${pad(c.mo + 1)}-${pad(c.day)}`}
                         aria-pressed={selected}
                         style={dayBtn(selected, !c.inMonth, !c.enabled)}
@@ -1064,8 +1096,8 @@ export function ThemedDatetimePicker({
               style={{
                 display: 'flex',
                 flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'flex-end',
+                alignItems: 'stretch',
+                justifyContent: mode === 'date' ? 'flex-end' : 'flex-start',
                 gap: '0.35rem',
                 paddingLeft: mode === 'time' ? 0 : 4,
                 borderLeft: mode === 'time' ? 'none' : '1px solid var(--border-subtle)',
@@ -1073,8 +1105,41 @@ export function ThemedDatetimePicker({
                 alignSelf: 'stretch',
               }}
             >
+              {actions === 'standard' && (
+                <div
+                  data-action-row="now-clear"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 4,
+                    width: '100%',
+                  }}
+                >
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    aria-label="Now"
+                    aria-disabled={!todayAllowed}
+                    style={chipBtn(false, !todayAllowed)}
+                    onClick={() => { if (todayAllowed) runNow(); }}
+                  >
+                    Now
+                  </button>
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    aria-label="Clear"
+                    style={chipBtn(false)}
+                    onClick={runClear}
+                  >
+                    Clear
+                  </button>
+                </div>
+              )}
+
               {mode !== 'date' && (
-                <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center', marginBottom: '0.15rem' }}>
+                <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center', justifyContent: 'center', marginBottom: '0.15rem' }}>
                   {timeSpin('h', 'HH', draft.h, 23)}
                   <span style={{ color: 'var(--text-dim)', marginTop: 18 }}>:</span>
                   {timeSpin('mi', 'MM', draft.mi, 59)}
@@ -1087,7 +1152,7 @@ export function ThemedDatetimePicker({
                 </div>
               )}
 
-              <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: 4, alignItems: 'center', justifyContent: 'center' }}>
                 {actions === 'since' && (
                   <>
                     <button
@@ -1151,36 +1216,15 @@ export function ThemedDatetimePicker({
                   </>
                 )}
                 {actions === 'standard' && (
-                  <>
-                    <button
-                      type="button"
-                      tabIndex={-1}
-                      aria-label="Clear"
-                      style={chipBtn(false)}
-                      onClick={runClear}
-                    >
-                      Clear
-                    </button>
-                    <button
-                      type="button"
-                      tabIndex={-1}
-                      aria-label="Now"
-                      disabled={!todayAllowed}
-                      style={chipBtn(false, !todayAllowed)}
-                      onClick={runNow}
-                    >
-                      Now
-                    </button>
-                    <button
-                      type="button"
-                      tabIndex={-1}
-                      aria-label="OK"
-                      style={chipBtn(true)}
-                      onClick={runOk}
-                    >
-                      OK
-                    </button>
-                  </>
+                  <button
+                    type="button"
+                    tabIndex={-1}
+                    aria-label="OK"
+                    style={chipBtn(true)}
+                    onClick={runOk}
+                  >
+                    OK
+                  </button>
                 )}
               </div>
             </div>

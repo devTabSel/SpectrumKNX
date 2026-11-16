@@ -15,10 +15,10 @@ const secondsBareInput: CSSProperties = {
 };
 
 /**
- * Delay/Every: glass shell fills the track; column width comes from text
- * (value + `s`, or placeholder), not the UA input default.
+ * Delay/Every (and similar): glass shell fills the track; column width comes
+ * from text (value + unit, or placeholder), not the UA input default.
  *
- * Shared by the send panel and send popover so both render identically.
+ * Shared by the send panel, send popover, and telegram-table context fields.
  */
 export function SecondsField({
   value,
@@ -26,7 +26,10 @@ export function SecondsField({
   placeholder,
   title,
   col,
+  unit = 's',
   disabled = false,
+  ariaLabel,
+  autoFocus = false,
   onBlur,
   onKeyDown,
 }: {
@@ -36,7 +39,11 @@ export function SecondsField({
   title: string;
   /** Write-panel grid column (`data-wtb-col`). Omit for content-sized popover use. */
   col?: string;
+  /** Suffix shown while a value is present (`s` for delay/every, `ms` for context). */
+  unit?: string;
   disabled?: boolean;
+  ariaLabel?: string;
+  autoFocus?: boolean;
   /** Called after sanitize with the committed value. */
   onBlur?: (sanitized: string) => void;
   onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
@@ -69,6 +76,8 @@ export function SecondsField({
           placeholder={placeholder}
           value={value}
           disabled={disabled}
+          aria-label={ariaLabel}
+          autoFocus={autoFocus}
           onMouseDown={selectAllMouseDown}
           onChange={e => { if (!disabled) onChange(e.target.value); }}
           onFocus={e => { if (!disabled) selectInputText(e.currentTarget); }}
@@ -84,8 +93,9 @@ export function SecondsField({
           style={{
             ...secondsBareInput,
             flex: '1 1 auto',
-            width: `${inputCh}ch`,
-            minWidth: `${inputCh}ch`,
+            // Content-sized elsewhere; when filling a track (QF Δt / send grid), grow with the shell.
+            width: fill ? '100%' : `${inputCh}ch`,
+            minWidth: fill ? 0 : `${inputCh}ch`,
             textAlign: 'right',
           }}
         />
@@ -99,7 +109,7 @@ export function SecondsField({
               pointerEvents: 'none',
             }}
           >
-            s
+            {unit}
           </span>
         )}
       </div>

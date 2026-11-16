@@ -230,6 +230,107 @@ export interface BusValueView {
   unit?: string | null;
 }
 
+/** Click-cycle modes for the reusable bus-value display control. */
+export type ValueDisplayMode = 'decoded' | 'decimal' | 'hex' | 'bin';
+
+export interface ValueDisplayOption {
+  mode: ValueDisplayMode;
+  /** Plain label used for aria / title (no unit). */
+  label: string;
+  /** Optional unit shown only in decoded mode. */
+  unit?: string;
+}
+
+function normalizeHex(raw: string | null | undefined): string {
+  const hex = (raw ?? '').trim();
+  if (!hex) return '';
+  return hex.toLowerCase().startsWith('0x') ? hex : `0x${hex}`;
+}
+
+function discreteBitsForView(value: BusValueView, dptKey?: string | null): number | null {
+  const fromJson = payloadFromJson(value.value_json ?? undefined);
+  if (fromJson != null) {
+    const bits = discretePayloadRawBits(fromJson, dptKey);
+    if (bits != null) return bits;
+  }
+  const parsed = dptKey ? parseDptKey(dptKey) : null;
+  if (parsed?.main === 1) {
+    const bit = coerceBit(value);
+    if (bit != null) return bit ? 1 : 0;
+  }
+  return rawNibble(value);
+}
+
+function decimalLabelForView(value: BusValueView, dptKey?: string | null): string | null {
+  if (value.value_numeric != null && Number.isFinite(value.value_numeric)) {
+    return String(value.value_numeric);
+  }
+  const bits = discreteBitsForView(value, dptKey);
+  if (bits != null) return String(bits);
+  const hex = (value.raw_hex ?? '').trim().toLowerCase().replace(/^0x/, '');
+  if (/^[0-9a-f]+$/.test(hex)) {
+    const n = Number.parseInt(hex, 16);
+    if (Number.isFinite(n)) return String(n);
+  }
+  return null;
+}
+
+function hexLabelForView(value: BusValueView, dptKey?: string | null): string | null {
+  const raw = normalizeHex(value.raw_hex);
+  if (raw) return raw;
+  const bits = discreteBitsForView(value, dptKey);
+  const width = discreteDptBitWidth(dptKey);
+  if (bits == null || width == null) return null;
+  const hexDigits = Math.max(1, Math.ceil(width / 4));
+  return `0x${bits.toString(16).toUpperCase().padStart(hexDigits, '0')}`;
+}
+
+function binLabelForView(value: BusValueView, dptKey?: string | null): string | null {
+  const width = discreteDptBitWidth(dptKey);
+  if (width == null) return null;
+  const bits = discreteBitsForView(value, dptKey);
+  if (bits == null) return null;
+  return `0b${bits.toString(2).padStart(width, '0')}`;
+}
+
+/**
+ * Builds the click-cycle options for a bus value: decoded → decimal (only when
+ * different from decoded) → hex → binary (≤4-bit discrete DPTs only).
+ */
+export function buildValueDisplayModes(
+  value: BusValueView,
+  dptKey?: string | null,
+): ValueDisplayOption[] {
+  const decoded = formatBusValueForDpt(value, dptKey);
+  const modes: ValueDisplayOption[] = [
+    { mode: 'decoded', label: decoded.text || '—', unit: decoded.unit || undefined },
+  ];
+
+  const decimal = decimalLabelForView(value, dptKey);
+  if (decimal != null && decimal !== decoded.text) {
+    modes.push({ mode: 'decimal', label: decimal });
+  }
+
+  const hex = hexLabelForView(value, dptKey);
+  if (hex) modes.push({ mode: 'hex', label: hex });
+
+  const bin = binLabelForView(value, dptKey);
+  if (bin) modes.push({ mode: 'bin', label: bin });
+
+  return modes;
+}
+
+/** Advance to the next display mode in the available cycle. */
+export function nextValueDisplayMode(
+  modes: readonly ValueDisplayOption[],
+  current: ValueDisplayMode,
+): ValueDisplayMode {
+  if (modes.length === 0) return 'decoded';
+  const idx = modes.findIndex(m => m.mode === current);
+  const next = modes[(idx < 0 ? 0 : idx + 1) % modes.length];
+  return next.mode;
+}
+
 /** Map a bus/telegram value onto the same words the send buttons use for this DPT. */
 function coerceBit(value: BusValueView): boolean | null {
   if (value.value_numeric === 0 || value.value_numeric === 1) return value.value_numeric === 1;

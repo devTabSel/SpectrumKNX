@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { format } from 'date-fns';
 import { Clock } from 'lucide-react';
+import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 
 // "Quick goto time" control for the telegram list (#282): a clock button that
 // opens a small time-entry popover. Submitting jumps the list to the telegram
@@ -29,7 +30,11 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
     // Reseed to the newest telegram each time the popover opens.
     setValue(seedMs != null ? format(new Date(seedMs), INPUT_FMT) : '');
     const r = btnRef.current?.getBoundingClientRect();
-    if (r) setPos({ top: r.bottom + 4, left: r.left });
+    if (r) {
+      // Sit in the middle header row: vertically centered on the clock,
+      // horizontally just to its right over the column labels.
+      setPos({ top: r.top + r.height / 2, left: r.right + 6 });
+    }
     setOpen(true);
   };
 
@@ -39,6 +44,7 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
     const onDown = (e: MouseEvent) => {
       const n = e.target as Node;
+      if ((e.target as Element | null)?.closest?.('[data-themed-datetime-picker]')) return;
       if (!cardRef.current?.contains(n) && !btnRef.current?.contains(n)) setOpen(false);
     };
     document.addEventListener('keydown', onKey);
@@ -70,17 +76,29 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
         <div
           ref={cardRef}
           className="goto-time-popover"
-          style={{ position: 'fixed', top: pos.top, left: pos.left, zIndex: 1000 }}
+          style={{
+            position: 'fixed',
+            top: pos.top,
+            left: pos.left,
+            transform: 'translateY(-50%)',
+            zIndex: 1000,
+          }}
         >
-          <input
-            type="datetime-local"
-            step="1"
+          <ThemedDatetimePicker
             className="goto-time-input"
             value={value}
             autoFocus
+            withSeconds
             aria-label="Target time"
-            onChange={e => setValue(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') submit(); }}
+            onChange={setValue}
+            onKeyDown={e => {
+              if (e.key !== 'Enter') return;
+              e.preventDefault();
+              const raw = (e.currentTarget as HTMLInputElement).value;
+              const ms = new Date(raw).getTime();
+              if (raw && !Number.isNaN(ms)) onGoto(ms);
+              setOpen(false);
+            }}
           />
           <button className="goto-time-go" onClick={submit} disabled={!value}>Go</button>
         </div>,

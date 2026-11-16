@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { TelegramTable, type SortConfig, type SortKey } from './TelegramTable';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from '../utils/sortConfig';
-import { expandWithDeltaContext } from '../utils/deltaContextExpansion';
+import { expandWithDeltaContext, type IndividualContextWindows } from '../utils/deltaContextExpansion';
 import { activeQuickFilter, type QuickPatterns } from '../utils/quickFilter';
 import { anchorKey } from '../utils/anchorKey';
 import type { Telegram } from '../hooks/useWebSocket';
@@ -49,12 +49,14 @@ interface HistorySearchProps {
   /** Master filter switch, shared with the Group Monitor (#370, #436). */
   filtersEnabled?: boolean;
   onFiltersEnabledChange?: (enabled: boolean) => void;
+  /** Forwarded to TelegramTable so filter edits pin + flash the preferred row. */
+  viewChangeToken?: number;
 }
 
 export const HistorySearch: React.FC<HistorySearchProps> = ({
   visibleColumns, loadLimit, filterOptions, activeFilters, onFiltersChange, onOpenSettings,
   projectLoaded, selectedVisualizationTargets, onVisualizationTargetsChange, initialView,
-  filtersEnabled = true, onFiltersEnabledChange,
+  filtersEnabled = true, onFiltersEnabledChange, viewChangeToken,
 }) => {
   const [telegrams, setTelegrams] = useState<Telegram[]>([]);
   const [isLoaderOpen, setIsLoaderOpen] = useState(false);
@@ -63,6 +65,10 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   // Per-message Time-Delta-Context flags (#319) — local to this view, like marks.
   const [flaggedKeys, setFlaggedKeys] = useState<string[]>([]);
   const [contextForAllMatches, setContextForAllMatches] = useState(true);
+  const [individualContextWindows, setIndividualContextWindows] = useState<IndividualContextWindows>({});
+  const [markedKeys, setMarkedKeys] = useState<string[]>([]);
+  const [mouseSelectedKeys, setMouseSelectedKeys] = useState<string[]>([]);
+  const [lastSelectedKey, setLastSelectedKey] = useState<string | null>(null);
   // Quick filter bar state, lifted so its matches anchor the context (#520).
   const [quickFilterOpen, setQuickFilterOpen] = useState(false);
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(false);
@@ -180,11 +186,25 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     );
     const { before, after } = effectiveDeltaContext(activeFilters);
     const flags = activeFilters.deltaContextEnabled ? new Set(flaggedKeys) : EMPTY_FLAG_SET;
-    return expandWithDeltaContext(sortedTelegrams, matches, anchorKey, flags, before, after, contextForAllMatches);
-  }, [sortedTelegrams, activeFilters, effectiveFilters, filtering, flaggedKeys, contextForAllMatches, quickFilterOpen, quickFilterEnabled, quickPatterns]);
+    const pinned = new Set(markedKeys);
+    for (const key of mouseSelectedKeys) pinned.add(key);
+    if (lastSelectedKey) pinned.add(lastSelectedKey);
+    return expandWithDeltaContext(
+      sortedTelegrams, matches, anchorKey, flags, before, after, contextForAllMatches, {
+        contextEnabled: activeFilters.deltaContextEnabled,
+        individualWindows: individualContextWindows,
+        pinnedKeys: pinned,
+      },
+    );
+  }, [
+    sortedTelegrams, activeFilters, effectiveFilters, filtering, flaggedKeys, contextForAllMatches,
+    individualContextWindows, markedKeys, mouseSelectedKeys, lastSelectedKey,
+    quickFilterOpen, quickFilterEnabled, quickPatterns,
+  ]);
   const filteredSortedTelegrams = deltaExpandedHistory.items;
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = deltaExpandedHistory.contextKeys;
+  const contextTelegramParents = deltaExpandedHistory.contextParents;
 
   // True when current filters are less restrictive than what was used to fetch,
   // meaning some telegrams may be missing from the loaded set.
@@ -371,6 +391,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
           ) : (
             <TelegramTable
               telegrams={filteredSortedTelegrams}
+              forceIncludeFrom={sortedTelegrams}
               visibleColumns={visibleColumns}
               sortConfig={sortConfig}
               onSort={handleSort}
@@ -389,7 +410,17 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               onFlaggedKeysChange={setFlaggedKeys}
               contextForAllMatches={contextForAllMatches}
               onContextForAllMatchesChange={setContextForAllMatches}
+              individualContextWindows={individualContextWindows}
+              onIndividualContextWindowsChange={setIndividualContextWindows}
+              markedKeys={markedKeys}
+              onMarkedKeysChange={setMarkedKeys}
+              mouseSelectedKeys={mouseSelectedKeys}
+              onMouseSelectedKeysChange={setMouseSelectedKeys}
+              lastSelectedKey={lastSelectedKey}
+              onLastSelectedKeyChange={setLastSelectedKey}
               contextKeys={contextTelegramKeys}
+              contextParents={contextTelegramParents}
+              viewChangeToken={viewChangeToken}
             />
           )}
         </div>

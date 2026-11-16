@@ -1,7 +1,8 @@
 // VALUE column quick-filter matching for the telegram list (#309): binary
 // (`0b…`), hex (`0x…`) and decimal digit patterns with `+` (any single digit)
-// and `*` (any run of digits) wildcards, plus quoted-regex/literal text —
-// matched against a telegram's raw hex, decimal value, or formatted text.
+// and `*` (any run of digits) wildcards, plus quoted-regex/literal text.
+// Top QF row matches the formatted-value cell; bottom matches the raw-hex cell
+// — never a joined composite of formatted + unit + hex.
 
 export interface ValueMatchable {
   value_numeric: number | null;
@@ -11,6 +12,7 @@ export interface ValueMatchable {
 }
 
 type Matcher = (t: ValueMatchable) => boolean;
+type TextField = 'formatted' | 'hex';
 
 /** `+` -> exactly one digit of `digitClass`, `*` -> any run of that digit class. */
 const wildcardToRegex = (pattern: string, digitClass: string): RegExp => {
@@ -46,7 +48,13 @@ const decimalWildcardMatcher = (pattern: string): Matcher => {
 
 const isPlainNumber = (s: string): boolean => /^-?\d+(\.\d+)?$/.test(s);
 
-const regexOrLiteralMatcher = (pattern: string): Matcher => {
+const valueDisplayText = (t: ValueMatchable): string =>
+  t.value_formatted ?? (t.value_numeric != null ? String(t.value_numeric) : '');
+
+const textFieldValue = (t: ValueMatchable, field: TextField): string =>
+  field === 'hex' ? (t.raw_hex ?? '') : valueDisplayText(t);
+
+const regexOrLiteralMatcher = (pattern: string, field: TextField): Matcher => {
   let re: RegExp;
   try {
     re = new RegExp(pattern, 'i');
@@ -54,27 +62,28 @@ const regexOrLiteralMatcher = (pattern: string): Matcher => {
     const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, ch => (ch === '*' ? '.*' : ch === '+' ? '.' : `\\${ch}`));
     re = new RegExp(`^${escaped}$`, 'i');
   }
-  return t => {
-    const haystack = [t.value_formatted ?? t.value_numeric ?? '', t.unit, t.raw_hex].filter(Boolean).join(' ');
-    return re.test(haystack);
-  };
+  return t => re.test(textFieldValue(t, field));
 };
 
 /** Parses one VALUE cell entry (a single row's text) into a matcher. */
-function parseValueToken(token: string): Matcher {
+function parseValueToken(token: string, textField: TextField): Matcher {
   if (token.startsWith('"') && token.endsWith('"') && token.length >= 2) {
-    return regexOrLiteralMatcher(token.slice(1, -1));
+    return regexOrLiteralMatcher(token.slice(1, -1), textField);
   }
   if (/^0x/i.test(token)) return hexMatcher(token);
   if (/^0b/i.test(token)) return binaryMatcher(token);
+  if (token.toLowerCase().startsWith('regex:')) {
+    return regexOrLiteralMatcher(token.slice('regex:'.length), textField);
+  }
   if (/^[\d+*]+$/.test(token) && /\d/.test(token)) return decimalWildcardMatcher(token);
-  return regexOrLiteralMatcher(token);
+  return regexOrLiteralMatcher(token, textField);
 }
 
 /**
  * Builds a matcher from the VALUE cell's two rows. When both rows are plain
  * numbers (no wildcards), they form a numeric range against `value_numeric`;
- * otherwise each non-empty row is parsed as its own pattern and ORed.
+ * otherwise each non-empty row is parsed as its own pattern and ORed —
+ * top against the formatted-value cell, bottom against raw hex.
  */
 export function makeValueMatcher(top: string, bottom: string): Matcher {
   const from = top.trim();
@@ -84,7 +93,9 @@ export function makeValueMatcher(top: string, bottom: string): Matcher {
     const hi = Math.max(Number(from), Number(to));
     return t => t.value_numeric != null && t.value_numeric >= lo && t.value_numeric <= hi;
   }
-  const matchers = [from, to].filter(Boolean).map(parseValueToken);
+  const matchers: Matcher[] = [];
+  if (from) matchers.push(parseValueToken(from, 'formatted'));
+  if (to) matchers.push(parseValueToken(to, 'hex'));
   if (matchers.length === 0) return () => true;
   return t => matchers.some(m => m(t));
 }
