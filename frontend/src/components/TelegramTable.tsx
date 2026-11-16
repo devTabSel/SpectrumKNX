@@ -21,6 +21,14 @@ import { SecondsField } from './SecondsField';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
+import type { Interval } from '../services/telegram-coverage-service';
+import {
+  END_MARKER_PX,
+  READING_END_LABEL,
+  contiguousFromAnchor,
+  spacerVariantA,
+  type ReadingEndCause,
+} from '../utils/telegramDisplay';
 import {
   activeQuickFilter,
   compileQuickFilters,
@@ -144,6 +152,23 @@ interface TelegramTableProps {
    * scrolls to the newest edge or resumes Play.
    */
   liveFollow?: boolean;
+  /**
+   * Read axis. When set, the list shows only the gapless run from the anchor,
+   * spacers follow variant A, and the anchor-end pill counts filtered rows
+   * back to that anchor. Omitted keeps the live-edge geometry (history, tests).
+   */
+  readDirection?: 'forward' | 'backward';
+  /**
+   * `chevron` swaps spacers and leaves the scroll where it is. Anything else
+   * rebuilds the view onto the anchor.
+   */
+  directionGesture?: 'chevron' | 'rebuild';
+  /** Sorted coverage. With `readDirection`, rows past an open gap stay hidden. */
+  covered?: readonly Interval[];
+  /** Explicit buffer anchor. Null uses the oldest (forward) or newest (backward) edge. */
+  bufferAnchorTs?: number | null;
+  /** Why the reading end stopped. Painted on the end marker. */
+  readingEnd?: ReadingEndCause;
   listAnchorKey?: string | null;
   onListAnchorKeyChange?: (key: string | null) => void;
   /** Buffer snapshot is frozen; the pause backlog feeds the jump-to-live pill. */
@@ -456,6 +481,45 @@ function wheelAxisPx(delta: number, mode: number, pagePx: number): number {
   if (mode === WheelEvent.DOM_DELTA_PAGE) return delta * pagePx;
   return delta;
 }
+function ReadingSpacer({
+  height,
+  markerPx,
+  markerAt,
+  label,
+}: {
+  height: number;
+  markerPx: number;
+  markerAt: 'start' | 'end';
+  label: string;
+}) {
+  const marker = markerPx > 0 ? (
+    <div
+      data-testid="reading-end-marker"
+      style={{
+        height: markerPx,
+        flex: '0 0 auto',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: 'var(--text-dim)',
+        fontSize: '0.75rem',
+      }}
+    >
+      {label}
+    </div>
+  ) : null;
+  return (
+    <div
+      data-testid="reading-spacer"
+      style={{ height, width: '100%', display: 'flex', flexDirection: 'column' }}
+    >
+      {markerAt === 'start' ? marker : null}
+      <div aria-hidden style={{ flex: '1 1 auto' }} />
+      {markerAt === 'end' ? marker : null}
+    </div>
+  );
+}
+
 const EDGE_PILL_INSET = '1rem';
 const EDGE_PILL_HALF = '0.85rem';
 const EDGE_PILL_CENTER = `calc(${EDGE_PILL_INSET} + ${EDGE_PILL_HALF})`;
@@ -541,7 +605,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   quickColumnEnabled: quickColumnEnabledProp, onQuickColumnEnabledChange,
   onDeltaContextChange,
   onDeltaContextEnabledChange,
-  listFollow, onListFollowChange, liveFollow = true, listAnchorKey, onListAnchorKeyChange,
+  listFollow, onListFollowChange, liveFollow = true, readDirection, directionGesture = 'rebuild',
+  covered, bufferAnchorTs = null, readingEnd,
+  listAnchorKey, onListAnchorKeyChange,
   isPaused = false, isManualPause = false, filtersEnabled = true, pausedCount = 0,
   pausedTelegrams = EMPTY_PAUSED,
   onPauseFlush, onPauseReveal, onJumpToLive,
@@ -1119,6 +1185,24 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     () => applyTableVisibility(telegrams, listForcePool),
     [applyTableVisibility, telegrams, listForcePool],
   );
+  // Same row array when the gapless run does not drop anything, so a coverage
+  // tick that only moves the live tail does not look like a new list.
+  const contigCacheRef = useRef<{ sig: string; rows: Telegram[] }>({ sig: '', rows: [] });
+  const coverageFiltered = useMemo(() => {
+    if (readDirection == null || covered == null) return quickFiltered;
+    const anchorTs = bufferAnchorTs ?? (
+      readDirection === 'forward' ? bufferOldestMs : bufferNewestMs
+    );
+    if (anchorTs == null) return quickFiltered;
+    const kept = contiguousFromAnchor(quickFiltered, anchorTs, readDirection, covered);
+    if (kept === quickFiltered) return quickFiltered;
+    const sig = kept.map(anchorKey).join('\n');
+    if (sig === contigCacheRef.current.sig) return contigCacheRef.current.rows;
+    contigCacheRef.current = { sig, rows: kept };
+    return kept;
+  }, [
+    quickFiltered, readDirection, covered, bufferAnchorTs, bufferOldestMs, bufferNewestMs,
+  ]);
 
   // Pill count: main filter + QF + delta window + focus + marks. Full scan only
   // when those inputs change; each paused arrival classifies the new row.
@@ -1190,21 +1274,21 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   );
   const [rowCache] = useState(() => ({ source: null as readonly Telegram[] | null, rows: [] as TelegramRow[] }));
   const naturalTelegramRows = useMemo<TelegramRow[]>(() => {
-    if (rowCache.source === quickFiltered) return rowCache.rows;
-    const edge = readListEdge(quickFiltered);
+    if (rowCache.source === coverageFiltered) return rowCache.rows;
+    const edge = readListEdge(coverageFiltered);
     if (edge && rowCache.source && edge.prev === rowCache.source && timeSortDirection) {
-      const patched = patchTelegramRows(quickFiltered, rowCache.rows, edge, timeSortDirection);
+      const patched = patchTelegramRows(coverageFiltered, rowCache.rows, edge, timeSortDirection);
       if (patched) {
-        rowCache.source = quickFiltered;
+        rowCache.source = coverageFiltered;
         rowCache.rows = patched;
         return patched;
       }
     }
-    const rows = buildTelegramRows(quickFiltered, timeSortDirection);
-    rowCache.source = quickFiltered;
+    const rows = buildTelegramRows(coverageFiltered, timeSortDirection);
+    rowCache.source = coverageFiltered;
     rowCache.rows = rows;
     return rows;
-  }, [quickFiltered, timeSortDirection, rowCache]);
+  }, [coverageFiltered, timeSortDirection, rowCache]);
   // Sorting by the Δt column is a self-referential operation (deltas are
   // derived from row order), so it freezes a snapshot instead of participating
   // in the normal sortConfig: buffer/live-follow pause, deltas stop
@@ -1364,14 +1448,44 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const primarySort = sortConfig[0];
   const isTimeSort = primarySort?.key === 'timestamp' && !deltaSortActive;
   const liveEdge = primarySort?.direction === 'asc' ? 'bottom' : 'top';
+  // Display mode (a read direction from the monitor). History and the existing
+  // live-edge tests leave `readDirection` unset and keep the geometry below.
+  const displayEdges = readDirection != null;
+  const anchorEdge: 'top' | 'bottom' = !displayEdges
+    ? liveEdge
+    : !isTimeSort
+      ? 'top'
+      : readDirection === 'forward'
+        ? (timeSortDirection === 'desc' ? 'bottom' : 'top')
+        : (timeSortDirection === 'asc' ? 'bottom' : 'top');
+  const readingEdge: 'top' | 'bottom' = anchorEdge === 'top' ? 'bottom' : 'top';
+  const [viewportHeight, setViewportHeight] = useState(0);
 
   // Fill-axis rubber (½ row) as virtualizer padding — pause backlog stays in the
-  // newer-pill only, not in scrollHeight / thumb.
-  const liveFillRubberPx = telegramRows.length > 0 ? FILL_RUBBER_PX : 0;
+  // newer-pill only, not in scrollHeight / thumb. In display mode the anchor
+  // end keeps that half row (the backward pause slot, when the anchor is the
+  // newer edge). The reading end is a separate block.
+  const displayPlan = displayEdges
+    ? spacerVariantA({
+      viewportPx: viewportHeight,
+      rowPx: ROW_ESTIMATE,
+      markerPx: END_MARKER_PX,
+      rubberPx: FILL_RUBBER_PX,
+      temporal: isTimeSort,
+      hasRows: telegramRows.length > 0,
+    })
+    : null;
+  const readingIsLive = displayPlan != null && anchorEdge !== liveEdge;
+  const readingBlockPx = displayPlan ? displayPlan.markerPx + displayPlan.readingPx : 0;
+  const liveFillRubberPx = displayPlan
+    ? (readingIsLive ? displayPlan.readingRubberPx : displayPlan.anchorRubberPx)
+    : (telegramRows.length > 0 ? FILL_RUBBER_PX : 0);
+  const liveFillPadPx = displayPlan
+    ? (readingIsLive ? 0 : displayPlan.anchorRubberPx)
+    : liveFillRubberPx;
 
   // Opposite-edge spacer (DOM sibling): settle pad when the list is shorter than
   // the viewport (keep ≥1 full row) + ½-row rubber overscroll.
-  const [viewportHeight, setViewportHeight] = useState(0);
   useLayoutEffect(() => {
     const el = parentRef.current;
     if (!el) return;
@@ -1384,6 +1498,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   type ScrollGeom = {
     fillRubberPx: number;
+    fillPadPx: number;
     oppositeSpacerPx: number;
     /** Virtualizer block height at lock — keeps scrollHeight stable on prepend. */
     virtTotalPx: number;
@@ -1392,14 +1507,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // do not wobble from live prepend or remeasure mid-gesture.
   const [frozenGeom, setFrozenGeom] = useState<ScrollGeom | null>(null);
   const fillRubberPx = frozenGeom?.fillRubberPx ?? liveFillRubberPx;
+  const fillPadPx = frozenGeom?.fillPadPx ?? liveFillPadPx;
 
   const virtualizer = useVirtualizer({
     count: telegramRows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_ESTIMATE, // Better estimate for multi-line rows
     overscan: 10,
-    paddingStart: liveEdge === 'top' ? fillRubberPx : 0,
-    paddingEnd: liveEdge === 'bottom' ? fillRubberPx : 0,
+    paddingStart: liveEdge === 'top' ? fillPadPx : 0,
+    paddingEnd: liveEdge === 'bottom' ? fillPadPx : 0,
     getItemKey: (index) => {
       const t = telegramRows[index];
       // Match `anchorKey` — falsy `raw_hex` must not fall back to index or
@@ -1410,21 +1526,31 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   const liveVirtTotalPx = virtualizer.getTotalSize();
   const virtTotalPx = frozenGeom?.virtTotalPx ?? liveVirtTotalPx;
-  const rowsHeight = Math.max(0, liveVirtTotalPx - fillRubberPx);
-  const contentWithFill = fillRubberPx + rowsHeight;
-  const oppositeSettlePadPx =
-    viewportHeight > 0 && contentWithFill < viewportHeight
+  const rowsHeight = Math.max(0, liveVirtTotalPx - fillPadPx);
+  const contentWithFill = fillPadPx + rowsHeight;
+  const oppositeSettlePadPx = displayPlan
+    ? 0
+    : viewportHeight > 0 && contentWithFill < viewportHeight
       ? Math.max(0, viewportHeight - ROW_ESTIMATE)
       : 0;
-  const oppositeRubberPx = telegramRows.length > 0 ? FILL_RUBBER_PX : 0;
-  const liveOppositeSpacerPx = oppositeSettlePadPx + oppositeRubberPx;
+  const oppositeRubberPx = displayPlan
+    ? (readingIsLive ? displayPlan.anchorRubberPx : displayPlan.readingRubberPx)
+    : (telegramRows.length > 0 ? FILL_RUBBER_PX : 0);
+  // Legacy: settle pad + rubber on the side opposite the newer edge.
+  // Display mode: that side is the reading block (marker + travel + rubber)
+  // when the anchor sits on the newer edge, otherwise just the anchor rubber.
+  const liveOppositeSpacerPx = displayPlan
+    ? (readingIsLive ? displayPlan.anchorPx : readingBlockPx)
+    : oppositeSettlePadPx + oppositeRubberPx;
   const liveGeomRef = useRef<ScrollGeom>({
     fillRubberPx: liveFillRubberPx,
+    fillPadPx: liveFillPadPx,
     oppositeSpacerPx: liveOppositeSpacerPx,
     virtTotalPx: liveVirtTotalPx,
   });
   liveGeomRef.current = {
     fillRubberPx: liveFillRubberPx,
+    fillPadPx: liveFillPadPx,
     oppositeSpacerPx: liveOppositeSpacerPx,
     virtTotalPx: liveVirtTotalPx,
   };
@@ -1471,6 +1597,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const anchorRef = useRef<{ key: string; offset: number } | null>(
     listAnchorKey ? { key: listAnchorKey, offset: 0 } : null
   );
+  // Non-time sort: the topmost row at the moment the list last settled.
+  const fixedTopRef = useRef<{ key: string; offset: number } | null>(null);
+  // Chevron flips the timestamp sort in the same commit. Skip that pin once
+  // so the scroll position is not rebuilt; the spacers still swap.
+  const chevronSortHoldRef = useRef(false);
   const programmaticScrollRef = useRef(false);
   // Whether the user is scrolling right now — wheel, touch, keys, or a held
   // scrollbar. Lets pinAnchor tell "the anchor left the rendered window
@@ -2788,6 +2919,19 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     el.scrollTop = settledEdgeScrollTop();
   };
 
+  /** Settled anchor end: the anchor row flush, not into its half-row rubber. */
+  const scrollToAnchor = () => {
+    cancelRubberBand();
+    markProgrammatic();
+    const el = parentRef.current;
+    if (!el) return;
+    const rubber = displayPlan?.anchorRubberPx ?? 0;
+    if (anchorEdge === 'top') el.scrollTop = rubber;
+    else el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - rubber);
+    atEdgeRef.current = false;
+    detachedFromEdgeRef.current = true;
+  };
+
   const jumpToLive = (releaseManual = false, revealBacklog = false) => {
     if (!liveFollow) return;
     // Pill path wants the jump to the merged newest — not a seamless pin.
@@ -3309,6 +3453,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // checkAtEdge() always reads "at edge" here first and clobbers a restored
   // anchor (e.g. a cross-panel goto, #308) before it ever gets applied.
   const sortEffectMounted = useRef(false);
+  const prevReadDirectionRef = useRef(readDirection);
+  const prevRebuildDirRef = useRef(readDirection);
+  useEffect(() => {
+    const prev = prevReadDirectionRef.current;
+    prevReadDirectionRef.current = readDirection;
+    if (prev === readDirection) return;
+    if (directionGesture === 'chevron') chevronSortHoldRef.current = true;
+  }, [readDirection, directionGesture]);
   useEffect(() => {
     if (!sortEffectMounted.current) {
       sortEffectMounted.current = true;
@@ -3317,10 +3469,31 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       // instead of treating the second one as a real sortConfig change.
       return () => { sortEffectMounted.current = false; };
     }
+    if (chevronSortHoldRef.current) {
+      chevronSortHoldRef.current = false;
+      return;
+    }
     setStripeOffset(0);
     // Sort reorders the list — pin + flash the preferred working row.
     requestDisplayPinRef.current();
   }, [sortConfig]);
+  // A direction change other than the chevron scrolls back to the anchor.
+  // The chevron leaves scrollTop alone; only the spacers move.
+  useLayoutEffect(() => {
+    const prev = prevRebuildDirRef.current;
+    prevRebuildDirRef.current = readDirection;
+    if (!displayEdges || prev === readDirection) return;
+    if (directionGesture === 'chevron') return;
+    const el = parentRef.current;
+    if (!el) return;
+    cancelRubberBand();
+    markProgrammatic();
+    const rubber = displayPlan?.anchorRubberPx ?? 0;
+    if (anchorEdge === 'top') el.scrollTop = rubber;
+    else el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - rubber);
+    // displayPlan/anchorEdge belong to the direction that just changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [readDirection, directionGesture, displayEdges]);
 
   // Restore scroll position/anchor on mount (#203, #341)
   const restoredRef = useRef(false);
@@ -3529,6 +3702,22 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         pinAnchor();
         return;
       }
+    }
+    // Non-time sort: keep the topmost row still. Half-row spacers sit at both
+    // ends (variant A) and nothing follows the live edge.
+    if (displayEdges && !isTimeSort) {
+      const hold = fixedTopRef.current;
+      const listGrew = prev.len > 0 && (rows.length !== prev.len || firstKey !== prev.firstKey);
+      if (listGrew && hold && rows.some(r => anchorKey(r) === hold.key)) {
+        atEdgeRef.current = false;
+        anchorRef.current = hold;
+        pinAnchor();
+      } else if (rows.length > 0) {
+        const key = hold && rows.some(r => anchorKey(r) === hold.key) ? hold.key : anchorKey(rows[0]);
+        const offset = rowOffset(key);
+        if (offset != null) fixedTopRef.current = { key, offset };
+      }
+      return;
     }
     if (!isTimeSort || prev.len === 0 || rows.length === 0) return;
 
@@ -4127,16 +4316,21 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   let newerCount: number;
   const rangeMeasured = virtualItems.some(item => item.size > 0);
   const scrollEl = parentRef.current;
+  // Display mode counts toward the anchor. Backward still adds the filtered
+  // pause backlog. Forward only counts rows you can scroll back to x.
+  // The rows are the filtered list the status pill counts (`filteredCount`).
+  const countEdge = displayEdges ? anchorEdge : liveEdge;
+  const countPaused = !(displayEdges && readDirection === 'forward');
   if (isTimeSort) {
     if (telegramRows.length === 0) {
       // Empty list: every filter-visible pause-backlog row counts.
-      newerCount = visiblePausedCount;
+      newerCount = countPaused ? visiblePausedCount : 0;
     } else {
       let mergedOut = 0;
       if (rangeMeasured && scrollEl && virtualizer.getTotalSize() > 0) {
         mergedOut = countMergedScrolledOut(
           telegramRows.length,
-          liveEdge,
+          countEdge,
           scrollEl.scrollTop,
           scrollEl.clientHeight,
           virtualItems,
@@ -4144,10 +4338,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       }
       // Always add the filtered pause backlog — do not use Math.max (that
       // dropped unmerged rows whenever merged-out already exceeded them).
-      newerCount = mergedOut + visiblePausedCount;
+      newerCount = mergedOut + (countPaused ? visiblePausedCount : 0);
     }
   } else {
-    newerCount = visiblePausedCount;
+    newerCount = countPaused ? visiblePausedCount : 0;
   }
   // Across a pause-buffer flush the measured count can briefly drop to 0 —
   // keep sticky only for that unpause frame or while the virtualizer is
@@ -4845,39 +5039,44 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           below the header, not over it. */}
       <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-      {/* Jump-to-live pill — telegrams newer than the newest one on screen
-          (including pause-buffer backlog while follow is still on). */}
-      {liveFollow && isTimeSort && displayNewerCount > 0 && (() => {
-        // Live/fill edge is the chronologically newer end for time sort
-        // (desc→top, asc→bottom). "older" would apply if that edge faced the
-        // older end (keep-oldest follow).
-        const edgeIsNewer = true;
-        const edgeWord = edgeIsNewer ? 'newer' : 'older';
+      {/* Anchor-end pill. Backward: filtered rows up to the anchor, including
+          the pause backlog ("N newer"). Forward: filtered rows you scroll back
+          over to reach x ("N older"); the click scrolls to x. Without a read
+          direction this stays the live-edge newer pill. */}
+      {(displayEdges ? displayNewerCount > 0 : liveFollow && isTimeSort && displayNewerCount > 0) && (() => {
+        const edgeWord = displayEdges && readDirection === 'forward' ? 'older' : 'newer';
+        const pillEdge = displayEdges ? (isTimeSort ? anchorEdge : 'top') : liveEdge;
         const edgeLabel = displayNewerCount === 1
           ? `${edgeWord} telegram`
           : `${edgeWord} telegrams`;
         return (
           <button
-            onClick={e => jumpToLive(e.ctrlKey, !e.ctrlKey)}
+            onClick={e => {
+              if (displayEdges && readDirection === 'forward') {
+                scrollToAnchor();
+                return;
+              }
+              jumpToLive(e.ctrlKey, !e.ctrlKey);
+            }}
             className="jump-to-live-pill"
             data-jump-to-live-pill=""
             data-edge-kind={edgeWord}
             ref={attachPillWheel}
-            data-edge={liveEdge}
+            data-edge={pillEdge}
             aria-label={`${displayNewerCount.toLocaleString()} ${edgeLabel}`}
             style={{
               position: 'absolute', left: '50%', zIndex: 20,
-              ...(liveEdge === 'top'
+              ...(pillEdge === 'top'
                 ? { top: EDGE_PILL_CENTER, transform: 'translate(-50%, -50%)' }
                 : { bottom: EDGE_PILL_CENTER, transform: 'translate(-50%, 50%)' }),
             }}
-            title={isManualPause
-              ? (edgeIsNewer
+            title={readDirection === 'forward'
+              ? 'Scroll back to the anchor'
+              : isManualPause
                 ? 'Jump to the newest telegram. Ctrl-click resumes.'
-                : 'Jump to the oldest telegram. Ctrl-click resumes.')
-              : 'Jump back to the live edge'}
+                : 'Jump back to the live edge'}
           >
-            {liveEdge === 'top' ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+            {pillEdge === 'top' ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
             {displayNewerCount.toLocaleString()} {edgeLabel}
           </button>
         );
@@ -5025,6 +5224,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       <div
         ref={parentRef}
         data-telegram-scroll=""
+        data-anchor-px={displayPlan ? displayPlan.anchorPx : undefined}
+        data-reading-px={displayPlan ? displayPlan.readingPx : undefined}
+        data-anchor-edge={displayPlan ? anchorEdge : undefined}
         onScroll={handleScroll}
         onWheel={e => handleScrollGesture(e.deltaY)}
         onTouchMove={noteUserScroll}
@@ -5052,9 +5254,29 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           </div>
         ) : (
           <>
-            {/* Opposite short-list travel sits outside the virtualizer; fill rubber is paddingStart/End. */}
+            {/* Opposite short-list travel sits outside the virtualizer; fill rubber is paddingStart/End.
+                Display mode puts the anchor rubber or the reading block on that side. */}
+            {displayPlan && readingIsLive && readingEdge === 'top' && (
+              <ReadingSpacer
+                height={readingBlockPx}
+                markerPx={displayPlan.markerPx}
+                markerAt="end"
+                label={READING_END_LABEL[readingEnd ?? 'data']}
+              />
+            )}
             {liveEdge === 'bottom' && oppositeSpacerPx > 0 && (
-              <div aria-hidden style={{ height: `${oppositeSpacerPx}px`, width: '100%' }} />
+              displayPlan
+                ? (readingIsLive
+                  ? <div data-testid="anchor-spacer" aria-hidden style={{ height: oppositeSpacerPx, width: '100%' }} />
+                  : (
+                    <ReadingSpacer
+                      height={oppositeSpacerPx}
+                      markerPx={displayPlan.markerPx}
+                      markerAt="end"
+                      label={READING_END_LABEL[readingEnd ?? 'data']}
+                    />
+                  ))
+                : <div aria-hidden style={{ height: `${oppositeSpacerPx}px`, width: '100%' }} />
             )}
             <div
               ref={listContentRef}
@@ -5245,8 +5467,27 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             });
             })()}
             </div>
+            {displayPlan && readingIsLive && readingEdge === 'bottom' && (
+              <ReadingSpacer
+                height={readingBlockPx}
+                markerPx={displayPlan.markerPx}
+                markerAt="start"
+                label={READING_END_LABEL[readingEnd ?? 'data']}
+              />
+            )}
             {liveEdge === 'top' && oppositeSpacerPx > 0 && (
-              <div aria-hidden style={{ height: `${oppositeSpacerPx}px`, width: '100%' }} />
+              displayPlan
+                ? (readingIsLive
+                  ? <div data-testid="anchor-spacer" aria-hidden style={{ height: oppositeSpacerPx, width: '100%' }} />
+                  : (
+                    <ReadingSpacer
+                      height={oppositeSpacerPx}
+                      markerPx={displayPlan.markerPx}
+                      markerAt="start"
+                      label={READING_END_LABEL[readingEnd ?? 'data']}
+                    />
+                  ))
+                : <div aria-hidden style={{ height: `${oppositeSpacerPx}px`, width: '100%' }} />
             )}
           </>
         )}

@@ -13,7 +13,9 @@ import {
   TelegramCoverageService,
   loadCoverageIntervals,
   saveCoverageIntervals,
+  type Interval,
 } from '../services/telegram-coverage-service';
+import { gapsBetween, readingEndCause, type ReadingEndCause } from '../utils/telegramDisplay';
 
 /** How often the pending live batch is flushed to IndexedDB. */
 const FLUSH_INTERVAL_MS = 2000;
@@ -238,6 +240,16 @@ export interface TelegramCache {
   adoptAnchorDirection: (direction: 'forward' | 'backward') => void;
   /** Minute window used when deciding whether a forward live telegram fits. */
   setBufferRangeMinutes: (minutes: number) => void;
+  /**
+   * Covered intervals (sorted, merged). Rows past an open gap from the anchor
+   * are not part of the list. A new array whenever the in-buffer holes change.
+   */
+  covered: readonly Interval[];
+  /**
+   * Which limit stopped the reading end: `range`, `loadlimit`, `data`, or
+   * `loading` while a hole is still open or a fetch is in flight.
+   */
+  readingEnd: ReadingEndCause;
   /**
    * Drop telegrams outside `[minTs, maxTs]` and enforce maxSize with the
    * current eviction mode. Publishes when anything changed.
@@ -481,12 +493,39 @@ export function useTelegramCache(
     [trackRemoved],
   );
 
+  /**
+   * Bumps when a hole inside the buffered span opens or closes. Extending the
+   * live tail past the newest telegram does not, so the quiet flush does not
+   * rebuild the list.
+   */
+  const coverageSigRef = useRef('');
+  const [coverageRev, setCoverageRev] = useState(0);
+  // Stamped from effects and the cache flush. Not read from `Date.now` during render.
+  const nowRef = useRef(0);
+  useEffect(() => {
+    nowRef.current = Date.now();
+  }, []);
+  const noteCoverage = useCallback(() => {
+    const buf = bufferRef.current;
+    const coveredNow = coverageRef.current!.covered;
+    const oldest = buf?.oldestTs ?? null;
+    const newest = buf?.newestTs ?? null;
+    const inside = oldest == null || newest == null
+      ? ''
+      : gapsBetween(coveredNow, oldest, newest).map(gap => `${gap[0]}:${gap[1]}`).join('|');
+    const sig = `${inside}#${coveredNow.length}`;
+    if (sig === coverageSigRef.current) return;
+    coverageSigRef.current = sig;
+    setCoverageRev(n => n + 1);
+  }, []);
+
   const saveCoverage = useCallback(() => {
+    noteCoverage();
     // Defer saving while IDB writes are in flight so a crash between the
     // coverage save and the IDB commit can't leave orphaned coverage (#317).
     if (pendingStoreCountRef.current > 0) return;
     saveCoverageIntervals(coverageRef.current!.covered);
-  }, []);
+  }, [noteCoverage]);
 
   /**
    * Re-reads one millisecond a full page could not finish, merges and stores it.
@@ -896,7 +935,11 @@ export function useTelegramCache(
         commitPendingStore(pending);
       }
       // A quiet-but-connected stream still covers the elapsed time.
-      if (connectedRef.current && !deferQuiet) coverageRef.current!.extendLive(Date.now());
+      if (connectedRef.current && !deferQuiet) {
+        const now = Date.now();
+        nowRef.current = now;
+        coverageRef.current!.extendLive(now);
+      }
       saveCoverage();
     };
 
@@ -1206,6 +1249,25 @@ export function useTelegramCache(
     ? telegramTs(telegrams[0])
     : null;
 
+  // Coverage lives on the service. This render reads it; `coverageRev` republishes
+  // when a hole inside the buffered span opens or closes.
+  void coverageRev;
+  /* eslint-disable react-hooks/refs -- anchor, range and coverage are the live book */
+  const covered = coverageRef.current!.covered;
+  const readingEnd = readingEndCause({
+    direction: anchorRef.current.direction,
+    anchorTs: anchorRef.current.ts,
+    oldestTs: bufferRef.current!.oldestTs,
+    newestTs: bufferRef.current!.newestTs,
+    rangeMs: rangeMsOf(rangeMinutesRef.current),
+    bufferCount: bufferRef.current!.length,
+    loadLimit: maxSize,
+    covered,
+    loading: activeLoads > 0 || fillingGaps,
+    now: nowRef.current,
+  });
+  /* eslint-enable react-hooks/refs */
+
   /* eslint-disable react-hooks/refs -- pausedTelegrams is the stable backlog above */
   return {
     telegrams,
@@ -1233,6 +1295,8 @@ export function useTelegramCache(
     setBufferRangeMinutes,
     trimToTimeWindow,
     enforceTimeWindow,
+    covered,
+    readingEnd,
   };
   /* eslint-enable react-hooks/refs */
 }

@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 import { SecondsField } from './SecondsField';
+import { statusPillCount } from '../utils/telegramDisplay';
 
 const INPUT_FMT = "yyyy-MM-dd'T'HH:mm:ss";
 /** Local datetime-with-seconds display width (YYYY-MM-DDTHH:mm:ss). */
@@ -192,9 +193,10 @@ export function BufferStatusPill({
     if (!rangeFocused) setRangeDraft(formatRangeMinutes(rangeMinutes, rangeUnit));
   }
 
+  const shownCount = statusPillCount(filteredCount, totalCount, filterActive);
   const countText = filterActive
-    ? `${filteredCount}/${totalCount}`
-    : String(totalCount);
+    ? `${shownCount}/${totalCount}`
+    : String(shownCount);
 
   const countWidthCh = useMemo(() => Math.max(1, countText.length), [countText]);
 

@@ -279,6 +279,9 @@ function App() {
   });
   const [monitorView, setMonitorView] = useState<MonitorView>(initialMonitor.view);
   const readDirection = monitorView.direction;
+  // Chevron keeps the current rows and only swaps the spacers. Every other
+  // direction change rebuilds the list onto the anchor.
+  const [directionGesture, setDirectionGesture] = useState<'chevron' | 'rebuild'>('rebuild');
   const listFollow = monitorView.follow;
   const pauseMode = monitorView.pauseMode;
   const [quickFilterOpen, setQuickFilterOpen] = useState(initialUiState.quickFilter.open);
@@ -422,6 +425,8 @@ function App() {
     adoptAnchorDirection,
     setBufferRangeMinutes: setCacheRangeMinutes,
     enforceTimeWindow,
+    covered: coveredIntervals,
+    readingEnd,
   } = useTelegramCache(
     loadLimit,
     // An explicit anchor loads through fillAnchorWindow instead of the
@@ -728,6 +733,7 @@ function App() {
           ? prev
           : { ...prev, direction: ws.readDirection, anchorTs: ws.anchorTs },
       ));
+      if (cur != null && cur.direction !== ws.readDirection) setDirectionGesture('rebuild');
       setBufferRangeMinutes(ws.rangeMinutes);
       if (sameWindow) return;
       // Back/Forward restores the window the URL names. Follow and pause stay.
@@ -1236,6 +1242,7 @@ function App() {
     /** Chevron: no timestamp. Forward→backward lands on the edge, auto, not live. */
     edge = false,
   ) => {
+    setDirectionGesture(edge ? 'chevron' : 'rebuild');
     const switched = readDirection !== dir;
     // Forward has nothing to restore. Latch auto only after `after` publishes
     // the window — pausing first would hide that fill.
@@ -2005,6 +2012,11 @@ function App() {
                     onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
                     listFollow={readDirection === 'backward' && listFollow}
                     liveFollow={readDirection === 'backward'}
+                    readDirection={readDirection}
+                    directionGesture={directionGesture}
+                    covered={coveredIntervals}
+                    bufferAnchorTs={bufferAnchor.ts}
+                    readingEnd={readingEnd}
                     onListFollowChange={handleListFollowChange}
                     isPaused={isPaused}
                     isManualPause={readDirection === 'backward' && pauseMode === 'manual'}
