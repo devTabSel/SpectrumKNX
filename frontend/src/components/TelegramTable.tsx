@@ -7,10 +7,13 @@ import { ChevronUp, ChevronDown, ChevronLeft, Filter, LineChart, X, Clock, Plus,
 import { effectiveDeltaContext, enabledFilters, matchesTelegram, type ActiveFilters } from '../types/filters';
 import {
   contextRailSigns,
+  contextSidesTristate,
   expandWithDeltaContext,
   individualWindowOn,
+  toggleIndividualContextWindows,
   type IndividualContextWindows,
 } from '../utils/deltaContextExpansion';
+import { nextTriState, triStateAriaChecked } from '../utils/triState';
 import { SendToGaHost, SendToGaPopover, type ListScrollSnapshot } from './SendToGaPopover';
 import { EventTypeLabel } from './EventTypeLabel';
 import { type LinkedRowStatus } from './WriteToBusPanel';
@@ -196,8 +199,8 @@ interface TelegramTableProps {
   // individually flagged to always anchor a context window around themselves.
   flaggedKeys?: string[];
   onFlaggedKeysChange?: (keys: string[]) => void;
-  /** Global "all" state of the Time-Delta-Context (#319): every row that is
-   * not itself context anchors a window, whether flagged or not. */
+  /** Global "all" state of the Time-Delta-Context (#319): every visible row
+   * anchors a window, including context rows, except rows marked explicit-off. */
   contextForAllMatches?: boolean;
   onContextForAllMatchesChange?: (all: boolean) => void;
   /** Per-row before/after in ms. Missing key uses the quick-filter window. */
@@ -1318,13 +1321,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     onContextForAllMatchesChange?.(val);
   }, [onContextForAllMatchesChange]);
 
-  // Whether a row anchors a context window: flagged, or — in the global "all"
-  // state — any row that is not itself only there as context.
-  const anchorsContext = useCallback(
-    (key: string) => flaggedSet.has(key) || (contextForAll && !contextKeys?.has(key)),
-    [flaggedSet, contextForAll, contextKeys]
-  );
-
   const { before: deltaBeforeMs, after: deltaAfterMs } = effectiveDeltaContext(activeFilters);
 
   // Focus filter runs before quick-filter once the parent supplies a focus list.
@@ -1551,51 +1547,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
     return out;
   }, [contextParents, mouseKeySet, parentTimestampByKey]);
-
-  // ── Global Time-Delta-Context tristate (#318, #319) ─────────────────────────
-  // "all": every filter match anchors a window, including telegrams still to
-  // arrive. Otherwise it reflects the per-message flags among the visible
-  // rows: "some" or "none". Plain click switches none -> all and some/all ->
-  // none, overriding the per-message flags. Ctrl/cmd-click on mixed ("some")
-  // promotes to all; on "all" with unflagged visible context rows, flags those
-  // context rows so their buttons are set too. Never toggles the window on/off.
-  const deltaFlagState: 'none' | 'some' | 'all' = useMemo(() => {
-    if (contextForAll) return 'all';
-    if (flaggedSet.size === 0) return 'none';
-    return telegramRows.some(t => flaggedSet.has(anchorKey(t))) ? 'some' : 'none';
-  }, [telegramRows, flaggedSet, contextForAll]);
-
-  const handleDeltaToggleClick = useCallback((e: React.MouseEvent) => {
-    if (e.ctrlKey || e.metaKey) {
-      if (deltaFlagState === 'some') {
-        setContextForAll(true);
-        setFlaggedKeysList([]);
-        requestDisplayPinRef.current();
-        return;
-      }
-      if (deltaFlagState === 'all' && contextKeys?.size) {
-        const unflaggedContext = telegramRows
-          .map(t => anchorKey(t))
-          .filter(k => contextKeys.has(k) && !flaggedSet.has(k));
-        if (unflaggedContext.length > 0) {
-          setFlaggedKeysList([...new Set([...flaggedKeysList, ...unflaggedContext])]);
-          requestDisplayPinRef.current();
-        }
-      }
-      return;
-    }
-    setContextForAll(deltaFlagState === 'none');
-    setFlaggedKeysList([]);
-    requestDisplayPinRef.current();
-  }, [
-    deltaFlagState,
-    setFlaggedKeysList,
-    setContextForAll,
-    contextKeys,
-    telegramRows,
-    flaggedSet,
-    flaggedKeysList,
-  ]);
 
   // ── Quick info bar metrics (#311) ───────────────────────────────────────────
   // Summarizes the currently visible (sorted + filtered) rows; oldest/newest
@@ -2857,13 +2808,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   }, [viewChangeToken]);
 
   // Per-side before/after for a row that currently anchors context. Unanchored
-  // rows are both off. An individual window replaces the QF window; otherwise
-  // each side is on when that QF side has a positive span.
+  // rows are both off. In global "all", every row anchors — matches and context
+  // rows — except an explicit-off entry. An individual window replaces the QF
+  // window; otherwise each side is on when that QF side has a positive span.
   const contextSidesOf = useCallback((key: string): { before: boolean; after: boolean; beforeMs: number; afterMs: number } => {
-    if (!anchorsContext(key)) {
+    const indiv = individualWindows[key];
+    if (indiv?.off || (!flaggedSet.has(key) && !contextForAll)) {
       return { before: false, after: false, beforeMs: 0, afterMs: 0 };
     }
-    const indiv = individualWindows[key];
     if (individualWindowOn(indiv)) {
       return {
         before: indiv!.beforeMs > 0,
@@ -2875,12 +2827,58 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     const beforeMs = activeFilters.deltaBeforeMs;
     const afterMs = activeFilters.deltaAfterMs;
     return { before: beforeMs > 0, after: afterMs > 0, beforeMs, afterMs };
-  }, [anchorsContext, individualWindows, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs]);
+  }, [flaggedSet, contextForAll, individualWindows, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs]);
+
+  // Header tristate follows the visible rows. An empty list keeps the all-mode
+  // latch visible so the control can still be switched off.
+  const deltaFlagState: 'none' | 'some' | 'all' = useMemo(() => {
+    if (telegramRows.length === 0) return contextForAll ? 'all' : 'none';
+    return contextSidesTristate(telegramRows.map(t => contextSidesOf(anchorKey(t))));
+  }, [telegramRows, contextForAll, contextSidesOf]);
+  const anyIndividualActive = useMemo(
+    () => Object.values(individualWindows).some(individualWindowOn),
+    [individualWindows],
+  );
+
+  const handleDeltaToggleClick = useCallback((e: React.MouseEvent) => {
+    // Alt toggles individual windows only. It does not change the tristate.
+    if (e.altKey) {
+      setIndividualWindows(toggleIndividualContextWindows(individualWindows));
+      requestDisplayPinRef.current();
+      return;
+    }
+    const next = nextTriState(deltaFlagState, { ctrl: e.ctrlKey || e.metaKey });
+    if (next === 'all') {
+      setContextForAll(true);
+      setFlaggedKeysList([]);
+      let droppedOff = false;
+      const kept: IndividualContextWindows = {};
+      for (const [k, w] of Object.entries(individualWindows)) {
+        if (w.off) { droppedOff = true; continue; }
+        kept[k] = w;
+      }
+      if (droppedOff) setIndividualWindows(kept);
+    } else {
+      setContextForAll(false);
+      setFlaggedKeysList([]);
+      let droppedOff = false;
+      const kept: IndividualContextWindows = {};
+      for (const [k, w] of Object.entries(individualWindows)) {
+        if (!w.off) { kept[k] = w; continue; }
+        droppedOff = true;
+        if (w.beforeMs > 0 || w.afterMs > 0) {
+          kept[k] = { beforeMs: w.beforeMs, afterMs: w.afterMs, enabled: w.enabled !== false };
+        }
+      }
+      if (droppedOff) setIndividualWindows(kept);
+    }
+    requestDisplayPinRef.current();
+  }, [deltaFlagState, individualWindows, setIndividualWindows, setContextForAll, setFlaggedKeysList]);
 
   // + toggles after, − toggles before. Ctrl/Cmd applies the clicked side's next
-  // state to both sides. Context-only rows can still take a personal window
-  // without tearing down global "all"; switching an "all"-mode match still
-  // materializes the others. Pin via mousedown offset already stored.
+  // state to both sides. All-mode stays on: a personal window does not
+  // materialize the other anchors, and both sides off is explicit-off.
+  // Pin the clicked row so the list does not scroll.
   const handleContextSideClick = useCallback((
     e: React.MouseEvent,
     key: string,
@@ -2901,35 +2899,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       after: side === 'after' ? nextClicked : (alsoOther ? nextClicked : s.after),
     });
 
-    const clearTargets = (flags: string[]) => {
-      const nextWindows = { ...individualWindows };
-      for (const k of targets) delete nextWindows[k];
-      setIndividualWindows(nextWindows);
-      setFlaggedKeysList(flags);
-    };
-
-    const allOff = [...targets].every(k => {
-      const n = sideIntent(contextSidesOf(k));
-      return !n.before && !n.after;
-    });
-    if (allOff) {
-      // Both sides off — same materialize path as the former whole-flag off.
-      const turningOffAllModeAnchor = contextForAll && [...targets].some(
-        k => !flaggedSet.has(k) && !contextKeys?.has(k),
-      );
-      if (turningOffAllModeAnchor) {
-        const current = [...new Set([
-          ...flaggedKeysList,
-          ...telegrams.map(anchorKey).filter(k => !contextKeys?.has(k)),
-        ])];
-        setContextForAll(false);
-        clearTargets(current.filter(k => !targets.has(k)));
-        return;
-      }
-      clearTargets(flaggedKeysList.filter(k => !targets.has(k)));
-      return;
-    }
-
     const qfBefore = activeFilters.deltaBeforeMs;
     const qfAfter = activeFilters.deltaAfterMs;
     const resolveMs = (
@@ -2946,27 +2915,17 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       return 0;
     };
 
-    // Leaving "all" when an implicit match anchor gets a personal side config.
-    const leavingAllMode = contextForAll && [...targets].some(
-      k => !flaggedSet.has(k) && !contextKeys?.has(k),
-    );
-    let nextFlags: string[];
-    if (leavingAllMode) {
-      nextFlags = [...new Set([
-        ...flaggedKeysList,
-        ...telegrams.map(anchorKey).filter(k => !contextKeys?.has(k)),
-      ])];
-      setContextForAll(false);
-    } else {
-      nextFlags = [...flaggedKeysList];
-    }
-
     const nextWindows = { ...individualWindows };
+    let nextFlags = [...flaggedKeysList];
     for (const k of targets) {
       const s = contextSidesOf(k);
       const { before: nextBefore, after: nextAfter } = sideIntent(s);
       if (!nextBefore && !nextAfter) {
-        delete nextWindows[k];
+        if (contextForAll) {
+          nextWindows[k] = { beforeMs: 0, afterMs: 0, enabled: false, off: true };
+        } else {
+          delete nextWindows[k];
+        }
         nextFlags = nextFlags.filter(f => f !== k);
         continue;
       }
@@ -2978,13 +2937,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       } else {
         nextWindows[k] = { beforeMs, afterMs, enabled: true };
       }
-      if (!nextFlags.includes(k)) nextFlags.push(k);
+      // Outside all-mode the flag is the anchor. Inside all-mode the row
+      // already anchors, so a personal window must not write new flags.
+      if (!contextForAll && !nextFlags.includes(k)) nextFlags.push(k);
     }
     setIndividualWindows(nextWindows);
     setFlaggedKeysList(nextFlags);
   }, [
-    contextSidesOf, flaggedKeysList, setFlaggedKeysList, contextForAll, setContextForAll,
-    telegrams, contextKeys, flaggedSet, individualWindows, setIndividualWindows,
+    contextSidesOf, flaggedKeysList, setFlaggedKeysList, contextForAll,
+    individualWindows, setIndividualWindows,
     activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs,
   ]);
 
@@ -3038,6 +2999,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     const beforeMs = before === '' ? 0 : Number(before);
     const afterMs = after === '' ? 0 : Number(after);
     if (!Number.isFinite(beforeMs) || beforeMs < 0 || !Number.isFinite(afterMs) || afterMs < 0) return;
+    requestDisplayPinRef.current(contextWindowPopup.targets[0]);
     const empty = beforeMs === 0 && afterMs === 0;
     const hasTimes = !empty && (beforeMs > 0 || afterMs > 0);
     // On/Off steers whether the individual window is applied (thick circle) or
@@ -3054,15 +3016,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       else next[key] = { beforeMs, afterMs, enabled };
     }
     setIndividualWindows(next);
-    // Both On and Off with times keep the row anchoring so header (Off) or
-    // individual (On) context still expands around it.
-    if (hasTimes) {
+    // Outside all-mode, times keep the row anchoring (the flag is the anchor).
+    // All-mode already anchors every row, so the popup must not write flags
+    // or leave all-mode. An explicit-off entry is replaced by this window.
+    if (hasTimes && !contextForAll) {
       setFlaggedKeysList([...new Set([...flaggedKeysList, ...contextWindowPopup.targets])]);
     }
     setContextWindowPopup(null);
   }, [
     contextWindowPopup, individualWindows, flaggedKeysList, setIndividualWindows, setFlaggedKeysList,
-    activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs,
+    contextForAll, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs,
   ]);
 
   useEffect(() => {
@@ -4298,6 +4261,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         const rowKey = anchorKey(t);
         const isContextRow = !!contextKeys?.has(rowKey);
         const personallyFlagged = flaggedSet.has(rowKey);
+        const explicitOff = !!individualWindows[rowKey]?.off;
         const ownWindowOn = individualWindowOn(individualWindows[rowKey]);
         const sides = contextSidesOf(rowKey);
         const contextBtn = (side: 'before' | 'after') => {
@@ -4306,7 +4270,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           // Colour = side on/off. Ring weight = individual window only (independent of colour).
           const ringColor = sideOn ? 'var(--accent-primary)' : 'var(--text-dim)';
           const ringWidth = ownWindowOn ? 2.5 : 1;
-          const titleCore = isContextRow && !personallyFlagged && !sideOn
+          const titleCore = explicitOff
+            ? `Explicitly off while all-mode is active — this message anchors no context. Click to turn ${sideLabel} on (applies to all selected rows)`
+            : isContextRow && !personallyFlagged && !sideOn
             ? `Show ${sideLabel} context around this message — give this context row its own window (applies to all selected rows)`
             : sideOn
               ? `${sideLabel.charAt(0).toUpperCase()}${sideLabel.slice(1)} context is shown around this message — click to switch it off (applies to all selected rows)`
@@ -4318,6 +4284,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               data-context-flag=""
               data-context-side={side}
               data-context-side-on={sideOn ? 'true' : undefined}
+              data-context-explicit-off={explicitOff ? 'true' : undefined}
               data-individual-window={ownWindowOn ? 'true' : undefined}
               style={{
                 background: 'transparent',
@@ -5067,25 +5034,31 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 && activeFilters.deltaContextEnabled
                 && (activeFilters.deltaBeforeMs > 0 || activeFilters.deltaAfterMs > 0) && (
                 <span
+                  role="checkbox"
+                  aria-checked={triStateAriaChecked(deltaFlagState)}
+                  data-individual-active={anyIndividualActive ? 'true' : undefined}
                   onClick={e => {
                     e.stopPropagation();
                     handleDeltaToggleClick(e);
                   }}
                   title={
                     deltaFlagState === 'all'
-                      ? 'Time-Delta-Context: around all messages. Click to switch it off for all of them. Ctrl/cmd-click to also set the button on visible context rows.'
+                      ? 'Time-Delta-Context: around all messages — every visible row has both sides on. Click or Ctrl/Cmd-click to switch it off. Alt-click toggles individual windows (values stay; off uses the quick-filter window).'
                       : deltaFlagState === 'some'
-                        ? 'Time-Delta-Context: around the flagged messages only. Click to clear the flags. Ctrl/cmd-click to show it around all messages.'
-                        : 'Time-Delta-Context: around no message. Click to show it around all messages.'
+                        ? 'Time-Delta-Context: mixed — not every visible message has both sides on. A row can be explicitly off while all-mode stays active. Click to switch all off. Ctrl/Cmd-click turns every visible row on. Alt-click toggles individual windows.'
+                        : 'Time-Delta-Context: around no message. Click or Ctrl/Cmd-click turns every visible row on. Alt-click toggles individual windows.'
                   }
                   style={{
                     display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                     width: 16, height: 16, flexShrink: 0, boxSizing: 'border-box',
                     borderRadius: '50%',
-                    border: `1.5px solid ${deltaFlagState === 'none' ? 'var(--text-dim)' : 'var(--accent-primary)'}`,
+                    borderStyle: 'solid',
+                    borderWidth: anyIndividualActive ? 2.5 : 1.5,
+                    borderColor: deltaFlagState === 'none' ? 'var(--text-dim)' : 'var(--accent-primary)',
                     userSelect: 'none', cursor: 'pointer',
                     // Match row +/- context circles (16×16). all: filled inner
-                    // dot; none/some: empty (grey / blue ring).
+                    // dot; none/some: empty (grey / blue ring). A thick ring
+                    // means some row has an active individual window.
                     color: deltaFlagState === 'none' ? 'var(--text-dim)' : 'var(--accent-primary)',
                   }}
                   aria-label={

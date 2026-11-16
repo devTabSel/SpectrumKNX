@@ -98,7 +98,10 @@ function sanitizeIndividualContextWindows(raw: unknown): IndividualContextWindow
   const out: IndividualContextWindows = {};
   for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
     if (key.length === 0 || !val || typeof val !== 'object' || Array.isArray(val)) continue;
-    const raw = val as { beforeMs?: unknown; afterMs?: unknown; beforeSec?: unknown; afterSec?: unknown; enabled?: unknown };
+    const raw = val as {
+      beforeMs?: unknown; afterMs?: unknown; beforeSec?: unknown; afterSec?: unknown;
+      enabled?: unknown; off?: unknown;
+    };
     // Prefer ms; legacy sessions stored seconds.
     let beforeMs = sanitizeSeconds(raw.beforeMs);
     let afterMs = sanitizeSeconds(raw.afterMs);
@@ -108,6 +111,10 @@ function sanitizeIndividualContextWindows(raw: unknown): IndividualContextWindow
       if (beforeSec == null || afterSec == null) continue;
       beforeMs = beforeSec * 1000;
       afterMs = afterSec * 1000;
+    }
+    if (raw.off === true) {
+      out[key] = { beforeMs, afterMs, enabled: false, off: true };
+      continue;
     }
     const on = (beforeMs > 0 || afterMs > 0) && raw.enabled !== false;
     out[key] = { beforeMs, afterMs, enabled: on };

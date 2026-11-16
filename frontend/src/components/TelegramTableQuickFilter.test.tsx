@@ -273,7 +273,7 @@ test('flagging a single row limits the context to that message (#319)', () => {
   const row = rows.find(r => r.textContent?.includes('Licht Flur'))!;
   clickBothSides(flagButton(row));
 
-  expect(screen.getByTitle(/around the flagged messages only/)).toBeInTheDocument();
+  expect(screen.getByRole('checkbox', { name: 'Time-Delta-Context: some' })).toHaveAttribute('aria-checked', 'mixed');
   expect(rows.filter(isFlagged)).toEqual([row]);
   expect(onFlaggedKeysChange.mock.lastCall![0]).toHaveLength(1);
 });
@@ -285,14 +285,17 @@ test('switching one row off while all are on keeps the context around the others
 
   clickBothSides(flagButton(rows[0]));
 
-  expect(screen.getByTitle(/around the flagged messages only/)).toBeInTheDocument();
+  // Both sides off in all-mode is explicit off: all-mode stays, header is mixed.
+  expect(screen.getByRole('checkbox', { name: 'Time-Delta-Context: some' })).toHaveAttribute('aria-checked', 'mixed');
   expect(rows.map(isFlagged)).toEqual([false, ...rows.slice(1).map(() => true)]);
+  expect(flagButton(rows[0]).getAttribute('data-context-explicit-off')).toBe('true');
 });
 
-test('context-row button flags that row as its own anchor without leaving all-mode', () => {
+test('in all-mode a context row inherits both sides; turning both off stays in all', () => {
   const onFlaggedKeysChange = vi.fn();
   const onContextForAllMatchesChange = vi.fn();
-  // Parent supplies a context-only neighbour; "all" still covers matches.
+  const onIndividualContextWindowsChange = vi.fn();
+  // Parent supplies a context-only neighbour; "all" covers it too.
   const contextKey = anchorKey(TELEGRAMS[2]); // Jalousie Bad
   const { container } = renderTable({
     activeFilters: FILTERS_WITH_DELTA,
@@ -300,19 +303,23 @@ test('context-row button flags that row as its own anchor without leaving all-mo
     contextForAllMatches: true,
     onFlaggedKeysChange,
     onContextForAllMatchesChange,
+    onIndividualContextWindowsChange,
   });
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
 
   const contextRow = [...container.querySelectorAll('.log-row')]
     .find(r => r.getAttribute('data-akey') === contextKey)!;
-  expect(isFlagged(contextRow)).toBe(false);
+  expect(contextRow.classList.contains('context')).toBe(true);
+  expect(isFlagged(contextRow)).toBe(true);
 
   clickBothSides(flagButton(contextRow));
-  expect(onFlaggedKeysChange).toHaveBeenLastCalledWith([contextKey]);
-  // Personal flag only — do not tear down global "all".
   expect(onContextForAllMatchesChange).not.toHaveBeenCalled();
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({
+    [contextKey]: { beforeMs: 0, afterMs: 0, enabled: false, off: true },
+  });
+  expect(isFlagged(contextRow)).toBe(false);
 
-  // Flagging keeps context classification — parent still reports contextKeys.
+  // A personal flag does not leave all-mode, and both sides off clears it.
   const { container: c2 } = renderTable({
     activeFilters: FILTERS_WITH_DELTA,
     contextKeys: new Set([contextKey]),
@@ -320,6 +327,7 @@ test('context-row button flags that row as its own anchor without leaving all-mo
     flaggedKeys: [contextKey],
     onFlaggedKeysChange,
     onContextForAllMatchesChange,
+    onIndividualContextWindowsChange,
   });
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
   onFlaggedKeysChange.mockClear();
@@ -332,6 +340,9 @@ test('context-row button flags that row as its own anchor without leaving all-mo
   clickBothSides(flagButton(flaggedContext));
   expect(onFlaggedKeysChange).toHaveBeenLastCalledWith([]);
   expect(onContextForAllMatchesChange).not.toHaveBeenCalled();
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({
+    [contextKey]: { beforeMs: 0, afterMs: 0, enabled: false, off: true },
+  });
 });
 
 test('mousedown on a context button pins that row and passes through mouse selection', async () => {
@@ -746,8 +757,9 @@ test('alt-click drafts an individual context window; Enter commits, Esc/outside 
     [selected[0]]: { beforeMs: 150, afterMs: 250, enabled: true },
     [selected[1]]: { beforeMs: 150, afterMs: 250, enabled: true },
   });
-  expect(onFlaggedKeysChange).toHaveBeenCalled();
-  expect(onFlaggedKeysChange.mock.lastCall![0]).toEqual(expect.arrayContaining(selected));
+  // All-mode stays latched, so the popup does not write anchor flags.
+  expect(onFlaggedKeysChange).not.toHaveBeenCalled();
+  expect(screen.getByRole('checkbox', { name: 'Time-Delta-Context: all' })).toBeInTheDocument();
   expect(screen.queryByTestId('context-window-popup')).not.toBeInTheDocument();
   // Individual window on → context button always highlighted.
   expect(flagButton(logRows()[0]).getAttribute('data-individual-window')).toBe('true');
@@ -920,4 +932,122 @@ test('empty QF before hides − circle; empty after hides + (unless that side is
   );
   expect(flagButton(row(), 'before')).toBeTruthy();
   expect(flagButton(row(), 'after')).toBeNull();
+});
+
+test('header clicks follow the shared tristate, including ctrl, and pin the anchor row', async () => {
+  const onContextForAllMatchesChange = vi.fn();
+  const onListAnchorKeyChange = vi.fn();
+  const { container } = renderTable({
+    activeFilters: FILTERS_WITH_DELTA,
+    quickFilterOpen: true,
+    quickFilterEnabled: true,
+    onContextForAllMatchesChange,
+    onListAnchorKeyChange,
+  });
+  const header = () => screen.getByRole('checkbox', { name: /Time-Delta-Context:/ });
+  expect(header()).toHaveAttribute('aria-checked', 'true');
+
+  fireEvent.click(header());
+  expect(onContextForAllMatchesChange).toHaveBeenLastCalledWith(false);
+  expect(header()).toHaveAttribute('aria-checked', 'false');
+
+  fireEvent.click(header(), { ctrlKey: true });
+  expect(onContextForAllMatchesChange).toHaveBeenLastCalledWith(true);
+  expect(header()).toHaveAttribute('aria-checked', 'true');
+
+  fireEvent.click(header(), { ctrlKey: true });
+  expect(onContextForAllMatchesChange).toHaveBeenLastCalledWith(false);
+  expect(header()).toHaveAttribute('aria-checked', 'false');
+
+  const row = [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Licht Flur'))!;
+  clickBothSides(flagButton(row));
+  expect(header()).toHaveAttribute('aria-checked', 'mixed');
+
+  fireEvent.click(header());
+  expect(onContextForAllMatchesChange).toHaveBeenLastCalledWith(false);
+  expect(header()).toHaveAttribute('aria-checked', 'false');
+  expect([...container.querySelectorAll('.log-row')].some(isFlagged)).toBe(false);
+
+  clickBothSides(flagButton(row));
+  fireEvent.click(header(), { ctrlKey: true });
+  expect(onContextForAllMatchesChange).toHaveBeenLastCalledWith(true);
+  expect(header()).toHaveAttribute('aria-checked', 'true');
+  expect([...container.querySelectorAll('.log-row')].every(isFlagged)).toBe(true);
+
+  await vi.waitFor(() => {
+    expect(onListAnchorKeyChange).toHaveBeenCalled();
+  });
+});
+
+test('explicit off in all-mode leaves the header mixed; ctrl on the header turns that row back on', () => {
+  const onIndividual = vi.fn();
+  const onContext = vi.fn();
+  const { container } = renderTable({
+    activeFilters: FILTERS_WITH_DELTA,
+    quickFilterOpen: true,
+    quickFilterEnabled: true,
+    onIndividualContextWindowsChange: onIndividual,
+    onContextForAllMatchesChange: onContext,
+  });
+  const row = () => [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Licht Flur'))!;
+  const key = row().getAttribute('data-akey')!;
+  clickBothSides(flagButton(row()));
+  expect(onContext).not.toHaveBeenCalled();
+  expect(onIndividual).toHaveBeenLastCalledWith({
+    [key]: { beforeMs: 0, afterMs: 0, enabled: false, off: true },
+  });
+  expect(screen.getByRole('checkbox', { name: 'Time-Delta-Context: some' })).toHaveAttribute('aria-checked', 'mixed');
+  expect(isFlagged(row())).toBe(false);
+  expect(flagButton(row()).title).toMatch(/Explicitly off while all-mode is active/);
+
+  onIndividual.mockClear();
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Time-Delta-Context: some' }), { ctrlKey: true });
+  expect(onContext).toHaveBeenLastCalledWith(true);
+  expect(onIndividual).toHaveBeenLastCalledWith({});
+  expect(isFlagged(row())).toBe(true);
+  expect(screen.getByRole('checkbox', { name: 'Time-Delta-Context: all' })).toHaveAttribute('aria-checked', 'true');
+});
+
+test('an individual window in all-mode keeps all on; alt on the header toggles it off and on', () => {
+  const onContext = vi.fn();
+  const { container } = renderTable({
+    activeFilters: FILTERS_WITH_DELTA,
+    quickFilterOpen: true,
+    quickFilterEnabled: true,
+    onContextForAllMatchesChange: onContext,
+  });
+  const row = () => [...container.querySelectorAll('.log-row')].find(r => r.textContent?.includes('Licht Flur'))!;
+  const open = flagButton(row());
+  fireEvent.mouseDown(open, { altKey: true, button: 0 });
+  fireEvent.click(open, { altKey: true });
+  fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '500' } });
+  fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '500' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Off' }));
+  fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
+
+  expect(onContext).not.toHaveBeenCalled();
+  expect(flagButton(row()).getAttribute('data-individual-window')).toBe('true');
+  expect(flagButton(row()).style.borderWidth).toBe('2.5px');
+  const others = [...container.querySelectorAll('.log-row')].filter(r => !r.textContent?.includes('Licht Flur'));
+  for (const other of others) {
+    expect(flagButton(other).hasAttribute('data-individual-window')).toBe(false);
+    expect(isFlagged(other)).toBe(true);
+  }
+  const header = () => screen.getByRole('checkbox', { name: 'Time-Delta-Context: all' });
+  expect(header()).toHaveAttribute('aria-checked', 'true');
+  expect(header()).toHaveAttribute('data-individual-active', 'true');
+  expect(header().style.borderWidth).toBe('2.5px');
+
+  fireEvent.click(header(), { altKey: true });
+  expect(onContext).not.toHaveBeenCalled();
+  expect(flagButton(row()).hasAttribute('data-individual-window')).toBe(false);
+  expect(flagButton(row()).style.borderWidth).toBe('1px');
+  expect(isFlagged(row())).toBe(true);
+  expect(header().style.borderWidth).toBe('1.5px');
+  expect(header().title).toMatch(/Alt-click toggles individual windows/);
+
+  fireEvent.click(header(), { altKey: true });
+  expect(flagButton(row()).getAttribute('data-individual-window')).toBe('true');
+  expect(flagButton(row()).style.borderWidth).toBe('2.5px');
+  expect(header().style.borderWidth).toBe('2.5px');
 });

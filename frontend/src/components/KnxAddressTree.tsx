@@ -3,6 +3,8 @@ import { ChevronDown, ChevronRight, Clock } from 'lucide-react';
 import { SendToGaPopover } from './SendToGaPopover';
 import type { FilterOption } from '../types/filters';
 import type { Telegram } from '../hooks/useWebSocket';
+import { nextTriState, type TriState } from '../utils/triState';
+import { TriStateToggle } from './TriStateToggle';
 
 interface KnxAddressTreeProps {
   entries: FilterOption[];
@@ -19,41 +21,18 @@ interface KnxAddressTreeProps {
   onGotoTelegram?: (telegram: Telegram) => void;
 }
 
-type CheckState = 'checked' | 'partial' | 'unchecked';
-
-function getCheckState(leafAddresses: string[], selected: string[]): CheckState {
+function getCheckState(leafAddresses: string[], selected: string[]): TriState {
   const count = leafAddresses.filter(a => selected.includes(a)).length;
-  if (count === 0) return 'unchecked';
-  if (count === leafAddresses.length) return 'checked';
-  return 'partial';
+  if (count === 0) return 'none';
+  if (count === leafAddresses.length) return 'all';
+  return 'some';
 }
 
-interface TriCheckboxProps {
-  state: CheckState;
-  onClick: () => void;
+function selectionAfterTriToggle(leaves: string[], selected: string[], ctrl: boolean): string[] {
+  const next = nextTriState(getCheckState(leaves, selected), { ctrl });
+  if (next === 'all') return [...new Set([...selected, ...leaves])];
+  return selected.filter(a => !leaves.includes(a));
 }
-
-const TriCheckbox: React.FC<TriCheckboxProps> = ({ state, onClick }) => (
-  <div
-    onClick={e => { e.stopPropagation(); onClick(); }}
-    style={{
-      width: 14, height: 14, flexShrink: 0, borderRadius: 3, cursor: 'pointer',
-      border: `1.5px solid ${state !== 'unchecked' ? 'var(--accent-primary)' : 'var(--border-color)'}`,
-      background: state === 'checked' ? 'var(--accent-primary)' : 'transparent',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      transition: 'all 0.15s',
-    }}
-  >
-    {state === 'checked' && (
-      <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
-        <path d="M1.5 4L3.5 6L6.5 2" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    )}
-    {state === 'partial' && (
-      <div style={{ width: 6, height: 2, background: 'var(--accent-primary)', borderRadius: 1 }} />
-    )}
-  </div>
-);
 
 interface LeafRowProps {
   address: string;
@@ -84,7 +63,7 @@ const LeafRow: React.FC<LeafRowProps> = ({
       onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)'; setHovered(true); }}
       onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; setHovered(false); }}
     >
-      <TriCheckbox state={checked ? 'checked' : 'unchecked'} onClick={onToggle} />
+      <TriStateToggle state={checked ? 'all' : 'none'} onClick={onToggle} label={address} />
       <div style={{ flex: 1, minWidth: 0 }}>
         <div title={address} style={{
           fontSize: '0.8125rem', color: 'var(--text-main)', fontFamily: "'JetBrains Mono', monospace",
@@ -163,7 +142,7 @@ interface GroupNodeProps {
   selected: string[];
   children: React.ReactNode;
   defaultOpen?: boolean;
-  onToggleAll: () => void;
+  onToggleAll: (e: React.MouseEvent) => void;
 }
 
 const GroupNode: React.FC<GroupNodeProps> = ({ label, sublabel, leafAddresses, selected, children, defaultOpen = true, onToggleAll }) => {
@@ -181,7 +160,7 @@ const GroupNode: React.FC<GroupNodeProps> = ({ label, sublabel, leafAddresses, s
         onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-hover)')}
         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
       >
-        <TriCheckbox state={state} onClick={onToggleAll} />
+        <TriStateToggle state={state} onClick={onToggleAll} label={label} />
         <div style={{ flex: 1, minWidth: 0 }} onClick={() => setOpen(o => !o)}>
           <div title={label} style={{
             fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-main)',
@@ -251,14 +230,7 @@ export const KnxAddressTree: React.FC<KnxAddressTreeProps> = ({
               label={l1Label}
               leafAddresses={allL1Leaves}
               selected={selected}
-              onToggleAll={() => {
-                const state = getCheckState(allL1Leaves, selected);
-                if (state === 'checked') {
-                  onToggle(selected.filter(a => !allL1Leaves.includes(a)));
-                } else {
-                  onToggle([...new Set([...selected, ...allL1Leaves])]);
-                }
-              }}
+              onToggleAll={e => onToggle(selectionAfterTriToggle(allL1Leaves, selected, e.ctrlKey || e.metaKey))}
             >
               {leaves.map(e => (
                 <LeafRow key={e.address} address={e.address!} name={e.name ?? ''} checked={selected.includes(e.address!)}
@@ -279,14 +251,7 @@ export const KnxAddressTree: React.FC<KnxAddressTreeProps> = ({
             label={l1Label}
             leafAddresses={allL1Leaves}
             selected={selected}
-            onToggleAll={() => {
-              const state = getCheckState(allL1Leaves, selected);
-              if (state === 'checked') {
-                onToggle(selected.filter(a => !allL1Leaves.includes(a)));
-              } else {
-                onToggle([...new Set([...selected, ...allL1Leaves])]);
-              }
-            }}
+            onToggleAll={e => onToggle(selectionAfterTriToggle(allL1Leaves, selected, e.ctrlKey || e.metaKey))}
           >
             {visibleL2.map(([l2Key, leaves]) => {
               const visibleLeaves = leaves.filter(matchesSearch);
@@ -302,14 +267,7 @@ export const KnxAddressTree: React.FC<KnxAddressTreeProps> = ({
                   leafAddresses={l2Leaves}
                   selected={selected}
                   defaultOpen={false}
-                  onToggleAll={() => {
-                    const state = getCheckState(l2Leaves, selected);
-                    if (state === 'checked') {
-                      onToggle(selected.filter(a => !l2Leaves.includes(a)));
-                    } else {
-                      onToggle([...new Set([...selected, ...l2Leaves])]);
-                    }
-                  }}
+                  onToggleAll={e => onToggle(selectionAfterTriToggle(l2Leaves, selected, e.ctrlKey || e.metaKey))}
                 >
                   {visibleLeaves.map(e => (
                     <LeafRow key={e.address} address={e.address!} name={e.name ?? ''} checked={selected.includes(e.address!)}

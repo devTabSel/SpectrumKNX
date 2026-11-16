@@ -14,15 +14,69 @@ export interface IndividualContextWindow {
   afterMs: number;
   /**
    * Explicit on/off. Absent counts as on. Both sides at 0 are off either way,
-   * and then the quick-filter window applies.
+   * and then the quick-filter window applies — unless `off` is set.
    */
   enabled?: boolean;
+  /**
+   * Explicitly not an anchor, even in global "all". The row pulls no context.
+   * Stored as `{ beforeMs: 0, afterMs: 0, enabled: false, off: true }`.
+   */
+  off?: boolean;
 }
 
 /** True when this window replaces the quick-filter window. */
 export function individualWindowOn(window: IndividualContextWindow | undefined): boolean {
-  if (!window || window.enabled === false) return false;
+  if (!window || window.enabled === false || window.off === true) return false;
   return window.beforeMs > 0 || window.afterMs > 0;
+}
+
+/** True when the row must not anchor, including while global "all" is on. */
+export function contextExplicitlyOff(window: IndividualContextWindow | undefined): boolean {
+  return window?.off === true;
+}
+
+/**
+ * Header tristate from the visible rows' sides.
+ * No row with a side on → off. Every row has both sides on → all. Otherwise mixed.
+ * An empty list is off (no visible side is on).
+ */
+export function contextSidesTristate(
+  sides: readonly { before: boolean; after: boolean }[],
+): 'none' | 'some' | 'all' {
+  if (sides.length === 0) return 'none';
+  let anyOn = false;
+  let allBoth = true;
+  for (const side of sides) {
+    if (side.before || side.after) anyOn = true;
+    if (!side.before || !side.after) allBoth = false;
+  }
+  if (!anyOn) return 'none';
+  if (allBoth) return 'all';
+  return 'some';
+}
+
+/**
+ * Alt on the context header. Any active individual window disables every stored
+ * window that has a positive side; otherwise those windows are enabled again.
+ * Millisecond values stay. Entries without a positive side (including explicit
+ * off) are left as they are. Disabled windows fall back to the quick-filter window.
+ */
+export function toggleIndividualContextWindows(
+  windows: IndividualContextWindows,
+): IndividualContextWindows {
+  const anyOn = Object.values(windows).some(individualWindowOn);
+  const next: IndividualContextWindows = {};
+  for (const [key, window] of Object.entries(windows)) {
+    if (window.beforeMs <= 0 && window.afterMs <= 0) {
+      next[key] = window;
+      continue;
+    }
+    const enabled = !anyOn;
+    next[key] = window.off
+      ? { beforeMs: window.beforeMs, afterMs: window.afterMs, enabled, off: true }
+      : { beforeMs: window.beforeMs, afterMs: window.afterMs, enabled };
+  }
+  return next;
 }
 
 export type IndividualContextWindows = Record<string, IndividualContextWindow>;
@@ -71,6 +125,7 @@ function windowOf(
   afterMs: number,
 ): { beforeMs: number; afterMs: number } {
   const individual = windows[key];
+  if (individual?.off) return { beforeMs: 0, afterMs: 0 };
   if (individualWindowOn(individual)) {
     return { beforeMs: individual!.beforeMs, afterMs: individual!.afterMs };
   }
@@ -105,7 +160,9 @@ function upperBoundTime(order: readonly number[], times: readonly number[], targ
  * @param anchorKeyOf Stable per-item identity.
  * @param flaggedKeys Keys whose context button is on.
  * @param beforeMs / @param afterMs Effective quick-filter window (0 when that window is off).
- * @param anchorMatches Whether every filter match anchors a window (global "all").
+ * @param anchorMatches Global "all". Every visible row except an explicit-off
+ *   row anchors, and context rows keep anchoring until the chain reaches a
+ *   fixed point (a gap wider than the window, or an explicit-off bridge).
  */
 export function expandWithDeltaContext<T extends Timestamped>(
   items: readonly T[],
@@ -143,10 +200,13 @@ export function expandWithDeltaContext<T extends Timestamped>(
   const indexByKey = new Map<string, number>();
   for (let i = 0; i < items.length; i++) indexByKey.set(keys[i], i);
 
-  const active = (i: number) => flaggedKeys.has(keys[i]) || (anchorMatches && matches[i]);
+  const explicitlyOff = (i: number) => windows[keys[i]]?.off === true;
 
-  for (let i = 0; i < items.length; i++) {
-    if (!active(i)) continue;
+  // One binary search per anchor on the time-sorted index. Each anchor is
+  // published once, then a BFS walks newly visible rows to the fixed point.
+  // That is O(n log n + W) for W window hits, not a rescan of the whole buffer.
+  const publishMembers = (i: number) => {
+    if (contextMembers.has(keys[i]) || explicitlyOff(i)) return;
     const span = windowOf(keys[i], windows, beforeMs, afterMs);
     const members: string[] = [];
     if ((span.beforeMs > 0 || span.afterMs > 0) && Number.isFinite(times[i])) {
@@ -169,10 +229,20 @@ export function expandWithDeltaContext<T extends Timestamped>(
       if (parents) parents.push(keys[i]);
       else contextParents.set(member, [keys[i]]);
     }
+  };
+
+  // Seeds: flagged rows, and — in "all" — every match and every pinned row.
+  // Explicit-off rows are not seeds. Context rows join once they are visible.
+  for (let i = 0; i < items.length; i++) {
+    if (explicitlyOff(i)) continue;
+    const flagged = flaggedKeys.has(keys[i]);
+    const seed = anchorMatches && (matches[i] || (pinned?.has(keys[i]) ?? false));
+    if (flagged || seed) publishMembers(i);
   }
 
   // An active button keeps its member list even when the row is hidden.
-  // Only a visible row contributes that list to the display.
+  // Only a visible row contributes that list to the display. In "all", a
+  // context row that becomes visible anchors too, until nothing new is reached.
   const queue: number[] = [];
   for (let i = 0; i < items.length; i++) {
     if (visible[i] && contextMembers.has(keys[i])) queue.push(i);
@@ -187,6 +257,7 @@ export function expandWithDeltaContext<T extends Timestamped>(
     for (const member of members) {
       const j = indexByKey.get(member);
       if (j == null) continue;
+      if (anchorMatches && !explicitlyOff(j)) publishMembers(j);
       if (!visible[j]) {
         visible[j] = 1;
         queue.push(j);

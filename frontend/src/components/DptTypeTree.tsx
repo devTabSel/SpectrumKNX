@@ -2,6 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { dptKey, type FilterOption } from '../types/filters';
 import { dptWidthLabel } from '../utils/dpt';
+import { nextTriState, type TriState } from '../utils/triState';
+import { TriStateToggle } from './TriStateToggle';
 
 interface DptTypeTreeProps {
   entries: FilterOption[];
@@ -11,33 +13,6 @@ interface DptTypeTreeProps {
   counts?: Record<string, number>;
   searchQuery: string;
 }
-
-type CheckState = 'checked' | 'partial' | 'unchecked';
-
-const TriCheckbox: React.FC<{ state: CheckState; onClick: () => void; label: string }> = ({ state, onClick, label }) => (
-  <div
-    role="checkbox"
-    aria-checked={state === 'checked' ? true : state === 'partial' ? 'mixed' : false}
-    aria-label={label}
-    onClick={e => { e.stopPropagation(); onClick(); }}
-    style={{
-      width: 14, height: 14, flexShrink: 0, borderRadius: 3, cursor: 'pointer',
-      border: `1.5px solid ${state !== 'unchecked' ? 'var(--accent-primary)' : 'var(--border-color)'}`,
-      background: state === 'checked' ? 'var(--accent-primary)' : 'transparent',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-      transition: 'all 0.15s',
-    }}
-  >
-    {state === 'checked' && (
-      <svg width="8" height="8" viewBox="0 0 8 8" fill="none">
-        <path d="M1.5 4L3.5 6L6.5 2" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    )}
-    {state === 'partial' && (
-      <div style={{ width: 6, height: 2, background: 'var(--accent-primary)', borderRadius: 1 }} />
-    )}
-  </div>
-);
 
 const CountBubble: React.FC<{ count: number }> = ({ count }) => (
   <span style={{
@@ -82,16 +57,17 @@ export const DptTypeTree: React.FC<DptTypeTreeProps> = ({
 
   const inGroup = (main: number, key: string) => key === `${main}` || key.startsWith(`${main}.`);
 
-  const groupState = (main: number, childKeys: string[]): CheckState => {
-    if (selected.includes(`${main}`)) return 'checked';
+  const groupState = (main: number, childKeys: string[]): TriState => {
+    if (selected.includes(`${main}`)) return 'all';
     const picked = childKeys.filter(k => selected.includes(k)).length;
-    if (picked === 0) return 'unchecked';
-    return picked === childKeys.length ? 'checked' : 'partial';
+    if (picked === 0) return 'none';
+    return picked === childKeys.length ? 'all' : 'some';
   };
 
-  const toggleGroup = (main: number, childKeys: string[]) => {
+  const toggleGroup = (main: number, childKeys: string[], ctrl: boolean) => {
     const rest = selected.filter(k => !inGroup(main, k));
-    onChange(groupState(main, childKeys) === 'checked' ? rest : [...rest, `${main}`]);
+    const next = nextTriState(groupState(main, childKeys), { ctrl });
+    onChange(next === 'all' ? [...rest, `${main}`] : rest);
   };
 
   const toggleChild = (main: number, childKeys: string[], key: string) => {
@@ -115,7 +91,7 @@ export const DptTypeTree: React.FC<DptTypeTreeProps> = ({
     <div>
       {groups.map(({ main, options, childKeys }) => {
         const state = groupState(main, childKeys);
-        const open = openState[main] ?? (searchQuery !== '' || state !== 'unchecked');
+        const open = openState[main] ?? (searchQuery !== '' || state !== 'none');
         const width = dptWidthLabel(main);
         return (
           <div key={main}>
@@ -134,7 +110,7 @@ export const DptTypeTree: React.FC<DptTypeTreeProps> = ({
               ) : (
                 <ChevronRight size={13} style={{ color: 'var(--text-dim)', flexShrink: 0 }} />
               )}
-              <TriCheckbox state={state} onClick={() => toggleGroup(main, childKeys)} label={`DPT ${main}`} />
+              <TriStateToggle state={state} onClick={e => toggleGroup(main, childKeys, e.ctrlKey || e.metaKey)} label={`DPT ${main}`} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{
                   fontSize: '0.8125rem', color: 'var(--text-main)', fontFamily: "'JetBrains Mono', monospace",
@@ -166,7 +142,7 @@ export const DptTypeTree: React.FC<DptTypeTreeProps> = ({
                   onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)'; }}
                   onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
                 >
-                  <TriCheckbox state={checked ? 'checked' : 'unchecked'} onClick={() => toggleChild(main, childKeys, key)} label={key} />
+                  <TriStateToggle state={checked ? 'all' : 'none'} onClick={() => toggleChild(main, childKeys, key)} label={key} />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div title={key} style={{
                       fontSize: '0.8125rem', color: 'var(--text-main)', fontFamily: "'JetBrains Mono', monospace",

@@ -59,6 +59,7 @@ test('sanitize keeps marked and mouse flags and drops goto/auto/context', () => 
       individualContextWindows: {
         ok: { beforeMs: 1500, afterMs: 0 },
         legacy: { beforeSec: 1, afterSec: 2 },
+        explicitOff: { beforeMs: 0, afterMs: 0, enabled: false, off: true },
         bad: { beforeMs: -1, afterMs: 2 },
         nope: { beforeMs: '1', afterMs: 2 },
       },
@@ -74,6 +75,7 @@ test('sanitize keeps marked and mouse flags and drops goto/auto/context', () => 
   expect(loaded?.individualContextWindows).toEqual({
     ok: { beforeMs: 1500, afterMs: 0, enabled: true },
     legacy: { beforeMs: 1000, afterMs: 2000, enabled: true },
+    explicitOff: { beforeMs: 0, afterMs: 0, enabled: false, off: true },
   });
 });
 

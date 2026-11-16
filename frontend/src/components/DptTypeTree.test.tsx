@@ -66,6 +66,18 @@ test('a partially selected group shows a mixed checkbox', () => {
   expect(screen.getByRole('checkbox', { name: 'DPT 1' })).toHaveAttribute('aria-checked', 'mixed');
 });
 
+test('a partial group click clears the group; ctrl-click selects the whole main type', () => {
+  const onChange = vi.fn();
+  renderTree(['1.001', '9.001'], onChange);
+
+  fireEvent.click(screen.getByRole('checkbox', { name: 'DPT 1' }));
+  expect(onChange).toHaveBeenLastCalledWith(['9.001']);
+
+  onChange.mockClear();
+  fireEvent.click(screen.getByRole('checkbox', { name: 'DPT 1' }), { ctrlKey: true });
+  expect(onChange).toHaveBeenLastCalledWith(['9.001', '1']);
+});
+
 test('unchecking a group removes its bare key and subtype keys', () => {
   const onChange = vi.fn();
   renderTree(['1', '1.002', '9.001'], onChange);
