@@ -8,6 +8,7 @@ import {
   contiguousFromAnchor,
   readingEndCause,
   spacerVariantA,
+  bufferBacklogCounts,
   statusPillCount,
   type ReadingEndInput,
 } from './telegramDisplay';
@@ -178,5 +179,10 @@ describe('status and anchor-edge counts', () => {
     // The status pill keeps the filtered total. The anchor pill does not repeat it.
     expect(statusPillCount(10, 40, true)).toBe(10);
     expect(anchorEdgeCount(2, 3, 'backward')).not.toBe(10);
+  });
+
+  it('adds the pause backlog to both status-pill figures', () => {
+    expect(bufferBacklogCounts(4, 2, 1, 1)).toEqual({ filtered: 2, total: 6 });
+    expect(bufferBacklogCounts(4, 0, 4, 0)).toEqual({ filtered: 4, total: 4 });
   });
 });

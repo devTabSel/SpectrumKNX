@@ -1,8 +1,9 @@
-import { useMemo, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { format } from 'date-fns';
 import {
   ChevronLeft,
   ChevronRight,
+  CornerDownLeft,
   Download,
   FastForward,
   Rewind,
@@ -13,7 +14,7 @@ import {
 } from 'lucide-react';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 import { SecondsField } from './SecondsField';
-import { statusPillCount } from '../utils/telegramDisplay';
+import { READING_END_LABEL, type ReadingEndCause } from '../utils/telegramDisplay';
 
 const INPUT_FMT = "yyyy-MM-dd'T'HH:mm:ss";
 /** Local datetime-with-seconds display width (YYYY-MM-DDTHH:mm:ss). */
@@ -74,7 +75,12 @@ export interface BufferStatusPillProps {
   filteredCount: number;
   totalCount: number;
   filterActive: boolean;
-  onClear: (opts: { pauseAuto: boolean }) => void;
+  onClear: () => void;
+  /**
+   * Reading-end marker. `range` / `loadlimit` / `data` turn Clear orange and
+   * name the reason. `loading` does not — the spinner owns that state.
+   */
+  readingEnd?: ReadingEndCause | null;
   /** Abort in-flight history load. */
   onCancelLoad: () => void;
   pauseTitle: string;
@@ -86,12 +92,12 @@ export interface BufferStatusPillProps {
   rateMode: 's' | 'm' | 'h';
   onCycleRateMode: () => void;
   wsConnected: boolean;
-  /**
-   * Reconnect gap fill from the cache hook. Shown as "Lädt nach" until it
-   * settles. Offline wins while the socket is down.
-   */
-  fillingGaps?: boolean;
   isHistoryLoading: boolean;
+  /**
+   * Backward read parked on a fixed anchor (not the live edge). The control
+   * shows the auto-pause icon; a click still goes through `onTogglePause`.
+   */
+  fixedAnchor?: boolean;
   historyLoadError: string | null;
   onOldestCommit: (ms: number) => void;
   onNewestCommit: (ms: number) => void;
@@ -134,9 +140,9 @@ function parseCommitMs(raw: string): number | null {
 }
 
 /**
- * Live-header buffer status pill: rewind → oldest → direction → range →
- * clear/spinner → direction → newest → fast-forward → play/pause →
- * WS LED → rate → count → export.
+ * Live-header buffer status pill: rewind → oldest → goto → direction →
+ * range → clear/spinner → direction → newest → goto → fast-forward →
+ * play/pause → WS LED → rate → count → export.
  */
 export function BufferStatusPill({
   oldestMs,
@@ -150,6 +156,7 @@ export function BufferStatusPill({
   totalCount,
   filterActive,
   onClear,
+  readingEnd = null,
   onCancelLoad,
   pauseTitle,
   pauseColor,
@@ -160,8 +167,8 @@ export function BufferStatusPill({
   rateMode,
   onCycleRateMode,
   wsConnected,
-  fillingGaps = false,
   isHistoryLoading,
+  fixedAnchor = false,
   historyLoadError,
   onOldestCommit,
   onNewestCommit,
@@ -175,6 +182,10 @@ export function BufferStatusPill({
   const [oldestFocused, setOldestFocused] = useState(false);
   const [newestFocused, setNewestFocused] = useState(false);
   const [rangeFocused, setRangeFocused] = useState(false);
+  const oldestRef = useRef<HTMLInputElement>(null);
+  const newestRef = useRef<HTMLInputElement>(null);
+  const oldestCancel = useRef(false);
+  const newestCancel = useRef(false);
 
   // Outside focus, always mirror buffer bounds.
   const [oldestBaseline, setOldestBaseline] = useState(oldestMs);
@@ -193,15 +204,21 @@ export function BufferStatusPill({
     if (!rangeFocused) setRangeDraft(formatRangeMinutes(rangeMinutes, rangeUnit));
   }
 
-  const shownCount = statusPillCount(filteredCount, totalCount, filterActive);
   const countText = filterActive
-    ? `${shownCount}/${totalCount}`
-    : String(shownCount);
+    ? `${filteredCount} / ${totalCount}`
+    : String(totalCount);
 
   const countWidthCh = useMemo(() => Math.max(1, countText.length), [countText]);
 
-  const bufferFull = totalCount >= loadLimit;
+  const bufferEmpty = totalCount <= 0;
+  const endMarked = readingEnd === 'range' || readingEnd === 'loadlimit' || readingEnd === 'data';
   const rangeTitle = `${totalCount}/${loadLimit}`;
+  const clearLabel = 'Clear (also wipes the local telegram cache).';
+  const clearTitle = bufferEmpty
+    ? 'Buffer is empty'
+    : endMarked && readingEnd
+      ? `${READING_END_LABEL[readingEnd]}. ${clearLabel}`
+      : clearLabel;
 
   const commitOldest = (raw: string) => {
     const ms = parseCommitMs(raw);
@@ -221,6 +238,30 @@ export function BufferStatusPill({
     }
     if (newestMs != null && ms === newestMs) return;
     onNewestCommit(ms);
+  };
+
+  const jumpOldest = (raw: string) => {
+    const el = oldestRef.current;
+    const focused = el != null && document.activeElement === el;
+    if (focused) oldestCancel.current = true;
+    commitOldest(raw);
+    if (focused) el.blur();
+  };
+
+  const jumpNewest = (raw: string) => {
+    const el = newestRef.current;
+    const focused = el != null && document.activeElement === el;
+    if (focused) newestCancel.current = true;
+    commitNewest(raw);
+    if (focused) el.blur();
+  };
+
+  const gotoStyle: CSSProperties = {
+    color: 'var(--text-dim)',
+    padding: '0.15rem',
+    flexShrink: 0,
+    opacity: isHistoryLoading ? 0.45 : 1,
+    cursor: isHistoryLoading ? 'not-allowed' : 'pointer',
   };
 
   const commitRange = (raw: string = rangeDraft) => {
@@ -267,17 +308,16 @@ export function BufferStatusPill({
     <button
       type="button"
       className="icon-button"
-      onClick={e => onClear({ pauseAuto: e.ctrlKey || e.metaKey })}
-      title={
-        bufferFull
-          ? `Buffer full (${totalCount}/${loadLimit}). Clear (also wipes the local telegram cache). Ctrl-click pauses automatically.`
-          : 'Clear (also wipes the local telegram cache). Ctrl-click pauses automatically.'
-      }
-      aria-label="Clear (also wipes the local telegram cache). Ctrl-click pauses automatically."
+      onClick={() => onClear()}
+      disabled={bufferEmpty}
+      title={clearTitle}
+      aria-label={clearLabel}
       style={{
-        color: bufferFull ? 'var(--warning-text)' : 'var(--text-dim)',
+        color: endMarked ? 'var(--warning-text)' : 'var(--text-dim)',
         padding: 0,
         flexShrink: 0,
+        opacity: bufferEmpty ? 0.45 : 1,
+        cursor: bufferEmpty ? 'not-allowed' : 'pointer',
       }}
     >
       <Trash2 size={14} />
@@ -286,18 +326,21 @@ export function BufferStatusPill({
 
   // Backward: icon left, value+unit right. Forward: value+unit left, icon right.
   const rangeIconLeft = readDirection === 'backward';
-  // Offline and a reconnect gap fill replace Play/Pause/Stop on this control.
-  // Offline wins: a dropped socket is the fact that matters, and the fill
-  // cannot finish until the socket is back. The WS LED stays beside it.
   // Forward has no live control — a visible, non-clickable Stop. A wrapper
   // carries the tooltip, because a disabled button does not show its own.
+  // A fixed anchor in the past uses the auto-pause icon even while the mode
+  // is still playing. Manual pause keeps its own icon. Offline only turns
+  // the LED red; it does not replace this control.
   const forwardStop = readDirection === 'forward';
-  const linkLabel = !wsConnected ? 'Offline' : fillingGaps ? 'Lädt nach' : null;
-  const linkLocked = linkLabel != null || forwardStop;
-  const controlLabel = linkLabel ?? (forwardStop ? 'Stop' : pauseTitle);
-  const controlTitle = linkLabel
-    ?? (forwardStop ? 'Kein Live in Leserichtung vorwärts' : pauseTitle);
-  const controlDisabled = linkLocked || pauseDisabled;
+  const showAuto = !forwardStop && pauseMode !== 'manual' && (pauseMode === 'auto' || fixedAnchor);
+  const controlLabel = forwardStop
+    ? 'Stop'
+    : showAuto
+      ? 'Paused automatically'
+      : pauseTitle;
+  const controlTitle = forwardStop ? 'Kein Live in Leserichtung vorwärts' : controlLabel;
+  const controlColor = forwardStop || showAuto ? 'var(--text-dim)' : pauseColor;
+  const controlDisabled = forwardStop || pauseDisabled;
 
   return (
     <div data-buffer-status-pill="" style={pillStyle}>
@@ -319,6 +362,7 @@ export function BufferStatusPill({
       </button>
 
       <ThemedDatetimePicker
+        inputRef={oldestRef}
         value={oldestFocused ? oldestDraft : msToInput(oldestMs)}
         onChange={v => {
           setOldestFocused(true);
@@ -331,13 +375,36 @@ export function BufferStatusPill({
         style={dtStyle}
         onBlur={() => {
           setOldestFocused(false);
-          commitOldest(oldestDraft);
+          if (oldestCancel.current) {
+            oldestCancel.current = false;
+            setOldestDraft(msToInput(oldestMs));
+            return;
+          }
+          commitOldest(oldestRef.current?.value ?? oldestDraft);
         }}
         onKeyDown={e => {
+          if (e.key === 'Escape') {
+            oldestCancel.current = true;
+            setOldestDraft(msToInput(oldestMs));
+            return;
+          }
           if (e.key !== 'Enter') return;
-          commitOldest((e.currentTarget as HTMLInputElement).value);
+          e.preventDefault();
+          jumpOldest((e.currentTarget as HTMLInputElement).value);
         }}
       />
+      <button
+        type="button"
+        className="icon-button"
+        aria-label="Go to oldest time"
+        title="Go to oldest time"
+        disabled={isHistoryLoading}
+        onMouseDown={e => e.preventDefault()}
+        onClick={() => jumpOldest(oldestRef.current?.value ?? (oldestFocused ? oldestDraft : msToInput(oldestMs)))}
+        style={gotoStyle}
+      >
+        <CornerDownLeft size={13} />
+      </button>
 
       {readDirection === 'forward' ? (
         <button
@@ -390,6 +457,7 @@ export function BufferStatusPill({
       ) : null}
 
       <ThemedDatetimePicker
+        inputRef={newestRef}
         value={newestFocused ? newestDraft : msToInput(newestMs)}
         onChange={v => {
           setNewestFocused(true);
@@ -402,13 +470,36 @@ export function BufferStatusPill({
         style={dtStyle}
         onBlur={() => {
           setNewestFocused(false);
-          commitNewest(newestDraft);
+          if (newestCancel.current) {
+            newestCancel.current = false;
+            setNewestDraft(msToInput(newestMs));
+            return;
+          }
+          commitNewest(newestRef.current?.value ?? newestDraft);
         }}
         onKeyDown={e => {
+          if (e.key === 'Escape') {
+            newestCancel.current = true;
+            setNewestDraft(msToInput(newestMs));
+            return;
+          }
           if (e.key !== 'Enter') return;
-          commitNewest((e.currentTarget as HTMLInputElement).value);
+          e.preventDefault();
+          jumpNewest((e.currentTarget as HTMLInputElement).value);
         }}
       />
+      <button
+        type="button"
+        className="icon-button"
+        aria-label="Go to newest time"
+        title="Go to newest time"
+        disabled={isHistoryLoading}
+        onMouseDown={e => e.preventDefault()}
+        onClick={() => jumpNewest(newestRef.current?.value ?? (newestFocused ? newestDraft : msToInput(newestMs)))}
+        style={gotoStyle}
+      >
+        <CornerDownLeft size={13} />
+      </button>
 
       <button
         type="button"
@@ -436,29 +527,17 @@ export function BufferStatusPill({
           aria-label={controlLabel}
           disabled={controlDisabled}
           style={{
-            color: linkLabel === 'Offline'
-              ? 'var(--error)'
-              : linkLabel
-                ? 'var(--accent-primary)'
-                : forwardStop
-                  ? 'var(--text-dim)'
-                  : pauseColor,
+            color: controlColor,
             padding: '0.15rem',
             opacity: controlDisabled ? 0.45 : 1,
             cursor: controlDisabled ? 'not-allowed' : 'pointer',
           }}
         >
-          {linkLabel
-            ? (
-              <span style={{ fontSize: '0.68rem', fontWeight: 600, whiteSpace: 'nowrap', lineHeight: 1 }}>
-                {linkLabel}
-              </span>
-            )
-            : forwardStop
-              ? <Square size={15} fill="currentColor" />
-              : pauseMode === 'playing'
-                ? <Play size={15} fill="currentColor" />
-                : <Pause size={15} fill="currentColor" />}
+          {forwardStop
+            ? <Square size={15} fill="currentColor" />
+            : showAuto || pauseMode !== 'playing'
+              ? <Pause size={15} fill="currentColor" />
+              : <Play size={15} fill="currentColor" />}
         </button>
       </span>
 
@@ -508,8 +587,10 @@ export function BufferStatusPill({
           whiteSpace: 'nowrap',
           flexShrink: 0,
         }}
-        title={filterActive ? 'Filtered/buffer' : 'Telegrams in buffer'}
-        aria-label={filterActive ? `${filteredCount} filtered of ${totalCount} in buffer` : `${totalCount} in buffer`}
+        title={filterActive ? 'Filtered / buffer and backlog' : 'Telegrams in buffer and backlog'}
+        aria-label={filterActive
+          ? `${filteredCount} filtered of ${totalCount} in buffer and backlog`
+          : `${totalCount} in buffer and backlog`}
       >
         {countText}
       </span>

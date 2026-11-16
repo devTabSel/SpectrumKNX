@@ -50,6 +50,27 @@ test('Enter in the input submits the time', () => {
   expect(onGoto).toHaveBeenCalledWith(new Date('2026-07-20T10:00:00').getTime());
 });
 
+test('blur submits the entered time', () => {
+  const onGoto = vi.fn();
+  render(<GotoTimeControl seedMs={seed} onGoto={onGoto} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Go to time' }));
+  const input = screen.getByLabelText('Target time');
+  fireEvent.change(input, { target: { value: '2026-07-20T08:00:00' } });
+  fireEvent.blur(input);
+  expect(onGoto).toHaveBeenCalledWith(new Date('2026-07-20T08:00:00').getTime());
+});
+
+test('Escape in the field closes without submitting', () => {
+  const onGoto = vi.fn();
+  render(<GotoTimeControl seedMs={seed} onGoto={onGoto} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Go to time' }));
+  const input = screen.getByLabelText('Target time');
+  fireEvent.change(input, { target: { value: '2026-07-20T08:00:00' } });
+  fireEvent.keyDown(input, { key: 'Escape' });
+  expect(onGoto).not.toHaveBeenCalled();
+  expect(screen.queryByRole('button', { name: 'Go' })).not.toBeInTheDocument();
+});
+
 test('Escape closes the popover without submitting', () => {
   const onGoto = vi.fn();
   render(<GotoTimeControl seedMs={seed} onGoto={onGoto} />);

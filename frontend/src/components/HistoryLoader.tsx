@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useRef } from 'react';
 import { X, Clock, Database, AlertCircle, CheckCircle2, Calendar, Search } from 'lucide-react';
 import type { Telegram } from '../hooks/useWebSocket';
 import type { ActiveFilters } from '../types/filters';
@@ -43,6 +43,8 @@ export const HistoryLoader: React.FC<HistoryLoaderProps> = ({ onClose, onLoad, o
   // Custom absolute (history search only)
   const [startTime, setStartTime] = useState(timeRange?.startTime ?? '');
   const [endTime, setEndTime] = useState(timeRange?.endTime ?? '');
+  const startAtFocus = useRef(timeRange?.startTime ?? '');
+  const endAtFocus = useRef(timeRange?.endTime ?? '');
 
   // Persist state changes back to parent whenever values change
   const persistTimeRange = (patch: Partial<LoaderTimeRange>) => {
@@ -74,6 +76,27 @@ export const HistoryLoader: React.FC<HistoryLoaderProps> = ({ onClose, onLoad, o
     }
     setEndTime(clamped);
     persistTimeRange({ endTime: clamped });
+  };
+
+  // Enter and blur keep the typed instant. Escape restores the value from focus.
+  const onTimeKeyDown = (
+    e: React.KeyboardEvent<HTMLInputElement>,
+    atFocus: { current: string },
+    setTime: (v: string) => void,
+    key: 'startTime' | 'endTime',
+  ) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.currentTarget.blur();
+      return;
+    }
+    if (e.key !== 'Escape') return;
+    e.preventDefault();
+    const original = atFocus.current;
+    setTime(original);
+    persistTimeRange({ [key]: original });
+    e.currentTarget.value = original;
+    e.currentTarget.blur();
   };
 
   const doFetch = useCallback(async (range: LoadedRange) => {
@@ -224,7 +247,10 @@ export const HistoryLoader: React.FC<HistoryLoaderProps> = ({ onClose, onLoad, o
                   className="glass-input"
                   style={{ width: '100%' }}
                   value={startTime}
+                  aria-label="History from"
                   onChange={handleStartTimeChange}
+                  onFocus={() => { startAtFocus.current = startTime; }}
+                  onKeyDown={e => onTimeKeyDown(e, startAtFocus, setStartTime, 'startTime')}
                   onBlur={e => {
                     const v = clampYear(e.target.value);
                     if (v !== e.target.value) { e.target.value = v; }
@@ -241,7 +267,10 @@ export const HistoryLoader: React.FC<HistoryLoaderProps> = ({ onClose, onLoad, o
                   className="glass-input"
                   style={{ width: '100%' }}
                   value={endTime}
+                  aria-label="History to"
                   onChange={handleEndTimeChange}
+                  onFocus={() => { endAtFocus.current = endTime; }}
+                  onKeyDown={e => onTimeKeyDown(e, endAtFocus, setEndTime, 'endTime')}
                   onBlur={e => {
                     const v = clampYear(e.target.value);
                     if (v !== e.target.value) { e.target.value = v; }

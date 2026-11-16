@@ -34,6 +34,8 @@ import {
   type MonitorView,
 } from './utils/monitorView';
 import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTelegramView';
+import { matchVisibleTelegram } from './utils/selectVisibleTelegrams';
+import { bufferBacklogCounts } from './utils/telegramDisplay';
 import { LayoutDashboard, History, Settings, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
@@ -405,7 +407,6 @@ function App() {
     ingested: ingestedTelegrams,
     addLive,
     setConnected: setCacheConnected,
-    fillingGaps,
     setPaused: setCachePaused,
     pausedCount,
     pausedTelegrams,
@@ -769,8 +770,7 @@ function App() {
   // auto ↔ manual (stays frozen). Manual→Auto keeps the backlog in the pause
   // buffer; the table fills the fill-spacer with its oldest row and feeds the
   // rest in as the user scrolls toward the live edge. An empty buffer disables
-  // the pause toggle; a plain clear leaves play/pause as it was, Ctrl-click
-  // switches to automatic pause. Resume via the newer pill while
+  // the pause toggle. A clear leaves play/pause as it was. Resume via the newer pill while
   // auto-paused, Ctrl-click on that pill while manually paused, or an auto
   // edge-flush / follow-while-auto. A plain pill click keeps manual pause and
   // publishes the backlog so the view can land on the newest telegram.
@@ -1179,6 +1179,15 @@ function App() {
     lastSelectedTelegramKey,
   ]);
 
+  // Backlog rows are mutated in place; pausedCount is the render signal.
+  const filteredBacklogCount = useMemo(() => {
+    if (pausedCount <= 0 || pausedTelegrams.length === 0) return 0;
+    const match = matchVisibleTelegram(visibleOpts);
+    let n = 0;
+    for (const t of pausedTelegrams) if (match(t)) n += 1;
+    return n;
+  }, [pausedCount, pausedTelegrams, visibleOpts]);
+
   const liveViewRef = useRef<LiveTelegramView | null>(null);
   // The previous view has to be read while rendering: an effect would apply the
   // prepend a frame late. deriveLiveTelegramView is idempotent for the same
@@ -1189,6 +1198,12 @@ function App() {
   liveViewRef.current = liveView;
   const sortedLiveTelegrams = liveView.sorted;
   const filteredLiveTelegrams = liveView.items;
+  const pillCounts = bufferBacklogCounts(
+    liveTelegrams.length,
+    pausedCount > 0 ? pausedTelegrams.length : 0,
+    filteredLiveTelegrams.length,
+    filteredBacklogCount,
+  );
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = liveView.contextKeys;
   const contextTelegramParents = liveView.contextParents;
@@ -1402,17 +1417,16 @@ function App() {
                   loadLimit={loadLimit}
                   rangeMinutes={bufferRangeMinutes}
                   onRangeMinutesChange={n => { void applyBufferRange(n); }}
-                  filteredCount={filteredLiveTelegrams.length}
-                  totalCount={liveTelegrams.length}
+                  filteredCount={pillCounts.filtered}
+                  totalCount={pillCounts.total}
                   filterActive={activeFilterCount > 0}
-                  onClear={({ pauseAuto }) => {
+                  readingEnd={readingEnd}
+                  onClear={() => {
                     setMonitorView(v => ({
                       ...v,
                       follow: false,
-                      pauseMode: readDirection === 'backward' && pauseAuto ? 'auto' : v.pauseMode,
                       anchorTs: null,
                     }));
-                    if (pauseAuto) applyCachePause(true);
                     // Real wipe. clear() also drops the anchor timestamp.
                     void clearTelegrams();
                   }}
@@ -1426,8 +1440,8 @@ function App() {
                   rateMode={rateMode}
                   onCycleRateMode={() => setRateMode(m => (m === 's' ? 'm' : m === 'm' ? 'h' : 's'))}
                   wsConnected={isConnected}
-                  fillingGaps={fillingGaps}
                   isHistoryLoading={isHistoryLoading}
+                  fixedAnchor={readDirection === 'backward' && monitorView.anchorTs != null}
                   historyLoadError={historyLoadError}
                   onOldestCommit={ms => {
                     void changeReadDirection('forward', async () => {
@@ -1465,6 +1479,10 @@ function App() {
                     })();
                   }}
                   onLoadFromDbNewest={() => {
+                    // Capture before the awaits: changeReadDirection may park a
+                    // forward view on auto, and that must not hide what FF was
+                    // asked to do. Only FF turns live on from a non-live state.
+                    const priorPause = pauseMode;
                     void (async () => {
                       try {
                         const res = await fetch(apiUrl('/api/database/info'));
@@ -1478,10 +1496,35 @@ function App() {
                           placeAnchor('backward', ms);
                           await fillAnchorWindow('backward', ms);
                         });
-                        handleListFollowChange(false);
                         setActivePanel('list');
-                        listGotoSeq.current += 1;
-                        setListGoto({ id: listGotoSeq.current, targetMs: ms });
+                        if (priorPause === 'manual') {
+                          // Stay paused on the newest telegram. No follow.
+                          setMonitorView(v => ({
+                            ...v,
+                            direction: 'backward',
+                            anchorTs: ms,
+                            follow: false,
+                            pauseMode: 'manual',
+                          }));
+                          setBufferAnchor({ direction: 'backward', ts: ms });
+                          applyCachePause(true);
+                          listGotoSeq.current += 1;
+                          setListGoto({ id: listGotoSeq.current, targetMs: ms });
+                        } else {
+                          // Auto, off, or already playing: live edge, follow on.
+                          // Playing simply continues; auto and off enter live here.
+                          // No list-goto: that jump unfollows and pins the anchor
+                          // again, which would leave live. Follow sits on the edge.
+                          setMonitorView(v => ({
+                            ...v,
+                            direction: 'backward',
+                            anchorTs: null,
+                            follow: true,
+                            pauseMode: 'playing',
+                          }));
+                          setBufferAnchor({ direction: 'backward', ts: null });
+                          applyCachePause(false);
+                        }
                       } catch {
                         // spinner / loadError cover failures
                       }

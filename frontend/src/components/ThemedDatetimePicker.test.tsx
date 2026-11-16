@@ -309,6 +309,30 @@ test('mouse wheel on month/year scrolls the calendar month', () => {
   expect(within(dialog).getByText('July 2026')).toBeInTheDocument();
 });
 
+test('Escape restores a committed edit back to the focused value', () => {
+  const onChange = vi.fn();
+  function Controlled() {
+    const [value, setValue] = useState('2026-07-18T12:30:00');
+    return (
+      <ThemedDatetimePicker
+        value={value}
+        onChange={next => { onChange(next); setValue(next); }}
+        aria-label="When"
+        openOnFocus={false}
+      />
+    );
+  }
+  render(<Controlled />);
+  const input = screen.getByLabelText('When');
+  fireEvent.focus(input);
+  fireEvent.change(input, { target: { value: '2026-07-18T15:00:00' } });
+  expect(onChange).toHaveBeenCalledWith('2026-07-18T15:00:00');
+  onChange.mockClear();
+  fireEvent.keyDown(input, { key: 'Escape' });
+  expect(onChange).toHaveBeenCalledWith('2026-07-18T12:30:00');
+  expect(input).toHaveValue('2026-07-18T12:30:00');
+});
+
 test('Escape discards draft without committing', () => {
   const onChange = vi.fn();
   render(

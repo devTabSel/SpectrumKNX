@@ -374,6 +374,8 @@ export function ThemedDatetimePicker({
   const ignoreSelect = useRef(false);
   const valueAtFocus = useRef(value);
   const dirty = useRef(false);
+  /** Escape restores the focused value; the blur that follows must not commit the draft. */
+  const escapeRevert = useRef(false);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
 
   const markDirty = () => {
@@ -756,17 +758,20 @@ export function ThemedDatetimePicker({
     if (e.defaultPrevented) return;
 
     if (e.key === 'Escape') {
-      if (open) {
-        e.preventDefault();
-        skipFocusOpen.current = true;
-        // Discard in-progress edits (same as invalid blur revert).
-        const p = parseParts(valueAtFocus.current, mode) ?? parseParts('', mode)!;
-        setDraft(p);
-        setViewY(p.y);
-        setViewMo(p.mo);
-        dirty.current = false;
-        closePicker();
-      }
+      e.preventDefault();
+      skipFocusOpen.current = true;
+      const original = valueAtFocus.current;
+      const p = parseParts(original, mode) ?? parseParts('', mode)!;
+      setDraft(p);
+      setViewY(p.y);
+      setViewMo(p.mo);
+      dirty.current = false;
+      escapeRevert.current = true;
+      setCleared(original.trim() === '');
+      if (value !== original) onChange(original);
+      closePicker();
+      // Leave the field so a parent blur sees the restored value and does not jump.
+      localInputRef.current?.blur();
       return;
     }
 
@@ -972,13 +977,17 @@ export function ThemedDatetimePicker({
           }}
           onMouseUp={onInputMouseUp}
           onBlur={() => {
+            const reverting = escapeRevert.current;
+            escapeRevert.current = false;
             setFieldFocused(false);
             digitBuf.current = '';
-            if (cleared) {
-              onChange('');
-              dirty.current = false;
-            } else if (dirty.current) {
-              commitDraft();
+            if (!reverting) {
+              if (cleared) {
+                onChange('');
+                dirty.current = false;
+              } else if (dirty.current) {
+                commitDraft();
+              }
             }
             closePicker();
             onBlur?.();

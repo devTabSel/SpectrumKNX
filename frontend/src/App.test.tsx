@@ -329,14 +329,15 @@ test('manual → auto pause with the fill spacer on screen reveals one backlog r
   }
 });
 
-test('ctrl-clicking buffer clear pauses automatically', async () => {
+test('ctrl-clicking buffer clear does not pause and leaves the buffer empty', async () => {
   render(<App />);
   expect(await screen.findByRole('button', { name: 'Playing' })).toBeInTheDocument();
   await act(async () => {
     fireEvent.click(screen.getByTitle(/Clear \(also wipes the local telegram cache\)/), { ctrlKey: true });
   });
-  const paused = await screen.findByRole('button', { name: 'Paused automatically' });
-  expect(paused).toBeDisabled();
+  const playing = await screen.findByRole('button', { name: 'Playing' });
+  expect(playing).toBeDisabled();
+  expect(screen.queryByRole('button', { name: 'Paused automatically' })).not.toBeInTheDocument();
 });
 
 test('clearing the buffer leaves play/pause unchanged', async () => {
@@ -639,17 +640,142 @@ test('switching forward to backward without a timestamp parks on the edge', asyn
   expect(readSortConfigPref()).toEqual([{ key: 'timestamp', direction: 'asc' }]);
 });
 
-test('the pill shows Offline while the socket is down and Lädt nach during a gap fill', async () => {
+test('the pill keeps Play while the socket is down and during a gap fill', async () => {
   render(<App />);
   expect(await screen.findByRole('button', { name: 'Playing' })).toBeInTheDocument();
   setWsConnected(false);
-  expect(screen.getByRole('button', { name: 'Offline' })).toBeDisabled();
-  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Playing' })).toBeEnabled();
+  expect(screen.getByLabelText('WebSocket offline')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Offline' })).not.toBeInTheDocument();
 
   setWsConnected(true);
-  expect(screen.getByRole('button', { name: 'Playing' })).toBeInTheDocument();
+  expect(screen.getByLabelText('WebSocket active')).toBeInTheDocument();
   act(() => { cacheCtl.setFillingGaps!(true); });
-  expect(screen.getByRole('button', { name: 'Lädt nach' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Playing' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: 'Lädt nach' })).not.toBeInTheDocument();
   act(() => { cacheCtl.setFillingGaps!(false); });
   expect(screen.getByRole('button', { name: 'Playing' })).toBeInTheDocument();
+});
+
+const DB_NEWEST = '2024-06-01T00:00:00.000Z';
+const DB_NEWEST_MS = Date.parse(DB_NEWEST);
+
+function stubDatabaseInfo() {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/database/info')) {
+      return {
+        ok: true,
+        json: async () => ({
+          oldest_timestamp: '2020-01-01T00:00:00.000Z',
+          newest_timestamp: DB_NEWEST,
+        }),
+      };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+}
+
+test('fast-forward while playing stays live', async () => {
+  stubDatabaseInfo();
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Load up to newest telegram in database' }));
+  await waitFor(() => {
+    expect(readMonitorViewPref()).toMatchObject({
+      direction: 'backward',
+      anchorTs: null,
+      follow: true,
+      pauseMode: 'playing',
+    });
+  });
+  expect(screen.getByRole('button', { name: 'Playing' })).toBeInTheDocument();
+  expect(cacheCtl.loadRangeCalls).toContainEqual([DB_NEWEST_MS - 60 * 60_000, DB_NEWEST_MS]);
+});
+
+test('fast-forward during manual pause keeps the pause on the newest telegram', async () => {
+  stubDatabaseInfo();
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Playing' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Load up to newest telegram in database' }));
+  await waitFor(() => {
+    expect(readMonitorViewPref()).toMatchObject({
+      direction: 'backward',
+      anchorTs: DB_NEWEST_MS,
+      follow: false,
+      pauseMode: 'manual',
+    });
+  });
+  expect(screen.getByRole('button', { name: 'Paused manually' })).toBeInTheDocument();
+});
+
+test('fast-forward from auto-pause turns live and follow on', async () => {
+  stubDatabaseInfo();
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Playing' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Paused manually' }));
+  expect(screen.getByRole('button', { name: 'Paused automatically' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Load up to newest telegram in database' }));
+  await waitFor(() => {
+    expect(readMonitorViewPref()).toMatchObject({
+      direction: 'backward',
+      anchorTs: null,
+      follow: true,
+      pauseMode: 'playing',
+    });
+  });
+  expect(screen.getByRole('button', { name: 'Playing' })).toBeInTheDocument();
+});
+
+test('fast-forward from a forward view turns live on', async () => {
+  stubDatabaseInfo();
+  writeMonitorViewPref({
+    direction: 'forward',
+    anchorTs: null,
+    follow: false,
+    pauseMode: 'off',
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Load up to newest telegram in database' }));
+  await waitFor(() => {
+    expect(readMonitorViewPref()).toMatchObject({
+      direction: 'backward',
+      anchorTs: null,
+      follow: true,
+      pauseMode: 'playing',
+    });
+  });
+  expect(screen.getByRole('button', { name: 'Playing' })).toBeEnabled();
+  expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+});
+
+test('a backward fixed anchor shows the auto-pause control and a click latches manual pause', async () => {
+  writeMonitorViewPref({
+    direction: 'backward',
+    anchorTs: 1_700_000_000_000,
+    follow: true,
+    pauseMode: 'playing',
+  });
+  render(<App />);
+  const parked = await screen.findByRole('button', { name: 'Paused automatically' });
+  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
+  fireEvent.click(parked);
+  expect(screen.getByRole('button', { name: 'Paused manually' })).toBeInTheDocument();
+});
+
+test('the status count includes the pause backlog', async () => {
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Playing' }));
+  await act(async () => {
+    cacheCtl.addLive!(makeTelegram({
+      timestamp: new Date().toISOString(),
+      source_address: '1.2.1',
+      raw_hex: '0xa',
+    }));
+    cacheCtl.addLive!(makeTelegram({
+      timestamp: new Date().toISOString(),
+      source_address: '1.2.2',
+      raw_hex: '0xb',
+    }));
+  });
+  expect(screen.getByLabelText('3 in buffer and backlog')).toHaveTextContent('3');
 });

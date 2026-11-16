@@ -232,6 +232,23 @@ export function statusPillCount(
 }
 
 /**
+ * Status-pill figures. Both include the pause backlog.
+ * The filtered side is the visible filtered length of that side, not a second
+ * definition of "filtered".
+ */
+export function bufferBacklogCounts(
+  bufferCount: number,
+  backlogCount: number,
+  filteredBufferCount: number,
+  filteredBacklogCount: number,
+): { filtered: number; total: number } {
+  return {
+    filtered: filteredBufferCount + filteredBacklogCount,
+    total: bufferCount + backlogCount,
+  };
+}
+
+/**
  * Anchor-end pill. Only filtered rows scrolled fully out of the viewport
  * toward the anchor, plus the backward pause backlog. Zero hides the pill.
  * Not the status pill's total.

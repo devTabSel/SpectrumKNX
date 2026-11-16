@@ -23,7 +23,17 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
   const [value, setValue] = useState('');
   const btnRef = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  /** Set when Escape or an explicit submit already owns the outcome, so the blur that follows does not submit again. */
+  const skipBlur = useRef(false);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  const submitFrom = (raw: string) => {
+    skipBlur.current = true;
+    const ms = new Date(raw).getTime();
+    if (raw && !Number.isNaN(ms)) onGoto(ms);
+    setOpen(false);
+  };
 
   const toggle = () => {
     if (open) { setOpen(false); return; }
@@ -41,7 +51,11 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
   // Close on Escape or an outside click, mirroring SendToGaPopover.
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      skipBlur.current = true;
+      setOpen(false);
+    };
     const onDown = (e: MouseEvent) => {
       const n = e.target as Node;
       if ((e.target as Element | null)?.closest?.('[data-themed-datetime-picker]')) return;
@@ -54,12 +68,6 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
       document.removeEventListener('mousedown', onDown);
     };
   }, [open]);
-
-  const submit = () => {
-    const ms = new Date(value).getTime();
-    if (!Number.isNaN(ms)) onGoto(ms);
-    setOpen(false);
-  };
 
   return (
     <>
@@ -86,21 +94,37 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
         >
           <ThemedDatetimePicker
             className="goto-time-input"
+            inputRef={inputRef}
             value={value}
             autoFocus
             withSeconds
             aria-label="Target time"
             onChange={setValue}
+            onBlur={() => {
+              if (skipBlur.current) {
+                skipBlur.current = false;
+                return;
+              }
+              submitFrom(inputRef.current?.value ?? value);
+            }}
             onKeyDown={e => {
+              if (e.key === 'Escape') {
+                skipBlur.current = true;
+                return;
+              }
               if (e.key !== 'Enter') return;
               e.preventDefault();
-              const raw = (e.currentTarget as HTMLInputElement).value;
-              const ms = new Date(raw).getTime();
-              if (raw && !Number.isNaN(ms)) onGoto(ms);
-              setOpen(false);
+              submitFrom((e.currentTarget as HTMLInputElement).value);
             }}
           />
-          <button className="goto-time-go" onClick={submit} disabled={!value}>Go</button>
+          <button
+            className="goto-time-go"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => submitFrom(inputRef.current?.value ?? value)}
+            disabled={!value}
+          >
+            Go
+          </button>
         </div>,
         document.body,
       )}

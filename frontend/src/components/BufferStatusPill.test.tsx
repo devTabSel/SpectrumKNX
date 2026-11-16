@@ -1,4 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/react';
+import { format } from 'date-fns';
 import { expect, test, vi } from 'vitest';
 import {
   BufferStatusPill,
@@ -49,15 +50,22 @@ test('formatRangeMinutes / rangeValueToMinutes round-trip s/m/h', () => {
   expect(sanitizeRangeInput('0')).toBe('');
 });
 
-test('renders range like SecondsField with clickable unit; count has no spaces', () => {
+test('renders range like SecondsField with clickable unit; filtered count is x / y', () => {
   render(<BufferStatusPill {...baseProps} />);
   const range = screen.getByLabelText('Buffer range');
   expect(range).toHaveValue('60');
   expect(range.title).toBe('10/1000');
   expect(screen.getByRole('button', { name: 'Cycle range unit (s / m / h)' })).toHaveTextContent('m');
-  expect(screen.getByLabelText('3 filtered of 10 in buffer')).toHaveTextContent('3/10');
+  expect(screen.getByLabelText('3 filtered of 10 in buffer and backlog')).toHaveTextContent('3 / 10');
   expect(screen.queryByLabelText('Load limit')).not.toBeInTheDocument();
   expect(screen.queryByText(/History: loading/)).not.toBeInTheDocument();
+});
+
+test('count shows only the total when no filter is active', () => {
+  render(<BufferStatusPill {...baseProps} filterActive={false} />);
+  const count = screen.getByLabelText('10 in buffer and backlog');
+  expect(count).toHaveTextContent('10');
+  expect(count.textContent).not.toContain('/');
 });
 
 test('clicking range unit cycles s → m → h and keeps duration', () => {
@@ -103,7 +111,7 @@ test('range: forward = value+unit left / icon right; backward = icon left / valu
   const field = screen.getByLabelText('Buffer range').closest('[data-seconds-field]') as HTMLElement;
   const clear = screen.getByLabelText(/Clear \(also wipes/);
   expect(field.contains(clear)).toBe(true);
-  expect(clear.style.color).toBe('var(--warning-text)');
+  expect(clear.style.color).toBe('var(--text-dim)');
   // Backward: icon left, value+unit right.
   expect(field.firstElementChild).toBe(clear);
   const cluster = field.querySelector('[data-seconds-value-unit]') as HTMLElement;
@@ -174,27 +182,137 @@ test('forward shows a disabled Stop and no play control', () => {
   expect(onTogglePause).not.toHaveBeenCalled();
 });
 
-test('offline and reconnect backfill replace the pause control', () => {
+test('offline keeps the live control; only the websocket LED is red', () => {
   const { rerender } = render(<BufferStatusPill {...baseProps} wsConnected={false} />);
-  const offline = screen.getByRole('button', { name: 'Offline' });
-  expect(offline).toBeDisabled();
-  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
-
-  rerender(<BufferStatusPill {...baseProps} wsConnected fillingGaps />);
-  expect(screen.getByRole('button', { name: 'Lädt nach' })).toBeDisabled();
-  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
-
-  rerender(
-    <BufferStatusPill {...baseProps} wsConnected={false} fillingGaps readDirection="forward" />,
-  );
-  expect(screen.getByRole('button', { name: 'Offline' })).toBeInTheDocument();
+  const play = screen.getByRole('button', { name: 'Playing' });
+  expect(play).toBeEnabled();
+  expect(screen.getByLabelText('WebSocket offline')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Offline' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Lädt nach' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument();
+
+  rerender(<BufferStatusPill {...baseProps} wsConnected={false} readDirection="forward" />);
+  expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
+  expect(screen.getByLabelText('WebSocket offline')).toBeInTheDocument();
 });
 
-test('clear ctrl-click asks for auto pause', () => {
+test('manual pause is purple and auto pause is the dim pause icon', () => {
+  const { rerender } = render(
+    <BufferStatusPill
+      {...baseProps}
+      pauseMode="manual"
+      pauseTitle="Paused manually"
+      pauseColor="var(--accent-primary)"
+    />,
+  );
+  expect(screen.getByRole('button', { name: 'Paused manually' }).style.color).toBe('var(--accent-primary)');
+
+  rerender(
+    <BufferStatusPill
+      {...baseProps}
+      pauseMode="auto"
+      pauseTitle="Paused automatically"
+      pauseColor="var(--text-dim)"
+    />,
+  );
+  const auto = screen.getByRole('button', { name: 'Paused automatically' });
+  expect(auto.style.color).toBe('var(--text-dim)');
+  expect(auto.querySelector('svg')).toBeTruthy();
+});
+
+test('a fixed past anchor shows the auto-pause icon and stays clickable', () => {
+  const onTogglePause = vi.fn();
+  render(
+    <BufferStatusPill
+      {...baseProps}
+      pauseMode="playing"
+      pauseTitle="Playing"
+      pauseColor="var(--success)"
+      fixedAnchor
+      onTogglePause={onTogglePause}
+    />,
+  );
+  const parked = screen.getByRole('button', { name: 'Paused automatically' });
+  expect(parked).toBeEnabled();
+  expect(parked.style.color).toBe('var(--text-dim)');
+  expect(screen.queryByRole('button', { name: 'Playing' })).not.toBeInTheDocument();
+  fireEvent.click(parked);
+  expect(onTogglePause).toHaveBeenCalledTimes(1);
+});
+
+test('clear is disabled when the buffer is empty and ignores ctrl-click', () => {
   const onClear = vi.fn();
-  render(<BufferStatusPill {...baseProps} onClear={onClear} />);
-  fireEvent.click(screen.getByLabelText(/Clear \(also wipes/), { ctrlKey: true });
-  expect(onClear).toHaveBeenCalledWith({ pauseAuto: true });
+  const { rerender } = render(
+    <BufferStatusPill {...baseProps} onClear={onClear} totalCount={0} filteredCount={0} filterActive={false} />,
+  );
+  const empty = screen.getByRole('button', { name: /Clear \(also wipes/ });
+  expect(empty).toBeDisabled();
+  fireEvent.click(empty);
+  expect(onClear).not.toHaveBeenCalled();
+
+  rerender(<BufferStatusPill {...baseProps} onClear={onClear} />);
+  fireEvent.click(screen.getByRole('button', { name: /Clear \(also wipes/ }), { ctrlKey: true, metaKey: true });
+  expect(onClear).toHaveBeenCalledTimes(1);
+});
+
+test('clear turns orange for every end-of marker and names the reason', () => {
+  const { rerender } = render(<BufferStatusPill {...baseProps} readingEnd="range" />);
+  let clear = screen.getByRole('button', { name: /Clear \(also wipes/ });
+  expect(clear.style.color).toBe('var(--warning-text)');
+  expect(clear).toHaveAttribute('title', expect.stringMatching(/end of range/i));
+
+  rerender(<BufferStatusPill {...baseProps} readingEnd="loadlimit" />);
+  clear = screen.getByRole('button', { name: /Clear \(also wipes/ });
+  expect(clear.style.color).toBe('var(--warning-text)');
+  expect(clear.title).toMatch(/end of loadlimit/i);
+
+  rerender(<BufferStatusPill {...baseProps} readingEnd="data" />);
+  clear = screen.getByRole('button', { name: /Clear \(also wipes/ });
+  expect(clear.title).toMatch(/end of data/i);
+
+  rerender(<BufferStatusPill {...baseProps} totalCount={1000} loadLimit={1000} readingEnd="loading" />);
+  clear = screen.getByRole('button', { name: /Clear \(also wipes/ });
+  expect(clear.style.color).toBe('var(--text-dim)');
+});
+
+test('oldest and newest commit on goto, Enter and blur, and Escape restores', () => {
+  const onOldestCommit = vi.fn();
+  const onNewestCommit = vi.fn();
+  render(
+    <BufferStatusPill
+      {...baseProps}
+      onOldestCommit={onOldestCommit}
+      onNewestCommit={onNewestCommit}
+    />,
+  );
+  const oldest = screen.getByLabelText('Oldest telegram in buffer');
+  const oldestText = format(baseProps.oldestMs!, "yyyy-MM-dd'T'HH:mm:ss");
+  const nextOldest = '2026-03-01T11:00:00';
+
+  fireEvent.focus(oldest);
+  fireEvent.change(oldest, { target: { value: nextOldest } });
+  fireEvent.keyDown(oldest, { key: 'Enter' });
+  expect(onOldestCommit).toHaveBeenCalledWith(new Date(nextOldest).getTime());
+
+  onOldestCommit.mockClear();
+  fireEvent.focus(oldest);
+  fireEvent.change(oldest, { target: { value: '2026-03-01T11:30:00' } });
+  fireEvent.blur(oldest);
+  expect(onOldestCommit).toHaveBeenCalledWith(new Date('2026-03-01T11:30:00').getTime());
+
+  onOldestCommit.mockClear();
+  fireEvent.focus(oldest);
+  fireEvent.change(oldest, { target: { value: '2026-03-01T11:45:00' } });
+  fireEvent.keyDown(oldest, { key: 'Escape' });
+  expect(onOldestCommit).not.toHaveBeenCalled();
+  expect(oldest).toHaveValue(oldestText);
+
+  fireEvent.focus(oldest);
+  fireEvent.change(oldest, { target: { value: '2026-03-01T09:00:00' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Go to oldest time' }));
+  expect(onOldestCommit).toHaveBeenCalledWith(new Date('2026-03-01T09:00:00').getTime());
+
+  const newest = screen.getByLabelText('Newest telegram in buffer');
+  fireEvent.change(newest, { target: { value: '2026-03-01T13:00:00' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Go to newest time' }));
+  expect(onNewestCommit).toHaveBeenCalledWith(new Date('2026-03-01T13:00:00').getTime());
 });
