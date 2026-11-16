@@ -3,6 +3,7 @@ import {
   END_MARKER_PX,
   DISPLAY_ROW_PX,
   DISPLAY_RUBBER_PX,
+  anchorDisplayEdge,
   anchorEdgeCount,
   contiguousFromAnchor,
   readingEndCause,
@@ -147,16 +148,35 @@ describe('contiguousFromAnchor', () => {
   });
 });
 
+describe('anchorDisplayEdge', () => {
+  it('places the anchor where that row sits for every direction and time sort', () => {
+    // Forward anchor is the oldest row; backward is the newest.
+    expect(anchorDisplayEdge('forward', 'desc')).toBe('bottom');
+    expect(anchorDisplayEdge('forward', 'asc')).toBe('top');
+    expect(anchorDisplayEdge('backward', 'desc')).toBe('top');
+    expect(anchorDisplayEdge('backward', 'asc')).toBe('bottom');
+  });
+
+  it('keeps a non-time sort anchored at the top', () => {
+    expect(anchorDisplayEdge('forward', null)).toBe('top');
+    expect(anchorDisplayEdge('backward', null)).toBe('top');
+  });
+});
+
 describe('status and anchor-edge counts', () => {
   it('uses the status pill digits for an unfiltered buffer and the filtered length otherwise', () => {
     expect(statusPillCount(4, 10, false)).toBe(10);
     expect(statusPillCount(4, 10, true)).toBe(4);
   });
 
-  it('counts the same filtered rows toward the anchor, plus the backward backlog', () => {
-    expect(anchorEdgeCount(4, 3, 'backward')).toBe(7);
-    expect(anchorEdgeCount(4, 3, 'forward')).toBe(4);
-    // Backlog is the whole filtered set: the edge count matches the status pill.
-    expect(anchorEdgeCount(0, 3, 'backward')).toBe(statusPillCount(3, 3, false));
+  it('counts only rows scrolled toward the anchor, plus the backward backlog', () => {
+    expect(anchorEdgeCount(2, 3, 'backward')).toBe(5);
+    expect(anchorEdgeCount(2, 3, 'forward')).toBe(2);
+    expect(anchorEdgeCount(0, 3, 'backward')).toBe(3);
+    expect(anchorEdgeCount(0, 3, 'forward')).toBe(0);
+    expect(anchorEdgeCount(0, 0, 'backward')).toBe(0);
+    // The status pill keeps the filtered total. The anchor pill does not repeat it.
+    expect(statusPillCount(10, 40, true)).toBe(10);
+    expect(anchorEdgeCount(2, 3, 'backward')).not.toBe(10);
   });
 });

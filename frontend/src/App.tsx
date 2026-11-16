@@ -29,7 +29,6 @@ import {
   deriveMonitorView,
   normalizeMonitorView,
   resolveMonitorStartup,
-  sortConfigForReadDirection,
   writeMonitorViewPref,
   type MonitorPauseMode,
   type MonitorView,
@@ -453,7 +452,6 @@ function App() {
     rangeMinutes: number;
   } | null>(null);
   const monitorActionsRef = useRef<{
-    syncSort: (dir: 'forward' | 'backward') => void;
     fillAnchor: (dir: 'forward' | 'backward', ts: number, rangeMinutes?: number) => Promise<void>;
     adoptAnchorDirection: typeof adoptAnchorDirection;
     setBufferAnchor: typeof setBufferAnchor;
@@ -740,7 +738,6 @@ function App() {
       const act = monitorActionsRef.current;
       if (act == null) return;
       act.setEvictionMode(ws.readDirection === 'forward' ? 'keepOldest' : 'keepNewest');
-      act.syncSort(ws.readDirection);
       if (ws.anchorTs == null) {
         act.adoptAnchorDirection(ws.readDirection);
         return;
@@ -1203,15 +1200,6 @@ function App() {
   // that panel consumes the main filter, so the pane shows only when it is active.
   const showFilterPane = activePanel === 'list' && isFilterOpen;
 
-  const syncSortToReadDirection = useCallback((dir: 'forward' | 'backward') => {
-    setSortConfig(prev => {
-      const next = sortConfigForReadDirection(prev, dir);
-      if (!next) return prev;
-      writeSortConfigPref(next);
-      return next;
-    });
-  }, []);
-
   /**
    * Trim to the anchor window, then fill its gaps from the anchor outward.
    * Matching rows stay. IndexedDB is read before the database, and only new
@@ -1234,7 +1222,7 @@ function App() {
   /**
    * Switch the fill/eviction axis without wiping the buffer. `after` runs once
    * the anchor direction has been adopted (timestamp cleared when it changed).
-   * Sort follows the direction.
+   * The timestamp sort is independent and stays as the user left it.
    */
   const changeReadDirection = useCallback(async (
     dir: 'forward' | 'backward',
@@ -1257,7 +1245,6 @@ function App() {
       });
       setEvictionMode(dir === 'forward' ? 'keepOldest' : 'keepNewest');
       adoptAnchorDirection(dir);
-      syncSortToReadDirection(dir);
     }
     await after?.();
     if (parkAuto) {
@@ -1267,7 +1254,7 @@ function App() {
           : v
       ));
     }
-  }, [readDirection, pauseMode, setEvictionMode, adoptAnchorDirection, syncSortToReadDirection]);
+  }, [readDirection, pauseMode, setEvictionMode, adoptAnchorDirection]);
 
   /** User-chosen anchor. The view is the source; the cache trims from it. */
   const placeAnchor = useCallback((dir: 'forward' | 'backward', ts: number) => {
@@ -1282,7 +1269,6 @@ function App() {
       rangeMinutes: bufferRangeMinutes,
     };
     monitorActionsRef.current = {
-      syncSort: syncSortToReadDirection,
       fillAnchor: fillAnchorWindow,
       adoptAnchorDirection,
       setBufferAnchor,
@@ -1292,27 +1278,25 @@ function App() {
     readDirection,
     monitorView.anchorTs,
     bufferRangeMinutes,
-    syncSortToReadDirection,
     fillAnchorWindow,
     adoptAnchorDirection,
     setBufferAnchor,
     setEvictionMode,
   ]);
 
-  // Direction owns the timestamp sort, including the direction restored at
-  // startup. An explicit anchor loads through the same window fill as a
-  // rewind; no anchor keeps today's newest-first startup. A restored forward
-  // view is already normalized (no live, no pause).
+  // Sort stays in its own preference. Direction, anchor and pause come from
+  // the monitor view. An explicit anchor loads through the same window fill
+  // as a rewind; no anchor keeps today's startup. A restored forward view is
+  // already normalized (no live, no pause).
   const startupAnchorOnce = useRef(false);
   useEffect(() => {
     if (startupAnchorOnce.current) return;
     startupAnchorOnce.current = true;
     const derived = deriveMonitorView(initialMonitor.view);
-    syncSortToReadDirection(derived.readDirection);
     if (derived.bufferAnchor.ts == null) return;
     setBufferAnchor(derived.bufferAnchor);
     void fillAnchorWindow(derived.readDirection, derived.bufferAnchor.ts, initialMonitor.rangeMinutes);
-  }, [initialMonitor, syncSortToReadDirection, setBufferAnchor, fillAnchorWindow]);
+  }, [initialMonitor, setBufferAnchor, fillAnchorWindow]);
 
   /** Apply a new minute window: trim when shrinking, fill gaps when expanding. */
   const applyBufferRange = useCallback(async (nextMinutes: number) => {

@@ -144,6 +144,11 @@ beforeEach(() => {
   cacheCtl.fillingGaps = false;
   cacheCtl.setFillingGaps = null;
   wsCtl.connected = true;
+  vi.stubGlobal('fetch', vi.fn().mockImplementation(() =>
+    Promise.resolve({
+      json: () => Promise.resolve({}),
+    })
+  ));
 });
 
 function setWsConnected(connected: boolean) {
@@ -462,12 +467,10 @@ test('the monitor URL wins over prefs for direction, anchor and range', async ()
       pauseMode: 'off',
     });
   });
-  await waitFor(() => {
-    expect(readSortConfigPref()).toEqual([{ key: 'timestamp', direction: 'asc' }]);
-  });
+  expect(readSortConfigPref()).toEqual([{ key: 'timestamp', direction: 'desc' }]);
 });
 
-test('sort follows a restored forward direction instead of the sort preference', async () => {
+test('a restored direction keeps the sort preference', async () => {
   writeSortConfigPref([{ key: 'source_address', direction: 'asc' }]);
   writeMonitorViewPref({
     direction: 'forward',
@@ -476,10 +479,8 @@ test('sort follows a restored forward direction instead of the sort preference',
     pauseMode: 'playing',
   });
   render(<App />);
-  await waitFor(() => {
-    expect(readSortConfigPref()).toEqual([{ key: 'timestamp', direction: 'asc' }]);
-  });
-  expect(screen.getByRole('button', { name: 'Reading forward' })).toBeInTheDocument();
+  expect(await screen.findByRole('button', { name: 'Reading forward' })).toBeInTheDocument();
+  expect(readSortConfigPref()).toEqual([{ key: 'source_address', direction: 'asc' }]);
 });
 
 test('toggling the filter pane updates the URL without a history entry', async () => {
@@ -547,7 +548,8 @@ test('forward Stop does not toggle pause and live rows are not a newer pill', as
   });
 });
 
-test('popstate normalizes a forward view that was playing', async () => {
+test('popstate normalizes a forward view that was playing and leaves the sort', async () => {
+  writeSortConfigPref([{ key: 'timestamp', direction: 'desc' }]);
   render(<App />);
   expect(await screen.findByRole('button', { name: 'Playing' })).toBeInTheDocument();
   await act(() => new Promise(r => setTimeout(r, 600)));
@@ -564,9 +566,55 @@ test('popstate normalizes a forward view that was playing', async () => {
       pauseMode: 'off',
     });
   });
+  expect(readSortConfigPref()).toEqual([{ key: 'timestamp', direction: 'desc' }]);
+});
+
+test('the direction chevron does not change the sort', async () => {
+  writeSortConfigPref([{ key: 'timestamp', direction: 'desc' }]);
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Reading backward' }));
+  expect(await screen.findByRole('button', { name: 'Reading forward' })).toBeInTheDocument();
+  expect(readSortConfigPref()).toEqual([{ key: 'timestamp', direction: 'desc' }]);
+});
+
+test('rewind and fast-forward change direction without changing the sort', async () => {
+  writeSortConfigPref([{ key: 'source_address', direction: 'asc' }]);
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/database/info')) {
+      return {
+        ok: true,
+        json: async () => ({
+          oldest_timestamp: '2020-01-01T00:00:00.000Z',
+          newest_timestamp: '2024-06-01T00:00:00.000Z',
+        }),
+      };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<App />);
+  await screen.findByRole('button', { name: 'Reading backward' });
+  fireEvent.click(screen.getByRole('button', { name: 'Load from oldest telegram in database' }));
+  expect(await screen.findByRole('button', { name: 'Reading forward' })).toBeInTheDocument();
+  expect(readSortConfigPref()).toEqual([{ key: 'source_address', direction: 'asc' }]);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Load up to newest telegram in database' }));
+  expect(await screen.findByRole('button', { name: 'Reading backward' })).toBeInTheDocument();
+  expect(readSortConfigPref()).toEqual([{ key: 'source_address', direction: 'asc' }]);
+});
+
+test('a manual sort change does not change the read direction', async () => {
+  render(<App />);
+  expect(await screen.findByRole('button', { name: 'Reading backward' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'TIME' }));
+  await waitFor(() => {
+    expect(readSortConfigPref()).toEqual([{ key: 'timestamp', direction: 'asc' }]);
+  });
+  expect(screen.getByRole('button', { name: 'Reading backward' })).toBeInTheDocument();
 });
 
 test('switching forward to backward without a timestamp parks on the edge', async () => {
+  writeSortConfigPref([{ key: 'timestamp', direction: 'asc' }]);
   writeMonitorViewPref({
     direction: 'forward',
     anchorTs: 5000,
@@ -588,6 +636,7 @@ test('switching forward to backward without a timestamp parks on the edge', asyn
     });
   });
   expect(cacheCtl.loadRangeCalls.slice(before)).toEqual([[edge - 60 * 60_000, edge]]);
+  expect(readSortConfigPref()).toEqual([{ key: 'timestamp', direction: 'asc' }]);
 });
 
 test('the pill shows Offline while the socket is down and Lädt nach during a gap fill', async () => {

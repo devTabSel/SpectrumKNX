@@ -25,6 +25,8 @@ import type { Interval } from '../services/telegram-coverage-service';
 import {
   END_MARKER_PX,
   READING_END_LABEL,
+  anchorDisplayEdge,
+  anchorEdgeCount,
   contiguousFromAnchor,
   spacerVariantA,
   type ReadingEndCause,
@@ -153,9 +155,11 @@ interface TelegramTableProps {
    */
   liveFollow?: boolean;
   /**
-   * Read axis. When set, the list shows only the gapless run from the anchor,
-   * spacers follow variant A, and the anchor-end pill counts filtered rows
-   * back to that anchor. Omitted keeps the live-edge geometry (history, tests).
+   * Read axis. When set, the list shows only the gapless run from the anchor
+   * and spacers follow variant A. The anchor sits on the side where that row
+   * falls in the current time sort; the reading end is the other side. The
+   * anchor pill counts filtered rows scrolled out toward it (plus the
+   * backward pause backlog). Omitted keeps the live-edge geometry.
    */
   readDirection?: 'forward' | 'backward';
   /**
@@ -535,21 +539,24 @@ interface VirtualEdgeItem {
 }
 
 /**
- * Merged rows completely scrolled out toward the fill axis (partial overlap
- * does not count). Rows outside the rendered window are fully out; only the
+ * Merged rows completely scrolled out toward `edge` (partial overlap does not
+ * count). Rows outside the rendered window are fully out; only the
  * already-rendered edge items are inspected, so this stays O(overscan).
+ * `leadPx` is scroll content before the virtualizer block: item `start` is
+ * relative to that block, `scrollTop` is not.
  */
 function countMergedScrolledOut(
   rowCount: number,
-  liveEdge: 'top' | 'bottom',
+  edge: 'top' | 'bottom',
   scrollTop: number,
   clientHeight: number,
   virtualItems: readonly VirtualEdgeItem[],
+  leadPx = 0,
 ): number {
   if (rowCount === 0 || clientHeight <= 0 || virtualItems.length === 0) return 0;
-  const viewTop = scrollTop;
-  const viewBottom = scrollTop + clientHeight;
-  if (liveEdge === 'top') {
+  const viewTop = scrollTop - leadPx;
+  const viewBottom = scrollTop + clientHeight - leadPx;
+  if (edge === 'top') {
     const first = virtualItems[0];
     let extra = 0;
     for (const item of virtualItems) {
@@ -1450,14 +1457,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const liveEdge = primarySort?.direction === 'asc' ? 'bottom' : 'top';
   // Display mode (a read direction from the monitor). History and the existing
   // live-edge tests leave `readDirection` unset and keep the geometry below.
+  // The anchor side is where the anchor row sits in the current time sort
+  // (oldest forward, newest backward). Sort and direction are independent.
   const displayEdges = readDirection != null;
-  const anchorEdge: 'top' | 'bottom' = !displayEdges
+  const anchorEdge: 'top' | 'bottom' = !displayEdges || readDirection == null
     ? liveEdge
-    : !isTimeSort
-      ? 'top'
-      : readDirection === 'forward'
-        ? (timeSortDirection === 'desc' ? 'bottom' : 'top')
-        : (timeSortDirection === 'asc' ? 'bottom' : 'top');
+    : anchorDisplayEdge(readDirection, isTimeSort ? timeSortDirection : null);
   const readingEdge: 'top' | 'bottom' = anchorEdge === 'top' ? 'bottom' : 'top';
   const [viewportHeight, setViewportHeight] = useState(0);
 
@@ -1560,6 +1565,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const [stickyOppositeSpacerPx, setStickyOppositeSpacerPx] = useState(0);
   const oppositeSpacerPx =
     frozenGeom?.oppositeSpacerPx ?? Math.max(liveOppositeSpacerPx, stickyOppositeSpacerPx);
+  // Spacers painted before the virtualizer in display mode. Item `start`
+  // ignores them, so the anchor-pill scroll math subtracts this lead. The
+  // reading block leads when it is on top; otherwise the anchor rubber leads
+  // only while it is a sibling (newest-at-bottom). The two never stack.
+  // Legacy live-edge geometry keeps a lead of 0 so its pill math is unchanged.
+  const rowsLeadPx = !displayPlan
+    ? 0
+    : readingEdge === 'top'
+      ? (readingIsLive ? readingBlockPx : oppositeSpacerPx)
+      : (liveEdge === 'bottom' ? oppositeSpacerPx : 0);
   const rubberBandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rubberBandRafRef = useRef<number | null>(null);
   /** Active rubber-band animation; survives live prepends (no retarget). */
@@ -1599,8 +1614,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   );
   // Non-time sort: the topmost row at the moment the list last settled.
   const fixedTopRef = useRef<{ key: string; offset: number } | null>(null);
-  // Chevron flips the timestamp sort in the same commit. Skip that pin once
-  // so the scroll position is not rebuilt; the spacers still swap.
+  // A chevron does not change the sort. If a sort update lands in the same
+  // commit anyway, skip that pin once so scrollTop stays put; the spacers
+  // still swap.
   const chevronSortHoldRef = useRef(false);
   const programmaticScrollRef = useRef(false);
   // Whether the user is scrolling right now — wheel, touch, keys, or a held
@@ -2487,15 +2503,22 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       const rowsNow = telegramRowsRef.current;
       const itemsNow = virtualizer.getVirtualItems();
       const measuredNow = itemsNow.some(item => item.size > 0);
-      let nextRaw = visiblePausedCountRef.current;
+      const countEdge = displayEdges ? anchorEdge : liveEdge;
+      let nextRaw = displayEdges && readDirection
+        ? anchorEdgeCount(0, visiblePausedCountRef.current, readDirection)
+        : visiblePausedCountRef.current;
       if (rowsNow.length > 0 && measuredNow && virtualizer.getTotalSize() > 0) {
-        nextRaw = countMergedScrolledOut(
+        const mergedOut = countMergedScrolledOut(
           rowsNow.length,
-          liveEdge,
+          countEdge,
           scrollElNow.scrollTop,
           scrollElNow.clientHeight,
           itemsNow,
-        ) + visiblePausedCountRef.current;
+          rowsLeadPx,
+        );
+        nextRaw = displayEdges && readDirection
+          ? anchorEdgeCount(mergedOut, visiblePausedCountRef.current, readDirection)
+          : mergedOut + visiblePausedCountRef.current;
       }
       if (nextRaw !== rawNewerCountRef.current) {
         rawNewerCountRef.current = nextRaw;
@@ -3495,6 +3518,19 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readDirection, directionGesture, displayEdges]);
 
+  // The reading spacer is sized from the viewport, which is 0 on the first
+  // render. A backward ascending follow (newest at the bottom) would otherwise
+  // settle before that spacer exists and stay on the older rows. Re-seat while
+  // still following once the edge geometry is known. A flush or a rubber band
+  // owns the scroll until it finishes.
+  useLayoutEffect(() => {
+    if (!liveFollow || !isTimeSort || !atEdgeRef.current) return;
+    if (rubberAnimRef.current || flushPinRef.current) return;
+    scrollToEdge();
+    // scrollToEdge reads the latest spacer sizes; the deps are that geometry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewportHeight, liveFillRubberPx, liveOppositeSpacerPx, liveEdge, liveFollow, isTimeSort]);
+
   // Restore scroll position/anchor on mount (#203, #341)
   const restoredRef = useRef(false);
   useEffect(() => {
@@ -4308,40 +4344,38 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     gap: '0.25rem', minWidth: 0,
   };
 
-  // Newer pill = filter-visible unmerged (pause backlog) + filter-visible
-  // merged rows completely scrolled out toward the fill axis. Partial overlap
-  // with the viewport does not count as out. `telegramRows` is already the
-  // on-list (filter) set; `visiblePausedCount` is the filtered backlog.
+  // Anchor pill = filtered rows completely scrolled out toward the anchor.
+  // Partial overlap does not count. Backward also adds the filtered pause
+  // backlog. This is not the status pill's total; both use the same filtered
+  // rows. Without a read direction the count stays the live-edge newer count.
+  // `telegramRows` is the on-list set; `visiblePausedCount` is the filtered backlog.
   const virtualItems = virtualizer.getVirtualItems();
   let newerCount: number;
   const rangeMeasured = virtualItems.some(item => item.size > 0);
   const scrollEl = parentRef.current;
-  // Display mode counts toward the anchor. Backward still adds the filtered
-  // pause backlog. Forward only counts rows you can scroll back to x.
-  // The rows are the filtered list the status pill counts (`filteredCount`).
   const countEdge = displayEdges ? anchorEdge : liveEdge;
-  const countPaused = !(displayEdges && readDirection === 'forward');
-  if (isTimeSort) {
-    if (telegramRows.length === 0) {
-      // Empty list: every filter-visible pause-backlog row counts.
-      newerCount = countPaused ? visiblePausedCount : 0;
-    } else {
-      let mergedOut = 0;
-      if (rangeMeasured && scrollEl && virtualizer.getTotalSize() > 0) {
-        mergedOut = countMergedScrolledOut(
-          telegramRows.length,
-          countEdge,
-          scrollEl.scrollTop,
-          scrollEl.clientHeight,
-          virtualItems,
-        );
-      }
-      // Always add the filtered pause backlog — do not use Math.max (that
-      // dropped unmerged rows whenever merged-out already exceeded them).
-      newerCount = mergedOut + (countPaused ? visiblePausedCount : 0);
+  const pausedForPill = (scrolled: number) => (
+    displayEdges && readDirection
+      ? anchorEdgeCount(scrolled, visiblePausedCount, readDirection)
+      : scrolled + visiblePausedCount
+  );
+  if (isTimeSort && telegramRows.length > 0) {
+    let mergedOut = 0;
+    if (rangeMeasured && scrollEl && virtualizer.getTotalSize() > 0) {
+      mergedOut = countMergedScrolledOut(
+        telegramRows.length,
+        countEdge,
+        scrollEl.scrollTop,
+        scrollEl.clientHeight,
+        virtualItems,
+        rowsLeadPx,
+      );
     }
+    newerCount = pausedForPill(mergedOut);
   } else {
-    newerCount = countPaused ? visiblePausedCount : 0;
+    // Empty list or a non-time sort: nothing is scrolled out of a time order.
+    // Backward still shows the filtered pause backlog.
+    newerCount = pausedForPill(0);
   }
   // Across a pause-buffer flush the measured count can briefly drop to 0 —
   // keep sticky only for that unpause frame or while the virtualizer is
@@ -5039,10 +5073,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           below the header, not over it. */}
       <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-      {/* Anchor-end pill. Backward: filtered rows up to the anchor, including
-          the pause backlog ("N newer"). Forward: filtered rows you scroll back
-          over to reach x ("N older"); the click scrolls to x. Without a read
-          direction this stays the live-edge newer pill. */}
+      {/* Anchor-end pill, on the side where the anchor sits in the current
+          time sort. Backward: "N newer" (scrolled-out rows + pause backlog).
+          Forward: "N older" (scrolled-out rows only). The click scrolls to the
+          anchor. Count 0 hides it. Without a read direction this stays the
+          live-edge newer pill. */}
       {(displayEdges ? displayNewerCount > 0 : liveFollow && isTimeSort && displayNewerCount > 0) && (() => {
         const edgeWord = displayEdges && readDirection === 'forward' ? 'older' : 'newer';
         const pillEdge = displayEdges ? (isTimeSort ? anchorEdge : 'top') : liveEdge;

@@ -1,6 +1,5 @@
 import type { PauseMode } from './bufferPauseMode';
 import { getPref, setPref } from './prefs';
-import type { SortConfig } from './sortConfig';
 import { UI_STORAGE_KEY } from './uiState';
 
 /**
@@ -56,22 +55,6 @@ export function deriveMonitorView(view: MonitorView): MonitorViewDerived {
     listFollow: view.follow,
     pauseMode: view.pauseMode,
   };
-}
-
-/**
- * Timestamp sort implied by a read direction.
- * Returns null when `current` already leads with that timestamp order, so a
- * matching multi-level sort is left alone. Otherwise the direction replaces
- * the sort with a single timestamp level.
- */
-export function sortConfigForReadDirection(
-  current: SortConfig,
-  direction: ReadDirection,
-): SortConfig | null {
-  const want: 'asc' | 'desc' = direction === 'forward' ? 'asc' : 'desc';
-  const ts = current.find(level => level.key === 'timestamp');
-  if (ts?.direction === want && current[0]?.key === 'timestamp') return null;
-  return [{ key: 'timestamp', direction: want }];
 }
 
 /** Direction, anchor and range as carried by a monitor URL. */

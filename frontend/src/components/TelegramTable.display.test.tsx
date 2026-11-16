@@ -99,6 +99,20 @@ const portOf = (container: HTMLElement) =>
 const rowText = (container: HTMLElement) =>
   Array.from(container.querySelectorAll('.log-row')).map(row => row.textContent ?? '');
 
+/** 'top' when the end marker is before the rows, 'bottom' when it follows them. */
+function markerSide(container: HTMLElement): 'top' | 'bottom' {
+  const marker = container.querySelector('[data-testid="reading-end-marker"]');
+  const row = container.querySelector('.log-row');
+  if (!marker || !row) throw new Error('missing end marker or row');
+  const rowFollowsMarker = (marker.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+  return rowFollowsMarker ? 'top' : 'bottom';
+}
+
+const settledBottom = (port: HTMLElement) => {
+  const max = Math.max(0, port.scrollHeight - port.clientHeight);
+  return Math.max(0, max - DISPLAY_RUBBER_PX);
+};
+
 function emulateRowLayout(port: HTMLElement) {
   const original = Element.prototype.getBoundingClientRect;
   Element.prototype.getBoundingClientRect = function (this: Element) {
@@ -243,6 +257,8 @@ test('chevron keeps the scroll position; another direction change rebuilds onto 
   const port = portOf(container);
   const order = () => Array.from(container.querySelectorAll('.log-row')).map(row => row.getAttribute('data-akey'));
   const before = order();
+  expect(port.dataset.anchorEdge).toBe('top');
+  expect(markerSide(container)).toBe('bottom');
   port.scrollTop = 200;
   fireEvent.scroll(port);
 
@@ -259,6 +275,10 @@ test('chevron keeps the scroll position; another direction change rebuilds onto 
   );
   expect(port.scrollTop).toBe(200);
   expect(order()).toEqual(before);
+  // Same rows, same scroll. Only the anchor side moves: desc puts the oldest
+  // row (forward anchor) at the bottom, so the reading marker leaves the bottom.
+  expect(port.dataset.anchorEdge).toBe('bottom');
+  expect(markerSide(container)).toBe('top');
 
   rerender(
     <TelegramTable
@@ -275,48 +295,59 @@ test('chevron keeps the scroll position; another direction change rebuilds onto 
   expect(port.scrollTop).toBe(DISPLAY_RUBBER_PX);
 });
 
-test('backward newer and forward older count the status pill filtered rows', () => {
-  const backlog = [at(3, 'p3'), at(2, 'p2'), at(1, 'p1')];
-  const status = statusPillCount(backlog.length, backlog.length, false);
+test('the anchor pill counts rows scrolled out toward the anchor, not the status total', () => {
+  const rows = [at(4, 'd'), at(3, 'c'), at(2, 'b'), at(1, 'a')];
+  const backlog = [at(6, 'p6'), at(5, 'p5')];
   const { unmount } = render(
     <TelegramTable
       {...baseProps}
-      telegrams={[]}
+      telegrams={rows}
       sortConfig={desc}
       readDirection="backward"
-      liveFollow
+      liveFollow={false}
       listFollow={false}
       isPaused
       pausedCount={backlog.length}
       pausedTelegrams={backlog}
     />,
   );
-  expect(screen.getByRole('button', { name: `${status} newer telegrams` })).toBeInTheDocument();
+  // Every row is on screen. The pill is the pause backlog, not the 4 visible
+  // rows and not the status pill's total.
+  expect(statusPillCount(rows.length, rows.length, false)).toBe(rows.length);
+  expect(screen.getByRole('button', { name: '2 newer telegrams' })).toHaveAttribute('data-edge', 'top');
   unmount();
 
   scrollBlockSize = DISPLAY_ROW_PX;
-  const rows = [at(1, 'o'), at(2, 'm'), at(3, 'n'), at(4, 'newest')];
-  const filtered = rows.length;
-  const { container } = render(
+  const forwardRows = [at(1, 'o'), at(2, 'm'), at(3, 'n'), at(4, 'newest')];
+  const { container: fore } = render(
     <TelegramTable
       {...baseProps}
-      telegrams={rows}
+      telegrams={forwardRows}
       sortConfig={asc}
       readDirection="forward"
       liveFollow={false}
       listFollow={false}
+      isPaused
+      pausedCount={backlog.length}
+      pausedTelegrams={backlog}
     />,
   );
-  const port = portOf(container);
-  // Three filtered rows sit fully on the anchor side of a one-row viewport.
-  port.scrollTop = DISPLAY_ROW_PX * 3;
-  fireEvent.scroll(port);
-  const older = filtered - 1;
-  expect(screen.getByRole('button', { name: `${older} older telegrams` })).toBeInTheDocument();
-  expect(older + 1).toBe(statusPillCount(filtered, filtered, false));
+  const port = portOf(fore);
+  // Anchor row is in the viewport: nothing is scrolled out, and forward
+  // ignores the pause backlog, so the pill is gone.
+  expect(screen.queryByRole('button', { name: /older telegram/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /newer telegram/ })).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole('button', { name: `${older} older telegrams` }));
+  // Two rows sit fully above the one-row viewport. The two below it do not count.
+  port.scrollTop = DISPLAY_RUBBER_PX + DISPLAY_ROW_PX * 2;
+  fireEvent.scroll(port);
+  expect(screen.getByRole('button', { name: '2 older telegrams' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '4 older telegrams' })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: '2 older telegrams' }));
   expect(port.scrollTop).toBe(DISPLAY_RUBBER_PX);
+  fireEvent.scroll(port);
+  expect(screen.queryByRole('button', { name: /older telegram/ })).not.toBeInTheDocument();
 });
 
 test('a non-temporal sort keeps the top row and uses half-row spacers with the pill on top', async () => {
@@ -381,4 +412,118 @@ test('a non-temporal sort keeps the top row and uses half-row spacers with the p
   } finally {
     restore();
   }
+});
+
+test('pill, spacer and end marker follow direction together with the time sort', () => {
+  const cases = [
+    { direction: 'forward' as const, sort: desc, anchor: 'bottom' as const, word: 'older' },
+    { direction: 'forward' as const, sort: asc, anchor: 'top' as const, word: 'older' },
+    { direction: 'backward' as const, sort: desc, anchor: 'top' as const, word: 'newer' },
+    { direction: 'backward' as const, sort: asc, anchor: 'bottom' as const, word: 'newer' },
+  ];
+  scrollBlockSize = DISPLAY_ROW_PX * 2;
+  const backlog = [at(9, 'pause-a'), at(8, 'pause-b')];
+  for (const c of cases) {
+    const rows = c.sort === asc
+      ? [at(1, 'a'), at(2, 'b'), at(3, 'c'), at(4, 'd'), at(5, 'e'), at(6, 'f')]
+      : [at(6, 'f'), at(5, 'e'), at(4, 'd'), at(3, 'c'), at(2, 'b'), at(1, 'a')];
+    const { container, unmount } = render(
+      <TelegramTable
+        {...baseProps}
+        telegrams={rows}
+        sortConfig={c.sort}
+        readDirection={c.direction}
+        readingEnd="range"
+        liveFollow={c.direction === 'backward'}
+        listFollow={false}
+        isPaused={c.direction === 'backward'}
+        pausedCount={c.direction === 'backward' ? backlog.length : 0}
+        pausedTelegrams={c.direction === 'backward' ? backlog : []}
+      />,
+    );
+    const port = portOf(container);
+    expect(port.dataset.anchorEdge).toBe(c.anchor);
+    expect(markerSide(container)).toBe(c.anchor === 'top' ? 'bottom' : 'top');
+    expect(port.dataset.anchorPx).toBe(String(DISPLAY_RUBBER_PX));
+
+    if (c.anchor === 'top') port.scrollTop = port.scrollHeight;
+    else port.scrollTop = 0;
+    fireEvent.scroll(port);
+    const pill = screen.getByRole('button', { name: new RegExp(`${c.word} telegram`) });
+    expect(pill).toHaveAttribute('data-edge', c.anchor);
+    expect(pill).toHaveAttribute('data-edge-kind', c.word);
+
+    fireEvent.click(pill);
+    const atAnchor = c.anchor === 'top' ? DISPLAY_RUBBER_PX : settledBottom(port);
+    expect(port.scrollTop).toBe(atAnchor);
+    unmount();
+  }
+});
+
+test('live follow backward stays on the newest row for both time sorts', () => {
+  const older = [at(1, 'a'), at(2, 'b'), at(3, 'c'), at(4, 'd')];
+  const newest = at(5, 'newest');
+  const arrived = at(6, 'arrived');
+
+  const descRows = [newest, ...older.slice().reverse()];
+  const { container, rerender, unmount } = render(
+    <TelegramTable
+      {...baseProps}
+      telegrams={descRows}
+      sortConfig={desc}
+      readDirection="backward"
+      liveFollow
+      listFollow
+    />,
+  );
+  const port = portOf(container);
+  const first = () => container.querySelector('.log-row')?.textContent ?? '';
+  expect(port.scrollTop).toBe(DISPLAY_RUBBER_PX);
+  expect(first()).toContain('newest');
+
+  rerender(
+    <TelegramTable
+      {...baseProps}
+      telegrams={[arrived, ...descRows]}
+      sortConfig={desc}
+      readDirection="backward"
+      liveFollow
+      listFollow
+    />,
+  );
+  expect(port.scrollTop).toBe(DISPLAY_RUBBER_PX);
+  expect(first()).toContain('arrived');
+  unmount();
+
+  const ascRows = [...older, newest];
+  const ascView = render(
+    <TelegramTable
+      {...baseProps}
+      telegrams={ascRows}
+      sortConfig={asc}
+      readDirection="backward"
+      liveFollow
+      listFollow
+    />,
+  );
+  const ascPort = portOf(ascView.container);
+  const last = () => {
+    const rows = ascView.container.querySelectorAll('.log-row');
+    return rows[rows.length - 1]?.textContent ?? '';
+  };
+  expect(ascPort.scrollTop).toBe(settledBottom(ascPort));
+  expect(last()).toContain('newest');
+
+  ascView.rerender(
+    <TelegramTable
+      {...baseProps}
+      telegrams={[...ascRows, arrived]}
+      sortConfig={asc}
+      readDirection="backward"
+      liveFollow
+      listFollow
+    />,
+  );
+  expect(ascPort.scrollTop).toBe(settledBottom(ascPort));
+  expect(last()).toContain('arrived');
 });

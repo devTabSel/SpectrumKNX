@@ -9,7 +9,6 @@ import {
   readBufferRangeMinutesPref,
   readMonitorViewPref,
   resolveMonitorStartup,
-  sortConfigForReadDirection,
   writeMonitorViewPref,
   type MonitorView,
 } from './monitorView';
@@ -40,29 +39,6 @@ describe('deriveMonitorView', () => {
       direction: 'backward',
       ts: null,
     });
-  });
-});
-
-describe('sortConfigForReadDirection', () => {
-  it('leaves a timestamp sort that already matches the direction', () => {
-    const desc = [{ key: 'timestamp' as const, direction: 'desc' as const }];
-    const withLevel = [
-      { key: 'timestamp' as const, direction: 'asc' as const },
-      { key: 'source_address' as const, direction: 'desc' as const },
-    ];
-    expect(sortConfigForReadDirection(desc, 'backward')).toBeNull();
-    expect(sortConfigForReadDirection(withLevel, 'forward')).toBeNull();
-  });
-
-  it('replaces the sort so it follows the read direction', () => {
-    expect(sortConfigForReadDirection(
-      [{ key: 'timestamp', direction: 'desc' }],
-      'forward',
-    )).toEqual([{ key: 'timestamp', direction: 'asc' }]);
-    expect(sortConfigForReadDirection(
-      [{ key: 'source_address', direction: 'asc' }],
-      'backward',
-    )).toEqual([{ key: 'timestamp', direction: 'desc' }]);
   });
 });
 

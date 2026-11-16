@@ -202,10 +202,26 @@ export function contiguousFromAnchor<T extends AnchorSideRow>(
 }
 
 /**
+ * Side where the anchor row sits in the current sort.
+ *
+ * Forward's anchor is the oldest telegram, backward's the newest. Descending
+ * time puts the newest row on top; ascending puts it on the bottom. The
+ * reading end, its spacer and its end marker sit on the other side. A
+ * non-time sort keeps the anchor on top. Direction alone does not pick the side.
+ */
+export function anchorDisplayEdge(
+  direction: 'forward' | 'backward',
+  timeSort: 'asc' | 'desc' | null,
+): 'top' | 'bottom' {
+  if (timeSort == null) return 'top';
+  if (direction === 'forward') return timeSort === 'desc' ? 'bottom' : 'top';
+  return timeSort === 'asc' ? 'bottom' : 'top';
+}
+
+/**
  * Digits the status pill shows: the filtered length while a filter is on,
- * otherwise the buffer length. The anchor-end pill counts rows of that same
- * filtered list (scrolled back to the anchor, plus the pause backlog when
- * reading backward).
+ * otherwise the buffer length. The anchor-end pill uses the same filtered
+ * rows but only those scrolled out toward the anchor, so the two counts differ.
  */
 export function statusPillCount(
   filteredCount: number,
@@ -215,7 +231,11 @@ export function statusPillCount(
   return filterActive ? filteredCount : totalCount;
 }
 
-/** Filtered rows between the viewport and the anchor, plus the backward backlog. */
+/**
+ * Anchor-end pill. Only filtered rows scrolled fully out of the viewport
+ * toward the anchor, plus the backward pause backlog. Zero hides the pill.
+ * Not the status pill's total.
+ */
 export function anchorEdgeCount(
   scrolledTowardAnchor: number,
   pausedVisible: number,
