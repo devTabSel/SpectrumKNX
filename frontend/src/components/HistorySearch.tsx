@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { TelegramTable, type SortConfig, type SortKey } from './TelegramTable';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from '../utils/sortConfig';
-import { expandWithDeltaContext, type IndividualContextWindows } from '../utils/deltaContextExpansion';
+import { expandWithDeltaContext } from '../utils/deltaContextExpansion';
 import { activeQuickFilter, type QuickPatterns } from '../utils/quickFilter';
 import { anchorKey } from '../utils/anchorKey';
 import type { Telegram } from '../hooks/useWebSocket';
@@ -62,10 +62,9 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   const [isLoaderOpen, setIsLoaderOpen] = useState(false);
   const [metadata, setMetadata] = useState<{ total_count: number; limit_reached: boolean } | null>(null);
   const [sortConfig, setSortConfig] = useState<SortConfig>(readSortConfigPref);
-  // Per-message Time-Delta-Context flags (#319) — local to this view, like marks.
-  const [flaggedKeys, setFlaggedKeys] = useState<string[]>([]);
-  const [contextForAllMatches, setContextForAllMatches] = useState(true);
-  const [individualContextWindows, setIndividualContextWindows] = useState<IndividualContextWindows>({});
+  // Per-side Time-Delta-Context flags — local to this view, like marks.
+  const [flaggedBeforeKeys, setFlaggedBeforeKeys] = useState<string[]>([]);
+  const [flaggedAfterKeys, setFlaggedAfterKeys] = useState<string[]>([]);
   const [markedKeys, setMarkedKeys] = useState<string[]>([]);
   const [mouseSelectedKeys, setMouseSelectedKeys] = useState<string[]>([]);
   const [lastSelectedKey, setLastSelectedKey] = useState<string | null>(null);
@@ -185,20 +184,22 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
       (noFilter || matchesTelegram(t, effectiveFilters)) && (!quick || quick(t))
     );
     const { before, after } = effectiveDeltaContext(activeFilters);
-    const flags = activeFilters.deltaContextEnabled ? new Set(flaggedKeys) : EMPTY_FLAG_SET;
+    const sideFlags = {
+      before: activeFilters.deltaContextEnabled ? new Set(flaggedBeforeKeys) : EMPTY_FLAG_SET,
+      after: activeFilters.deltaContextEnabled ? new Set(flaggedAfterKeys) : EMPTY_FLAG_SET,
+    };
     const pinned = new Set(markedKeys);
     for (const key of mouseSelectedKeys) pinned.add(key);
     if (lastSelectedKey) pinned.add(lastSelectedKey);
     return expandWithDeltaContext(
-      sortedTelegrams, matches, anchorKey, flags, before, after, contextForAllMatches, {
+      sortedTelegrams, matches, anchorKey, sideFlags, before, after, {
         contextEnabled: activeFilters.deltaContextEnabled,
-        individualWindows: individualContextWindows,
         pinnedKeys: pinned,
       },
     );
   }, [
-    sortedTelegrams, activeFilters, effectiveFilters, filtering, flaggedKeys, contextForAllMatches,
-    individualContextWindows, markedKeys, mouseSelectedKeys, lastSelectedKey,
+    sortedTelegrams, activeFilters, effectiveFilters, filtering, flaggedBeforeKeys, flaggedAfterKeys,
+    markedKeys, mouseSelectedKeys, lastSelectedKey,
     quickFilterOpen, quickFilterEnabled, quickPatterns,
   ]);
   const filteredSortedTelegrams = deltaExpandedHistory.items;
@@ -406,12 +407,10 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               onQuickPatternsChange={setQuickPatterns}
               onDeltaContextChange={handleDeltaContextChange}
               onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
-              flaggedKeys={flaggedKeys}
-              onFlaggedKeysChange={setFlaggedKeys}
-              contextForAllMatches={contextForAllMatches}
-              onContextForAllMatchesChange={setContextForAllMatches}
-              individualContextWindows={individualContextWindows}
-              onIndividualContextWindowsChange={setIndividualContextWindows}
+              flaggedBeforeKeys={flaggedBeforeKeys}
+              onFlaggedBeforeKeysChange={setFlaggedBeforeKeys}
+              flaggedAfterKeys={flaggedAfterKeys}
+              onFlaggedAfterKeysChange={setFlaggedAfterKeys}
               markedKeys={markedKeys}
               onMarkedKeysChange={setMarkedKeys}
               mouseSelectedKeys={mouseSelectedKeys}

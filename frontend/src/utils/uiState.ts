@@ -1,4 +1,3 @@
-import type { IndividualContextWindows } from './deltaContextExpansion';
 import type { QuickFilterColumnEnabled, QuickPatterns } from './quickFilter';
 import { DEFAULT_QUICK_FILTER_COLUMN_ENABLED } from './quickFilter';
 import { splitLegacyMarkReasons } from './markReasons';
@@ -37,12 +36,10 @@ export interface UiSessionState {
   hiddenKeys: string[];
   /** Live telegram list mark colours (palette indices). */
   markColorIndices: MarkColorIndexMap;
-  /** Per-message Time-Delta-Context flag buttons (#319). */
-  flaggedKeys: string[];
-  /** Every filter match anchors a context window when true. */
-  contextForAllMatches: boolean;
-  /** Per-row before/after in ms. Absent key → the quick-filter window. */
-  individualContextWindows: IndividualContextWindows;
+  /** Rows with the − (before) Time-Delta-Context flag on. */
+  flaggedBeforeKeys: string[];
+  /** Rows with the + (after) Time-Delta-Context flag on. */
+  flaggedAfterKeys: string[];
 }
 
 export const DEFAULT_UI_STATE: UiSessionState = {
@@ -66,9 +63,8 @@ export const DEFAULT_UI_STATE: UiSessionState = {
   mouseSelectedKeys: [],
   hiddenKeys: [],
   markColorIndices: {},
-  flaggedKeys: [],
-  contextForAllMatches: true,
-  individualContextWindows: {},
+  flaggedBeforeKeys: [],
+  flaggedAfterKeys: [],
 };
 
 export const UI_STORAGE_KEY = 'spectrum-knx-ui';
@@ -77,6 +73,11 @@ interface StoredUiState extends UiSessionState {
   v: number;
   /** Sessions from before row flags stored a reason map. */
   markReasons?: unknown;
+  /**
+   * Pre-step-0b single anchor list. Copied onto both sides when the
+   * per-side lists are absent. Individual windows and all-mode are dropped.
+   */
+  flaggedKeys?: unknown;
 }
 
 function sanitizeMarkColorIndices(raw: unknown): MarkColorIndexMap {
@@ -85,39 +86,6 @@ function sanitizeMarkColorIndices(raw: unknown): MarkColorIndexMap {
   for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof key !== 'string' || key.length === 0) continue;
     if (isValidMarkColorIndex(val)) out[key] = val;
-  }
-  return out;
-}
-
-function sanitizeSeconds(raw: unknown): number | null {
-  return typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : null;
-}
-
-function sanitizeIndividualContextWindows(raw: unknown): IndividualContextWindows {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
-  const out: IndividualContextWindows = {};
-  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
-    if (key.length === 0 || !val || typeof val !== 'object' || Array.isArray(val)) continue;
-    const raw = val as {
-      beforeMs?: unknown; afterMs?: unknown; beforeSec?: unknown; afterSec?: unknown;
-      enabled?: unknown; off?: unknown;
-    };
-    // Prefer ms; legacy sessions stored seconds.
-    let beforeMs = sanitizeSeconds(raw.beforeMs);
-    let afterMs = sanitizeSeconds(raw.afterMs);
-    if (beforeMs == null || afterMs == null) {
-      const beforeSec = sanitizeSeconds(raw.beforeSec);
-      const afterSec = sanitizeSeconds(raw.afterSec);
-      if (beforeSec == null || afterSec == null) continue;
-      beforeMs = beforeSec * 1000;
-      afterMs = afterSec * 1000;
-    }
-    if (raw.off === true) {
-      out[key] = { beforeMs, afterMs, enabled: false, off: true };
-      continue;
-    }
-    const on = (beforeMs > 0 || afterMs > 0) && raw.enabled !== false;
-    out[key] = { beforeMs, afterMs, enabled: on };
   }
   return out;
 }
@@ -202,8 +170,19 @@ function sanitize(p: Partial<StoredUiState>): UiSessionState {
     mouseSelectedKeys: sanitizeFlaggedKeys([...legacy.mouseSelectedKeys, ...sanitizeFlaggedKeys(p.mouseSelectedKeys)]),
     hiddenKeys: sanitizeFlaggedKeys([...legacy.hiddenKeys, ...sanitizeFlaggedKeys(p.hiddenKeys)]),
     markColorIndices: sanitizeMarkColorIndices(p.markColorIndices),
-    flaggedKeys: sanitizeFlaggedKeys(p.flaggedKeys),
-    contextForAllMatches: typeof p.contextForAllMatches === 'boolean' ? p.contextForAllMatches : true,
-    individualContextWindows: sanitizeIndividualContextWindows(p.individualContextWindows),
+    ...readContextSideKeys(p),
   };
+}
+
+/** New per-side lists win. An older single flag list applies to both sides. */
+function readContextSideKeys(p: Partial<StoredUiState>): Pick<UiSessionState, 'flaggedBeforeKeys' | 'flaggedAfterKeys'> {
+  const hasNew = Array.isArray(p.flaggedBeforeKeys) || Array.isArray(p.flaggedAfterKeys);
+  if (hasNew) {
+    return {
+      flaggedBeforeKeys: sanitizeFlaggedKeys(p.flaggedBeforeKeys),
+      flaggedAfterKeys: sanitizeFlaggedKeys(p.flaggedAfterKeys),
+    };
+  }
+  const legacy = sanitizeFlaggedKeys(p.flaggedKeys);
+  return { flaggedBeforeKeys: legacy, flaggedAfterKeys: legacy };
 }

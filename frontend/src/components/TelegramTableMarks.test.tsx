@@ -858,10 +858,10 @@ test('context rail shows ∧ and ∨ only for selected parent telegrams', () => 
     [olderKey, [anchorKey2]],
   ]);
   const props = {
-    flaggedKeys: [anchorKey2],
+    flaggedBeforeKeys: [anchorKey2],
+    flaggedAfterKeys: [anchorKey2],
     contextKeys: new Set([newerKey, olderKey]),
     contextParents: parents,
-    contextForAllMatches: false,
     activeFilters: {
       ...DEFAULT_FILTERS,
       deltaBeforeMs: 5000,

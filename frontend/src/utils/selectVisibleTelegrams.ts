@@ -1,6 +1,6 @@
 import type { Telegram } from '../hooks/useWebSocket';
 import { anchorKey } from './anchorKey';
-import { expandWithDeltaContext, type IndividualContextWindows } from './deltaContextExpansion';
+import { expandWithDeltaContext } from './deltaContextExpansion';
 import { forceIncludeKeys } from './forceIncludeKeys';
 import { addKeys } from './markReasons';
 import { activeQuickFilter, type QuickFilterColumnEnabled, type QuickPatterns } from './quickFilter';
@@ -21,10 +21,10 @@ export interface SelectVisibleOpts {
   quickFilterEnabled: boolean;
   quickPatterns: QuickPatterns;
   quickColumnEnabled?: QuickFilterColumnEnabled;
-  flaggedKeys: readonly string[];
-  contextForAllMatches: boolean;
-  /** Per-row before/after in ms. Applied only while Time-Delta-Context is on. */
-  individualContextWindows?: IndividualContextWindows;
+  /** Keys with the − (before) context flag on. */
+  flaggedBeforeKeys: readonly string[];
+  /** Keys with the + (after) context flag on. */
+  flaggedAfterKeys: readonly string[];
   /** Marked rows, the mouse selection, and the last selected row stay in the list. */
   markedKeys: readonly string[];
   mouseSelectedKeys: readonly string[];
@@ -44,18 +44,17 @@ function noMainFilter(opts: SelectVisibleOpts): boolean {
 /**
  * How a live prepend can update the visible list.
  * `identity` — every row stays, return the sorted array itself.
- * `incremental` — window is off and nothing pulls older rows back in, so only
- * the new and dropped rows need the predicate.
- * `full` — a delta window or force-include can change rows that were already published.
+ * `incremental` — nothing pulls older rows back in, so only the new and
+ * dropped rows need the predicate.
+ * `full` — a flagged side with a window, or a force-include, can change rows
+ * that were already published.
  */
 export function visibleSelectionMode(opts: SelectVisibleOpts): 'identity' | 'incremental' | 'full' {
   const { before, after } = effectiveDeltaContext(opts.filters);
   const marks = opts.markedKeys.length > 0 || opts.mouseSelectedKeys.length > 0 || opts.lastSelectedKey != null;
-  const flags = opts.filters.deltaContextEnabled && opts.flaggedKeys.length > 0;
-  const individual = opts.filters.deltaContextEnabled
-    && !!opts.individualContextWindows
-    && Object.keys(opts.individualContextWindows).length > 0;
-  if (before > 0 || after > 0 || marks || flags || individual) return 'full';
+  const beforeOn = before > 0 && opts.flaggedBeforeKeys.length > 0;
+  const afterOn = after > 0 && opts.flaggedAfterKeys.length > 0;
+  if (marks || beforeOn || afterOn) return 'full';
   const quick = activeQuickFilter(opts.quickFilterOpen, opts.quickFilterEnabled, opts.quickPatterns, opts.quickColumnEnabled);
   if (noMainFilter(opts) && !quick) return 'identity';
   return 'incremental';
@@ -92,16 +91,18 @@ export function selectVisibleTelegrams(
   );
 
   const { before, after } = effectiveDeltaContext(f);
-  const flags = f.deltaContextEnabled ? new Set(opts.flaggedKeys) : EMPTY_KEY_SET;
+  const sideFlags = {
+    before: f.deltaContextEnabled ? new Set(opts.flaggedBeforeKeys) : EMPTY_KEY_SET,
+    after: f.deltaContextEnabled ? new Set(opts.flaggedAfterKeys) : EMPTY_KEY_SET,
+  };
   const pinned = new Set(addKeys(
     addKeys(opts.markedKeys, opts.mouseSelectedKeys),
     opts.lastSelectedKey ? [opts.lastSelectedKey] : [],
   ));
 
   const expanded = expandWithDeltaContext(
-    sorted as Telegram[], matches, anchorKey, flags, before, after, opts.contextForAllMatches, {
+    sorted as Telegram[], matches, anchorKey, sideFlags, before, after, {
       contextEnabled: f.deltaContextEnabled,
-      individualWindows: opts.individualContextWindows,
       pinnedKeys: pinned,
     },
   );

@@ -34,9 +34,8 @@ test('round-trip save/load works correctly', () => {
     mouseSelectedKeys: ['k-1'],
     hiddenKeys: ['k-hide'],
     markColorIndices: { 'k-1': 2 },
-    flaggedKeys: ['flag-a'],
-    contextForAllMatches: false,
-    individualContextWindows: { 'flag-a': { beforeMs: 1000, afterMs: 2000, enabled: true } },
+    flaggedBeforeKeys: ['flag-a'],
+    flaggedAfterKeys: ['flag-b'],
   };
 
   saveUiState(state);
@@ -60,8 +59,6 @@ test('sanitize keeps marked and mouse flags and drops goto/auto/context', () => 
         ok: { beforeMs: 1500, afterMs: 0 },
         legacy: { beforeSec: 1, afterSec: 2 },
         explicitOff: { beforeMs: 0, afterMs: 0, enabled: false, off: true },
-        bad: { beforeMs: -1, afterMs: 2 },
-        nope: { beforeMs: '1', afterMs: 2 },
       },
     }),
   );
@@ -70,13 +67,25 @@ test('sanitize keeps marked and mouse flags and drops goto/auto/context', () => 
   expect(loaded?.mouseSelectedKeys).toEqual(['b']);
   expect(loaded?.hiddenKeys).toEqual(['a']);
   expect(loaded?.markColorIndices).toEqual({ a: 1 });
-  expect(loaded?.flaggedKeys).toEqual(['x']);
-  expect(loaded?.contextForAllMatches).toBe(false);
-  expect(loaded?.individualContextWindows).toEqual({
-    ok: { beforeMs: 1500, afterMs: 0, enabled: true },
-    legacy: { beforeMs: 1000, afterMs: 2000, enabled: true },
-    explicitOff: { beforeMs: 0, afterMs: 0, enabled: false, off: true },
-  });
+  expect(loaded?.flaggedBeforeKeys).toEqual(['x']);
+  expect(loaded?.flaggedAfterKeys).toEqual(['x']);
+  expect(loaded).not.toHaveProperty('contextForAllMatches');
+  expect(loaded).not.toHaveProperty('individualContextWindows');
+});
+
+test('per-side context flags replace a legacy single flag list', () => {
+  localStorage.setItem(
+    UI_STORAGE_KEY,
+    JSON.stringify({
+      v: 1,
+      flaggedBeforeKeys: ['before-only', 'before-only', ''],
+      flaggedAfterKeys: ['after-only'],
+      flaggedKeys: ['legacy'],
+    }),
+  );
+  const loaded = loadUiState();
+  expect(loaded?.flaggedBeforeKeys).toEqual(['before-only']);
+  expect(loaded?.flaggedAfterKeys).toEqual(['after-only']);
 });
 
 test('returns null when storage is empty', () => {

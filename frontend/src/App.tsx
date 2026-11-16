@@ -762,19 +762,15 @@ function App() {
   const listGotoSeq = useRef(0);
   const [listGoto, setListGoto] = useState<ListGotoRequest | null>(null);
 
-  // ── Per-message Time-Delta-Context flags (#319) ─────────────────────────────
-  // Same lifting rationale as marks. A flagged button anchors a window; the
-  // row itself stays visible only when it matches, is pinned, or is context.
-  const [flaggedTelegramKeys, setFlaggedTelegramKeys] = useState<string[]>(
-    () => initialUiState.flaggedKeys,
+  // ── Per-message Time-Delta-Context flags ────────────────────────────────────
+  // Same lifting rationale as marks. A side flag anchors that side's
+  // quick-filter window. The row stays visible only when it matches, is
+  // pinned, or is context of a visible flagged row.
+  const [flaggedBeforeKeys, setFlaggedBeforeKeys] = useState<string[]>(
+    () => initialUiState.flaggedBeforeKeys,
   );
-  const [individualContextWindows, setIndividualContextWindows] = useState(
-    () => initialUiState.individualContextWindows,
-  );
-  // Global "all" state: every filter match anchors a window. Off, only the
-  // flagged telegrams do.
-  const [contextForAllMatches, setContextForAllMatches] = useState(
-    () => initialUiState.contextForAllMatches,
+  const [flaggedAfterKeys, setFlaggedAfterKeys] = useState<string[]>(
+    () => initialUiState.flaggedAfterKeys,
   );
 
   // ── Persist UI Session State (#341) ──────────────────────────────────────────
@@ -801,9 +797,8 @@ function App() {
         mouseSelectedKeys: telegramMouseSelectedKeys,
         hiddenKeys: telegramHiddenKeys,
         markColorIndices: telegramMarkColorIndices,
-        flaggedKeys: flaggedTelegramKeys,
-        contextForAllMatches,
-        individualContextWindows,
+        flaggedBeforeKeys,
+        flaggedAfterKeys,
       });
     }, 500);
     return () => clearTimeout(handle);
@@ -826,9 +821,8 @@ function App() {
     telegramMouseSelectedKeys,
     telegramHiddenKeys,
     telegramMarkColorIndices,
-    flaggedTelegramKeys,
-    contextForAllMatches,
-    individualContextWindows,
+    flaggedBeforeKeys,
+    flaggedAfterKeys,
   ]);
 
   // ── Sorting (#311: multi-level, ctrl/cmd-click adds a level) ─────────────────
@@ -870,8 +864,8 @@ function App() {
   }, []);
 
   // Click a time/dot on a visualization chart: close the panel, land on the
-  // telegram nearest that timestamp with live-follow paused, and auto-flag it
-  // as a Time-Delta-Context anchor so its context window opens around it (#308).
+  // telegram nearest that timestamp with live-follow paused, and turn on both
+  // context sides so the quick-filter window opens around it (#308).
   const handleChartTimeClick = useCallback((ms: number) => {
     if (liveTelegrams.length === 0) return;
     let nearest = liveTelegrams[0];
@@ -881,7 +875,9 @@ function App() {
       if (diff < bestDiff) { bestDiff = diff; nearest = t; }
     }
     const key = anchorKey(nearest);
-    setFlaggedTelegramKeys(prev => prev.includes(key) ? prev : [...prev, key]);
+    const add = (prev: string[]) => prev.includes(key) ? prev : [...prev, key];
+    setFlaggedBeforeKeys(add);
+    setFlaggedAfterKeys(add);
     handleListFollowChange(false);
     setListAnchorKey(key);
     setActivePanel('list');
@@ -1071,15 +1067,14 @@ function App() {
     quickFilterEnabled,
     quickPatterns,
     quickColumnEnabled,
-    flaggedKeys: flaggedTelegramKeys,
-    contextForAllMatches,
-    individualContextWindows,
+    flaggedBeforeKeys,
+    flaggedAfterKeys,
     markedKeys: telegramMarkedKeys,
     mouseSelectedKeys: telegramMouseSelectedKeys,
     lastSelectedKey: lastSelectedTelegramKey,
   }), [
     appliedFilters, filtersEnabled, quickFilterOpen, quickFilterEnabled, quickPatterns, quickColumnEnabled,
-    flaggedTelegramKeys, contextForAllMatches, individualContextWindows, telegramMarkedKeys, telegramMouseSelectedKeys,
+    flaggedBeforeKeys, flaggedAfterKeys, telegramMarkedKeys, telegramMouseSelectedKeys,
     lastSelectedTelegramKey,
   ]);
 
@@ -1840,12 +1835,10 @@ function App() {
                     onMarkColorIndicesChange={setTelegramMarkColorIndices}
                     lastSelectedKey={lastSelectedTelegramKey}
                     onLastSelectedKeyChange={setLastSelectedTelegramKey}
-                    flaggedKeys={flaggedTelegramKeys}
-                    onFlaggedKeysChange={setFlaggedTelegramKeys}
-                    contextForAllMatches={contextForAllMatches}
-                    onContextForAllMatchesChange={setContextForAllMatches}
-                    individualContextWindows={individualContextWindows}
-                    onIndividualContextWindowsChange={setIndividualContextWindows}
+                    flaggedBeforeKeys={flaggedBeforeKeys}
+                    onFlaggedBeforeKeysChange={setFlaggedBeforeKeys}
+                    flaggedAfterKeys={flaggedAfterKeys}
+                    onFlaggedAfterKeysChange={setFlaggedAfterKeys}
                     contextKeys={contextTelegramKeys}
                     contextParents={contextTelegramParents}
                     infoBarOpen={infoBarOpen}

@@ -10,8 +10,8 @@ const baseOpts = {
   quickFilterOpen: false,
   quickFilterEnabled: false,
   quickPatterns: {},
-  flaggedKeys: [] as string[],
-  contextForAllMatches: false,
+  flaggedBeforeKeys: [] as string[],
+  flaggedAfterKeys: [] as string[],
   markedKeys: [],
   mouseSelectedKeys: [],
   lastSelectedKey: null,
@@ -44,5 +44,35 @@ describe('selectVisibleTelegrams', () => {
       mouseSelectedKeys: [],
     });
     expect(items.map(t => t.raw_hex)).toEqual(['0xkeep', '0xdrop']);
+  });
+
+  it('pulls context only around a flagged side', () => {
+    const anchor = makeTelegram({
+      timestamp: '2024-01-01T10:00:00.000Z',
+      source_address: '1.1.1',
+      raw_hex: '0xa',
+    });
+    const near = makeTelegram({
+      timestamp: '2024-01-01T10:00:00.400Z',
+      source_address: '9.9.9',
+      raw_hex: '0xb',
+    });
+    const filters = {
+      ...DEFAULT_FILTERS,
+      sources: ['1.1.1'],
+      deltaBeforeMs: 0,
+      deltaAfterMs: 1000,
+      deltaContextEnabled: true,
+    };
+    const hidden = selectVisibleTelegrams([anchor, near], { ...baseOpts, filters });
+    expect(hidden.items.map(t => t.raw_hex)).toEqual(['0xa']);
+
+    const shown = selectVisibleTelegrams([anchor, near], {
+      ...baseOpts,
+      filters,
+      flaggedAfterKeys: [anchorKey(anchor)],
+    });
+    expect(shown.items.map(t => t.raw_hex)).toEqual(['0xa', '0xb']);
+    expect(shown.contextKeys).toEqual(new Set([anchorKey(near)]));
   });
 });

@@ -1,19 +1,15 @@
 import React, { useMemo, useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
-import { createPortal } from 'react-dom';
 import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
-import { ChevronUp, ChevronDown, ChevronLeft, Filter, LineChart, X, Clock, Plus, Minus, PlusCircle, Download, List, Search, ToggleLeft, ToggleRight } from 'lucide-react';
+import { ChevronUp, ChevronDown, Filter, LineChart, X, Clock, Plus, Minus, Download, List, Search } from 'lucide-react';
 import { effectiveDeltaContext, enabledFilters, matchesTelegram, type ActiveFilters } from '../types/filters';
 import {
   contextRailSigns,
-  contextSidesTristate,
   expandWithDeltaContext,
-  individualWindowOn,
-  toggleIndividualContextWindows,
-  type IndividualContextWindows,
+  sideFlagsTristate,
 } from '../utils/deltaContextExpansion';
-import { nextTriState, triStateAriaChecked } from '../utils/triState';
+import { nextTriState, triStateAriaChecked, type TriState } from '../utils/triState';
 import { SendToGaHost, SendToGaPopover, type ListScrollSnapshot } from './SendToGaPopover';
 import { EventTypeLabel } from './EventTypeLabel';
 import { type LinkedRowStatus } from './WriteToBusPanel';
@@ -23,7 +19,6 @@ import { GotoTimeControl } from './GotoTimeControl';
 import { BusValueText } from './BusValueText';
 import { SecondsField } from './SecondsField';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
-import { sanitizeSecondsInput } from '../utils/sendCorrespondence';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
 import {
@@ -195,17 +190,12 @@ interface TelegramTableProps {
   infoBarOpen?: boolean;
   onInfoBarOpenChange?: (open: boolean) => void;
 
-  // Lifted per-message Time-Delta-Context flags (#319): keys of telegrams
-  // individually flagged to always anchor a context window around themselves.
-  flaggedKeys?: string[];
-  onFlaggedKeysChange?: (keys: string[]) => void;
-  /** Global "all" state of the Time-Delta-Context (#319): every visible row
-   * anchors a window, including context rows, except rows marked explicit-off. */
-  contextForAllMatches?: boolean;
-  onContextForAllMatchesChange?: (all: boolean) => void;
-  /** Per-row before/after in ms. Missing key uses the quick-filter window. */
-  individualContextWindows?: IndividualContextWindows;
-  onIndividualContextWindowsChange?: (windows: IndividualContextWindows) => void;
+  // Lifted per-side Time-Delta-Context flags. A row anchors the quick-filter
+  // window on a side only while that side's flag is on.
+  flaggedBeforeKeys?: string[];
+  onFlaggedBeforeKeysChange?: (keys: string[]) => void;
+  flaggedAfterKeys?: string[];
+  onFlaggedAfterKeysChange?: (keys: string[]) => void;
 
   /** Per-row context flag: the row is in the soft Time-Delta-Context window
    * and did not itself match the filters. Not a mark reason. Flagging a row
@@ -362,327 +352,85 @@ const EDGE_SCROLL_EPS = 20;
 const qfInputClass = (value: string) =>
   `quick-filter-bar-input${value === '' ? ' idle' : ''}`;
 
-function contextMs(raw: string): number {
-  const t = raw.trim();
-  if (t === '') return 0;
-  const n = Number(t);
-  return Number.isFinite(n) && n >= 0 ? n : NaN;
-}
-
-type ContextTriggerRect = {
-  top: number;
-  left: number;
-  right: number;
-  bottom: number;
-  width: number;
-  height: number;
-};
-
-/** Same placement rules as the send popover: prefer right-below the trigger. */
-function placeContextPopup(
-  trigger: ContextTriggerRect,
-  card: HTMLElement | null,
-): { left: number; top: number } {
-  const pad = 8;
-  const gap = 6;
-  const table = document.querySelector('[data-telegram-table]');
-  const bounds = table?.getBoundingClientRect() ?? {
-    top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight,
-    width: window.innerWidth, height: window.innerHeight,
-  };
-  const width = Math.min(card?.offsetWidth || 160, Math.max(140, bounds.width - pad * 2));
-  const height = Math.min(card?.offsetHeight || 160, Math.max(120, bounds.height - pad * 2));
-  const minLeft = bounds.left + pad;
-  const maxLeft = Math.max(minLeft, bounds.right - width - pad);
-  const minTop = bounds.top + pad;
-  const maxTop = Math.max(minTop, bounds.bottom - height - pad);
-
-  const belowRightLeft = trigger.right + gap;
-  const belowRightTop = trigger.bottom + gap;
-  const fitsBelowRight =
-    belowRightLeft >= minLeft
-    && belowRightTop >= minTop
-    && belowRightLeft + width <= bounds.right - pad
-    && belowRightTop + height <= bounds.bottom - pad;
-
-  let left: number;
-  let top: number;
-  if (fitsBelowRight) {
-    left = belowRightLeft;
-    top = belowRightTop;
-  } else {
-    const rightOf = trigger.right + gap;
-    const leftOf = trigger.left - width - gap;
-    if (rightOf + width <= bounds.right - pad) left = rightOf;
-    else if (leftOf >= bounds.left + pad) left = leftOf;
-    else left = Math.min(Math.max(minLeft, rightOf), maxLeft);
-    top = trigger.top;
-    if (top + height > bounds.bottom - pad) top = Math.max(minTop, bounds.bottom - pad - height);
-    else if (top < minTop) top = minTop;
-    top = Math.min(maxTop, Math.max(minTop, top));
+/** Turn `keys` on or off inside a side's flag list. Other keys stay as they are. */
+function withSide(current: readonly string[], keys: readonly string[], on: boolean): string[] {
+  const drop = new Set(keys);
+  const next = current.filter(k => !drop.has(k));
+  if (!on) return next;
+  const have = new Set(next);
+  for (const k of keys) {
+    if (have.has(k)) continue;
+    have.add(k);
+    next.push(k);
   }
-  left = Math.min(maxLeft, Math.max(minLeft, left));
-  top = Math.min(maxTop, Math.max(minTop, top));
-  return { left, top };
+  return next;
 }
 
-function clampContextPopupPos(
-  left: number,
-  top: number,
-  card: HTMLElement | null,
-): { left: number; top: number } {
-  const pad = 8;
-  const table = document.querySelector('[data-telegram-table]');
-  const bounds = table?.getBoundingClientRect() ?? {
-    top: 0, left: 0, right: window.innerWidth, bottom: window.innerHeight,
-    width: window.innerWidth, height: window.innerHeight,
-  };
-  const width = Math.min(card?.offsetWidth || 160, Math.max(140, bounds.width - pad * 2));
-  const height = Math.min(card?.offsetHeight || 160, Math.max(120, bounds.height - pad * 2));
-  const minLeft = bounds.left + pad;
-  const maxLeft = Math.max(minLeft, bounds.right - width - pad);
-  const minTop = bounds.top + pad;
-  const maxTop = Math.max(minTop, bounds.bottom - height - pad);
-  return {
-    left: Math.min(maxLeft, Math.max(minLeft, left)),
-    top: Math.min(maxTop, Math.max(minTop, top)),
-  };
+function headerSideTitle(side: 'before' | 'after', state: TriState): string {
+  const name = side === 'before' ? 'before (−)' : 'after (+)';
+  if (state === 'all') {
+    return `Time-Delta-Context ${name}: on for every visible row. Click turns it off. Ctrl/Cmd-click turns it off.`;
+  }
+  if (state === 'some') {
+    return `Time-Delta-Context ${name}: mixed — some visible rows are on. Click turns them off. Ctrl/Cmd-click turns every visible row on.`;
+  }
+  return `Time-Delta-Context ${name}: off. Click turns every visible row on. Ctrl/Cmd-click turns every visible row on.`;
 }
 
-function ContextWindowPopup({
-  popup,
-  onChange,
-  onCommit,
-  captureListScroll,
-  restoreListScroll,
+function headerSideLabel(side: 'before' | 'after', state: TriState): string {
+  const word = state === 'all' ? 'all' : state === 'some' ? 'some' : 'none';
+  return `Time-Delta-Context ${side}: ${word}`;
+}
+
+/** One header tristate for a single context side (− before, or + after). */
+function ContextSideHeaderToggle({
+  side,
+  state,
+  onClick,
 }: {
-  popup: {
-    trigger: ContextTriggerRect;
-    before: string;
-    after: string;
-    on: boolean;
-    /** True when any selected row already has before/after set. */
-    selectionHasTimes: boolean;
-  };
-  onChange: (before: string, after: string, on: boolean) => void;
-  /** Enter applies the draft and closes. Esc / outside click discards. */
-  onCommit: () => void;
-  captureListScroll?: () => ListScrollSnapshot | null;
-  restoreListScroll?: (snap: ListScrollSnapshot) => void | Promise<void>;
+  side: 'before' | 'after';
+  state: TriState;
+  onClick: (e: React.MouseEvent) => void;
 }) {
-  const beforeMs = contextMs(popup.before);
-  const afterMs = contextMs(popup.after);
-  const draftHasTimes = Number.isFinite(beforeMs) && Number.isFinite(afterMs)
-    && (beforeMs > 0 || afterMs > 0);
-  // On/off when the draft has times, or any row in the selection already has them.
-  const canOn = draftHasTimes || popup.selectionHasTimes;
-  const onEnter = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    onCommit();
-  };
-
-  const cardRef = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
-  const anchoredPosRef = useRef<{ left: number; top: number } | null>(null);
-  const [posAway, setPosAway] = useState(false);
-  const [listSnapshot, setListSnapshot] = useState<ListScrollSnapshot | null>(null);
-  const [listScrollAway, setListScrollAway] = useState(false);
-  const listSnapshotRef = useRef<ListScrollSnapshot | null>(null);
-  // eslint-disable-next-line react-hooks/refs -- scroll listener reads the snapshot from this render
-  listSnapshotRef.current = listSnapshot;
-  const dragRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    origLeft: number;
-    origTop: number;
-  } | null>(null);
-
-  const placeFull = useCallback(() => {
-    const next = placeContextPopup(popup.trigger, cardRef.current);
-    anchoredPosRef.current = next;
-    setPosAway(false);
-    setPos(next);
-  }, [popup.trigger]);
-
-  useLayoutEffect(() => {
-    const snap = captureListScroll?.() ?? (() => {
-      const scrollEl = document.querySelector('[data-telegram-scroll]') as HTMLElement | null;
-      if (!scrollEl) return null;
-      return { scrollTop: scrollEl.scrollTop, key: null, offset: 0 };
-    })();
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- capture list scroll once when the popup opens
-    setListSnapshot(snap);
-    setListScrollAway(false);
-    placeFull();
-    // Re-measure after first paint so card size is known (same as send popover).
-    requestAnimationFrame(() => placeFull());
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- open placement only
-  }, []);
-
-  useEffect(() => {
-    if (!pos || !anchoredPosRef.current) return;
-    const a = anchoredPosRef.current;
-    setPosAway(a.left !== pos.left || a.top !== pos.top);
-  }, [pos]);
-
-  useEffect(() => {
-    const onScroll = (e: Event) => {
-      if (!(e.target instanceof HTMLElement) || !e.target.hasAttribute('data-telegram-scroll')) return;
-      const snap = listSnapshotRef.current;
-      setListScrollAway(snap != null && e.target.scrollTop !== snap.scrollTop);
-    };
-    const onResize = () => placeFull();
-    document.addEventListener('scroll', onScroll, true);
-    window.addEventListener('resize', onResize);
-    return () => {
-      document.removeEventListener('scroll', onScroll, true);
-      window.removeEventListener('resize', onResize);
-    };
-  }, [placeFull]);
-
-  const restoreOpen = () => {
-    const snap = listSnapshot;
-    setListScrollAway(false);
-    const done = snap == null
-      ? undefined
-      : restoreListScroll
-        ? restoreListScroll(snap)
-        : (() => {
-            const scrollEl = document.querySelector('[data-telegram-scroll]') as HTMLElement | null;
-            if (scrollEl) scrollEl.scrollTop = snap.scrollTop;
-          })();
-    void Promise.resolve(done).then(() => { placeFull(); });
-  };
-
-  const onDragPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0 || !pos) return;
-    const t = e.target as HTMLElement;
-    if (t.closest('button, input, select, textarea')) return;
-    e.currentTarget.setPointerCapture?.(e.pointerId);
-    dragRef.current = {
-      pointerId: e.pointerId,
-      startX: e.clientX,
-      startY: e.clientY,
-      origLeft: pos.left,
-      origTop: pos.top,
-    };
-  };
-  const onDragPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    const d = dragRef.current;
-    if (!d || d.pointerId !== e.pointerId) return;
-    const next = clampContextPopupPos(
-      d.origLeft + (e.clientX - d.startX),
-      d.origTop + (e.clientY - d.startY),
-      cardRef.current,
-    );
-    setPos(next);
-  };
-  const onDragPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (dragRef.current?.pointerId !== e.pointerId) return;
-    dragRef.current = null;
-    try { e.currentTarget.releasePointerCapture?.(e.pointerId); } catch { /* already released */ }
-  };
-
-  if (!pos) return null;
-
+  const on = state !== 'none';
+  const Icon = side === 'after' ? Plus : Minus;
   return (
-    <div
-      ref={cardRef}
-      data-testid="context-window-popup"
-      style={{
-        position: 'fixed',
-        left: pos.left,
-        top: pos.top,
-        zIndex: 1000,
-        width: 'max-content',
-        minWidth: 140,
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'stretch',
-        gap: '0.55rem',
-        padding: '0.7rem 0.8rem',
-        background: 'var(--bg-panel)',
-        backdropFilter: 'var(--glass-blur)',
-        border: '1px solid var(--border-color)',
-        borderRadius: 10,
-        boxShadow: 'var(--shadow-lg)',
-        boxSizing: 'border-box',
+    <span
+      role="checkbox"
+      aria-checked={triStateAriaChecked(state)}
+      aria-label={headerSideLabel(side, state)}
+      data-context-header-side={side}
+      title={headerSideTitle(side, state)}
+      onClick={e => {
+        e.stopPropagation();
+        onClick(e);
       }}
-      onMouseDown={e => e.stopPropagation()}
+      style={{
+        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+        width: 16, height: 16, flexShrink: 0, boxSizing: 'border-box',
+        borderRadius: '50%',
+        borderStyle: 'solid',
+        borderWidth: 1.5,
+        borderColor: on ? 'var(--accent-primary)' : 'var(--text-dim)',
+        userSelect: 'none', cursor: 'pointer',
+        color: on ? 'var(--accent-primary)' : 'var(--text-dim)',
+      }}
     >
-      <div
-        data-context-window-drag-handle=""
-        onPointerDown={onDragPointerDown}
-        onPointerMove={onDragPointerMove}
-        onPointerUp={onDragPointerUp}
-        onPointerCancel={onDragPointerUp}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.45rem',
-          cursor: 'grab',
-          touchAction: 'none',
-          userSelect: 'none',
-        }}
-        title="Drag to move"
-      >
-        <PlusCircle size={16} style={{ color: 'var(--accent-primary)', flexShrink: 0 }} aria-hidden />
-        <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-main)', flex: 1, minWidth: 0 }}>
-          Context window
-        </span>
-        {(listScrollAway || posAway) && (
-          <button
-            type="button"
-            className="quick-filter-bar-toggle"
-            title="Restore list and popup position"
-            aria-label="Restore list and popup position"
-            onClick={restoreOpen}
-            style={{ flexShrink: 0, margin: 0, cursor: 'pointer' }}
-          >
-            <ChevronLeft size={13} />
-          </button>
-        )}
-      </div>
-      <SecondsField
-        placeholder="before"
-        unit="ms"
-        value={popup.before}
-        onChange={v => onChange(v, popup.after, popup.on)}
-        title="Context before"
-        ariaLabel="Individual context before (ms)"
-        autoFocus
-        onKeyDown={onEnter}
-      />
-      <SecondsField
-        placeholder="after"
-        unit="ms"
-        value={popup.after}
-        onChange={v => onChange(popup.before, v, popup.on)}
-        title="Context after"
-        ariaLabel="Individual context after (ms)"
-        onKeyDown={onEnter}
-      />
-      <button
-        type="button"
-        className={`quick-filter-bar-toggle${popup.on ? ' open' : ''}`}
-        aria-label={popup.on ? 'On' : 'Off'}
-        aria-pressed={popup.on}
-        disabled={!popup.on && !canOn}
-        title={canOn || popup.on
-          ? (popup.on
-            ? 'On: apply this individual window (thick circle)'
-            : 'Off: use the header context window (thin circle)')
-          : 'Before or after must be set on at least one selected row'}
-        onClick={() => onChange(popup.before, popup.after, !popup.on)}
-        style={{ alignSelf: 'flex-start' }}
-      >
-        {popup.on ? <ToggleRight size={14} /> : <ToggleLeft size={14} />}
-      </button>
-    </div>
+      {state === 'all' ? (
+        <span
+          aria-hidden
+          style={{
+            width: 6, height: 6, borderRadius: '50%',
+            background: 'var(--accent-primary)',
+          }}
+        />
+      ) : (
+        <Icon size={10} strokeWidth={1.5} aria-hidden />
+      )}
+    </span>
   );
 }
+
 /**
  * Most pause-backlog rows revealed per step. Must stay below the virtualizer's
  * overscan so the row pinned across the insert is still rendered and can be
@@ -797,9 +545,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   hiddenKeys: hiddenKeysProp, onHiddenKeysChange,
   markColorIndices: markColorIndicesProp, onMarkColorIndicesChange,
   infoBarOpen, onInfoBarOpenChange,
-  flaggedKeys, onFlaggedKeysChange,
-  contextForAllMatches, onContextForAllMatchesChange,
-  individualContextWindows: individualContextWindowsProp, onIndividualContextWindowsChange,
+  flaggedBeforeKeys, onFlaggedBeforeKeysChange,
+  flaggedAfterKeys, onFlaggedAfterKeysChange,
   contextKeys,
   contextParents,
   gotoRequest,
@@ -1280,28 +1027,21 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     requestDisplayPinRef.current();
   }, [setHiddenKeyList]);
 
-  // ── Per-message Time-Delta-Context flags (#319) ─────────────────────────
-  const [internalFlaggedKeys, setInternalFlaggedKeys] = useState<string[]>([]);
-  const flaggedKeysList = flaggedKeys ?? internalFlaggedKeys;
-  const setFlaggedKeysList = useCallback((val: string[]) => {
-    setInternalFlaggedKeys(val);
-    onFlaggedKeysChange?.(val);
-  }, [onFlaggedKeysChange]);
-  const flaggedSet = useMemo(() => new Set(flaggedKeysList), [flaggedKeysList]);
-  const [internalContextWindows, setInternalContextWindows] = useState<IndividualContextWindows>({});
-  const individualWindows = individualContextWindowsProp ?? internalContextWindows;
-  const setIndividualWindows = useCallback((next: IndividualContextWindows) => {
-    setInternalContextWindows(next);
-    onIndividualContextWindowsChange?.(next);
-  }, [onIndividualContextWindowsChange]);
-  const [contextWindowPopup, setContextWindowPopup] = useState<{
-    trigger: ContextTriggerRect;
-    targets: string[];
-    before: string;
-    after: string;
-    on: boolean;
-    selectionHasTimes: boolean;
-  } | null>(null);
+  // ── Per-side Time-Delta-Context flags ────────────────────────────────────
+  const [internalBeforeKeys, setInternalBeforeKeys] = useState<string[]>([]);
+  const [internalAfterKeys, setInternalAfterKeys] = useState<string[]>([]);
+  const beforeList = flaggedBeforeKeys ?? internalBeforeKeys;
+  const afterList = flaggedAfterKeys ?? internalAfterKeys;
+  const setBeforeList = useCallback((val: string[]) => {
+    setInternalBeforeKeys(val);
+    onFlaggedBeforeKeysChange?.(val);
+  }, [onFlaggedBeforeKeysChange]);
+  const setAfterList = useCallback((val: string[]) => {
+    setInternalAfterKeys(val);
+    onFlaggedAfterKeysChange?.(val);
+  }, [onFlaggedAfterKeysChange]);
+  const beforeSet = useMemo(() => new Set(beforeList), [beforeList]);
+  const afterSet = useMemo(() => new Set(afterList), [afterList]);
 
   // Colours given to target filters (#509) apply while the address is in the
   // filter, switched off or not; a colour of a removed filter is kept for when
@@ -1314,12 +1054,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
     return active;
   }, [targetColors, activeFilters.targets]);
-  const [internalContextForAll, setInternalContextForAll] = useState(true);
-  const contextForAll = contextForAllMatches ?? internalContextForAll;
-  const setContextForAll = useCallback((val: boolean) => {
-    setInternalContextForAll(val);
-    onContextForAllMatchesChange?.(val);
-  }, [onContextForAllMatchesChange]);
 
   const { before: deltaBeforeMs, after: deltaAfterMs } = effectiveDeltaContext(activeFilters);
 
@@ -1415,9 +1149,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     const pinned = new Set<string>();
     for (const key of pinnedKeySet) if (!hiddenKeySet.has(key)) pinned.add(key);
     const expanded = expandWithDeltaContext(
-      combined, matches, anchorKey, flaggedSet, deltaBeforeMs, deltaAfterMs, contextForAll, {
+      combined, matches, anchorKey,
+      { before: beforeSet, after: afterSet },
+      deltaBeforeMs, deltaAfterMs,
+      {
         contextEnabled: activeFilters.deltaContextEnabled,
-        individualWindows,
         pinnedKeys: pinned,
       },
     );
@@ -1428,8 +1164,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   }, [
     pausedTelegrams, pausedCount, listForcePool, hiddenKeySet, focusAddressSet,
     sourceFocusOnly, targetFocusOnly, noMainFilter, pillFilters, pillQuick, pinnedKeySet,
-    flaggedSet, deltaBeforeMs, deltaAfterMs, contextForAll, activeFilters.deltaContextEnabled,
-    individualWindows,
+    beforeSet, afterSet, deltaBeforeMs, deltaAfterMs, activeFilters.deltaContextEnabled,
   ]);
   const visiblePausedCountRef = useRef(0);
   visiblePausedCountRef.current = visiblePausedCount;
@@ -2807,78 +2542,34 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     setDisplayPinNonce(n => n + 1);
   }, [viewChangeToken]);
 
-  // Per-side before/after for a row that currently anchors context. Unanchored
-  // rows are both off. In global "all", every row anchors — matches and context
-  // rows — except an explicit-off entry. An individual window replaces the QF
-  // window; otherwise each side is on when that QF side has a positive span.
-  const contextSidesOf = useCallback((key: string): { before: boolean; after: boolean; beforeMs: number; afterMs: number } => {
-    const indiv = individualWindows[key];
-    if (indiv?.off || (!flaggedSet.has(key) && !contextForAll)) {
-      return { before: false, after: false, beforeMs: 0, afterMs: 0 };
-    }
-    if (individualWindowOn(indiv)) {
-      return {
-        before: indiv!.beforeMs > 0,
-        after: indiv!.afterMs > 0,
-        beforeMs: indiv!.beforeMs,
-        afterMs: indiv!.afterMs,
-      };
-    }
-    const beforeMs = activeFilters.deltaBeforeMs;
-    const afterMs = activeFilters.deltaAfterMs;
-    return { before: beforeMs > 0, after: afterMs > 0, beforeMs, afterMs };
-  }, [flaggedSet, contextForAll, individualWindows, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs]);
-
-  // Header tristate follows the visible rows. An empty list keeps the all-mode
-  // latch visible so the control can still be switched off.
-  const deltaFlagState: 'none' | 'some' | 'all' = useMemo(() => {
-    if (telegramRows.length === 0) return contextForAll ? 'all' : 'none';
-    return contextSidesTristate(telegramRows.map(t => contextSidesOf(anchorKey(t))));
-  }, [telegramRows, contextForAll, contextSidesOf]);
-  const anyIndividualActive = useMemo(
-    () => Object.values(individualWindows).some(individualWindowOn),
-    [individualWindows],
+  // Header tristate for one side, from the rows on screen right now.
+  const beforeFlagState: TriState = useMemo(
+    () => sideFlagsTristate(telegramRows.map(t => beforeSet.has(anchorKey(t)))),
+    [telegramRows, beforeSet],
+  );
+  const afterFlagState: TriState = useMemo(
+    () => sideFlagsTristate(telegramRows.map(t => afterSet.has(anchorKey(t)))),
+    [telegramRows, afterSet],
   );
 
-  const handleDeltaToggleClick = useCallback((e: React.MouseEvent) => {
-    // Alt toggles individual windows only. It does not change the tristate.
-    if (e.altKey) {
-      setIndividualWindows(toggleIndividualContextWindows(individualWindows));
-      requestDisplayPinRef.current();
-      return;
-    }
-    const next = nextTriState(deltaFlagState, { ctrl: e.ctrlKey || e.metaKey });
-    if (next === 'all') {
-      setContextForAll(true);
-      setFlaggedKeysList([]);
-      let droppedOff = false;
-      const kept: IndividualContextWindows = {};
-      for (const [k, w] of Object.entries(individualWindows)) {
-        if (w.off) { droppedOff = true; continue; }
-        kept[k] = w;
-      }
-      if (droppedOff) setIndividualWindows(kept);
-    } else {
-      setContextForAll(false);
-      setFlaggedKeysList([]);
-      let droppedOff = false;
-      const kept: IndividualContextWindows = {};
-      for (const [k, w] of Object.entries(individualWindows)) {
-        if (!w.off) { kept[k] = w; continue; }
-        droppedOff = true;
-        if (w.beforeMs > 0 || w.afterMs > 0) {
-          kept[k] = { beforeMs: w.beforeMs, afterMs: w.afterMs, enabled: w.enabled !== false };
-        }
-      }
-      if (droppedOff) setIndividualWindows(kept);
-    }
+  const handleHeaderSideClick = useCallback((side: 'before' | 'after', e: React.MouseEvent) => {
+    const state = side === 'before' ? beforeFlagState : afterFlagState;
+    const next = nextTriState(state, { ctrl: e.ctrlKey || e.metaKey });
+    const visible = telegramRows.map(t => anchorKey(t));
+    const current = side === 'before' ? beforeList : afterList;
+    const updated = withSide(current, visible, next === 'all');
+    if (side === 'before') setBeforeList(updated);
+    else setAfterList(updated);
     requestDisplayPinRef.current();
-  }, [deltaFlagState, individualWindows, setIndividualWindows, setContextForAll, setFlaggedKeysList]);
+  }, [
+    beforeFlagState, afterFlagState, telegramRows, beforeList, afterList,
+    setBeforeList, setAfterList,
+  ]);
 
-  // + toggles after, − toggles before. Ctrl/Cmd applies the clicked side's next
-  // state to both sides. All-mode stays on: a personal window does not
-  // materialize the other anchors, and both sides off is explicit-off.
-  // Pin the clicked row so the list does not scroll.
+  // + toggles after, - toggles before. Ctrl/Cmd applies the clicked side's
+  // next state to every side that has a quick-filter window. A click inside
+  // an existing selection applies to every selected row. Pin the clicked row
+  // so the list does not scroll.
   const handleContextSideClick = useCallback((
     e: React.MouseEvent,
     key: string,
@@ -2889,177 +2580,21 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
     const alsoOther = e.ctrlKey || e.metaKey;
     const selected = mouseKeyListRef.current;
-    const targets = new Set(selected.includes(key) ? selected : [key]);
-    // Same absolute next state for the clicked side on every target (from the
-    // clicked row). The other side stays per-target unless Ctrl/Cmd mirrors.
-    const nextClicked = !contextSidesOf(key)[side];
-
-    const sideIntent = (s: { before: boolean; after: boolean }) => ({
-      before: side === 'before' ? nextClicked : (alsoOther ? nextClicked : s.before),
-      after: side === 'after' ? nextClicked : (alsoOther ? nextClicked : s.after),
-    });
-
-    const qfBefore = activeFilters.deltaBeforeMs;
-    const qfAfter = activeFilters.deltaAfterMs;
-    const resolveMs = (
-      want: boolean,
-      wasOn: boolean,
-      curMs: number,
-      qfMs: number,
-      fallbackMs: number,
-    ) => {
-      if (!want) return 0;
-      if (wasOn && curMs > 0) return curMs;
-      if (qfMs > 0) return qfMs;
-      if (fallbackMs > 0) return fallbackMs;
-      return 0;
-    };
-
-    const nextWindows = { ...individualWindows };
-    let nextFlags = [...flaggedKeysList];
-    for (const k of targets) {
-      const s = contextSidesOf(k);
-      const { before: nextBefore, after: nextAfter } = sideIntent(s);
-      if (!nextBefore && !nextAfter) {
-        if (contextForAll) {
-          nextWindows[k] = { beforeMs: 0, afterMs: 0, enabled: false, off: true };
-        } else {
-          delete nextWindows[k];
-        }
-        nextFlags = nextFlags.filter(f => f !== k);
-        continue;
-      }
-      // Each target keeps its own ms when that side was already on.
-      const beforeMs = resolveMs(nextBefore, s.before, s.beforeMs, qfBefore, s.afterMs || qfAfter);
-      const afterMs = resolveMs(nextAfter, s.after, s.afterMs, qfAfter, s.beforeMs || qfBefore);
-      if (nextBefore && nextAfter && beforeMs === qfBefore && afterMs === qfAfter) {
-        delete nextWindows[k];
-      } else {
-        nextWindows[k] = { beforeMs, afterMs, enabled: true };
-      }
-      // Outside all-mode the flag is the anchor. Inside all-mode the row
-      // already anchors, so a personal window must not write new flags.
-      if (!contextForAll && !nextFlags.includes(k)) nextFlags.push(k);
+    const targets = selected.includes(key) ? selected : [key];
+    const clickedOn = side === 'before' ? beforeSet.has(key) : afterSet.has(key);
+    const nextOn = !clickedOn;
+    const beforeOpen = deltaBeforeMs > 0;
+    const afterOpen = deltaAfterMs > 0;
+    if ((side === 'before' || alsoOther) && beforeOpen) {
+      setBeforeList(withSide(beforeList, targets, nextOn));
     }
-    setIndividualWindows(nextWindows);
-    setFlaggedKeysList(nextFlags);
+    if ((side === 'after' || alsoOther) && afterOpen) {
+      setAfterList(withSide(afterList, targets, nextOn));
+    }
   }, [
-    contextSidesOf, flaggedKeysList, setFlaggedKeysList, contextForAll,
-    individualWindows, setIndividualWindows,
-    activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs,
+    beforeSet, afterSet, beforeList, afterList, setBeforeList, setAfterList,
+    deltaBeforeMs, deltaAfterMs,
   ]);
-
-  const openContextWindowPopup = useCallback((e: React.MouseEvent, key: string) => {
-    // Mousedown already updated the mouse selection (ref is sync). Always
-    // include the clicked row so a ctrl-toggle-off still keeps it in scope.
-    const targets = [...new Set([...mouseKeyListRef.current, key])];
-    const first = targets.length > 0 ? individualWindows[targets[0]] : undefined;
-    const shared = !!first && targets.every(k => {
-      const w = individualWindows[k];
-      return !!w && w.beforeMs === first.beforeMs && w.afterMs === first.afterMs && !!w.enabled === !!first.enabled;
-    });
-    const selectionHasTimes = targets.some(k => {
-      const w = individualWindows[k];
-      return !!w && (w.beforeMs > 0 || w.afterMs > 0);
-    });
-    // No individual times yet → prefill the draft from the quick-filter window.
-    const qfBefore = activeFilters.deltaBeforeMs;
-    const qfAfter = activeFilters.deltaAfterMs;
-    let before = '';
-    let after = '';
-    if (shared) {
-      if (first.beforeMs > 0) before = String(first.beforeMs);
-      if (first.afterMs > 0) after = String(first.afterMs);
-    } else if (!selectionHasTimes) {
-      if (qfBefore > 0) before = String(qfBefore);
-      if (qfAfter > 0) after = String(qfAfter);
-    }
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    setContextWindowPopup({
-      trigger: {
-        top: rect.top,
-        left: rect.left,
-        right: rect.right,
-        bottom: rect.bottom,
-        width: rect.width,
-        height: rect.height,
-      },
-      targets,
-      before,
-      after,
-      on: shared ? individualWindowOn(first) : targets.some(k => individualWindowOn(individualWindows[k])),
-      selectionHasTimes,
-    });
-  }, [individualWindows, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs]);
-
-  const commitContextWindowPopup = useCallback(() => {
-    if (!contextWindowPopup) return;
-    const before = sanitizeSecondsInput(contextWindowPopup.before);
-    const after = sanitizeSecondsInput(contextWindowPopup.after);
-    const beforeMs = before === '' ? 0 : Number(before);
-    const afterMs = after === '' ? 0 : Number(after);
-    if (!Number.isFinite(beforeMs) || beforeMs < 0 || !Number.isFinite(afterMs) || afterMs < 0) return;
-    requestDisplayPinRef.current(contextWindowPopup.targets[0]);
-    const empty = beforeMs === 0 && afterMs === 0;
-    const hasTimes = !empty && (beforeMs > 0 || afterMs > 0);
-    // On/Off steers whether the individual window is applied (thick circle) or
-    // the header/QF window is used (thin circle). Empty fields clear the override.
-    const enabled = hasTimes && contextWindowPopup.on;
-    const matchesQf = beforeMs === activeFilters.deltaBeforeMs
-      && afterMs === activeFilters.deltaAfterMs;
-    // Off + same as header → drop the override (header applies anyway).
-    // On + same as header → keep it so the thick ring still marks individual mode.
-    const clearIndividual = empty || (!enabled && matchesQf);
-    const next = { ...individualWindows };
-    for (const key of contextWindowPopup.targets) {
-      if (clearIndividual) delete next[key];
-      else next[key] = { beforeMs, afterMs, enabled };
-    }
-    setIndividualWindows(next);
-    // Outside all-mode, times keep the row anchoring (the flag is the anchor).
-    // All-mode already anchors every row, so the popup must not write flags
-    // or leave all-mode. An explicit-off entry is replaced by this window.
-    if (hasTimes && !contextForAll) {
-      setFlaggedKeysList([...new Set([...flaggedKeysList, ...contextWindowPopup.targets])]);
-    }
-    setContextWindowPopup(null);
-  }, [
-    contextWindowPopup, individualWindows, flaggedKeysList, setIndividualWindows, setFlaggedKeysList,
-    contextForAll, activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs,
-  ]);
-
-  useEffect(() => {
-    if (!contextWindowPopup) return;
-    const discard = () => setContextWindowPopup(null);
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        discard();
-        return;
-      }
-      // Enter anywhere while open applies settings to the selection.
-      if (e.key === 'Enter') {
-        if (document.querySelector('[data-portaled-menu]')) return;
-        e.preventDefault();
-        e.stopPropagation();
-        commitContextWindowPopup();
-      }
-    };
-    const onPointerDown = (e: PointerEvent) => {
-      const t = e.target as Element | null;
-      if (t?.closest?.('[data-testid="context-window-popup"]')) return;
-      // Alt-click on another flag opens a new popup; don't discard first.
-      if (t?.closest?.('button[data-context-flag]') && e.altKey) return;
-      discard();
-    };
-    document.addEventListener('keydown', onKey, true);
-    document.addEventListener('pointerdown', onPointerDown, true);
-    return () => {
-      document.removeEventListener('keydown', onKey, true);
-      document.removeEventListener('pointerdown', onPointerDown, true);
-    };
-  }, [contextWindowPopup, commitContextWindowPopup]);
 
   // Selection is applied on mousedown, after the clicked row is pinned, so the
   // new selection is visible while the button is still down. Shift/Ctrl cancel
@@ -3137,10 +2672,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const handleMarkMouseDown = (e: React.MouseEvent, key: string, index: number) => {
     if (e.button !== 0 || rowClickIgnoredTarget(e.target)) return;
     markPointerRef.current = { x: e.clientX, y: e.clientY };
-    // Alt on a context +/- button is additive so the individual-window popup
-    // can target the multi-selection (former Ctrl-click behaviour).
-    const onContextFlag = !!(e.target as Element | null)?.closest?.('[data-context-flag]');
-    const additive = e.ctrlKey || e.metaKey || (e.altKey && onContextFlag);
+    const additive = e.ctrlKey || e.metaKey;
     const range = e.shiftKey;
     beginClickPin(key);
     const gesture = { key, index, x: e.clientX, y: e.clientY, additive, range, selected: false };
@@ -3165,8 +2697,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
     const origin = markPointerRef.current;
     markPointerRef.current = null;
-    const onContextFlag = !!(e.target as Element | null)?.closest?.('[data-context-flag]');
-    const additive = e.ctrlKey || e.metaKey || (e.altKey && onContextFlag);
+    const additive = e.ctrlKey || e.metaKey;
     const range = e.shiftKey;
     // Drag without modifiers = text selection; leave the row unmarked so the
     // selection isn't destroyed by a mark-state re-render.
@@ -4252,31 +3783,19 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           else plusOnTop = false;
         }
         // Hide while QF is off, the ΔT column filter is disabled, or
-        // Time-Delta-Context is globally off. Per side: empty QF before/after
-        // → no circle and not clickable (unless that side is already on via an
-        // individual window, so it can still be turned off).
+        // Time-Delta-Context is globally off. A side with no quick-filter
+        // window has no circle and is not clickable.
         const showContextControls = quickEnabled
           && isQuickColumnEnabled('delta')
           && activeFilters.deltaContextEnabled;
         const rowKey = anchorKey(t);
-        const isContextRow = !!contextKeys?.has(rowKey);
-        const personallyFlagged = flaggedSet.has(rowKey);
-        const explicitOff = !!individualWindows[rowKey]?.off;
-        const ownWindowOn = individualWindowOn(individualWindows[rowKey]);
-        const sides = contextSidesOf(rowKey);
         const contextBtn = (side: 'before' | 'after') => {
-          const sideOn = side === 'before' ? sides.before : sides.after;
+          const sideOn = side === 'before' ? beforeSet.has(rowKey) : afterSet.has(rowKey);
           const sideLabel = side === 'before' ? 'before' : 'after';
-          // Colour = side on/off. Ring weight = individual window only (independent of colour).
           const ringColor = sideOn ? 'var(--accent-primary)' : 'var(--text-dim)';
-          const ringWidth = ownWindowOn ? 2.5 : 1;
-          const titleCore = explicitOff
-            ? `Explicitly off while all-mode is active — this message anchors no context. Click to turn ${sideLabel} on (applies to all selected rows)`
-            : isContextRow && !personallyFlagged && !sideOn
-            ? `Show ${sideLabel} context around this message — give this context row its own window (applies to all selected rows)`
-            : sideOn
-              ? `${sideLabel.charAt(0).toUpperCase()}${sideLabel.slice(1)} context is shown around this message — click to switch it off (applies to all selected rows)`
-              : `Show ${sideLabel} context around this message, regardless of the active filters (applies to all selected rows)`;
+          const titleCore = sideOn
+            ? `${sideLabel.charAt(0).toUpperCase()}${sideLabel.slice(1)} context is shown around this message — click to switch it off (applies to all selected rows).`
+            : `Show ${sideLabel} context around this message (applies to all selected rows).`;
           const Icon = side === 'after' ? Plus : Minus;
           return (
             <button
@@ -4284,12 +3803,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               data-context-flag=""
               data-context-side={side}
               data-context-side-on={sideOn ? 'true' : undefined}
-              data-context-explicit-off={explicitOff ? 'true' : undefined}
-              data-individual-window={ownWindowOn ? 'true' : undefined}
               style={{
                 background: 'transparent',
                 borderStyle: 'solid',
-                borderWidth: ringWidth,
+                borderWidth: 1.5,
                 borderColor: ringColor,
                 borderRadius: '50%',
                 width: 16,
@@ -4301,30 +3818,19 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 color: ringColor,
                 justifySelf: 'center',
               }}
-              title={
-                `${titleCore} Alt-click sets an individual before/after window.`
-                + ' Ctrl-click toggles both sides.'
-              }
-              // Pin this row. Plain/Ctrl click inside an existing selection keeps
-              // that selection so the side toggle applies to every selected row.
-              // Alt lets the row handler run (additive) before the popup opens.
+              title={`${titleCore} Ctrl-click toggles both sides.`}
+              // Pin this row. A click inside an existing selection keeps that
+              // selection so the side toggle applies to every selected row.
               onMouseDown={e => {
                 if (e.button !== 0) return;
                 contextButtonPinRef.current(rowKey);
-                if (!e.altKey && mouseKeyListRef.current.includes(rowKey)) {
+                if (mouseKeyListRef.current.includes(rowKey)) {
                   e.stopPropagation();
                 }
               }}
-              onClick={e => {
-                if (e.altKey) {
-                  e.stopPropagation();
-                  openContextWindowPopup(e, rowKey);
-                  return;
-                }
-                handleContextSideClick(e, rowKey, side);
-              }}
+              onClick={e => handleContextSideClick(e, rowKey, side)}
             >
-              <Icon size={11} strokeWidth={ownWindowOn ? 2.5 : 1.5} />
+              <Icon size={11} strokeWidth={1.5} />
             </button>
           );
         };
@@ -4346,10 +3852,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         const leading = (isPlusSlot: boolean, sign: string, hasValue: boolean) => {
           if (!showContextControls) return plainGlyph(isPlusSlot, sign, hasValue);
           const side: 'before' | 'after' = isPlusSlot ? 'after' : 'before';
-          const sideOn = side === 'before' ? sides.before : sides.after;
-          const qfMs = side === 'before' ? activeFilters.deltaBeforeMs : activeFilters.deltaAfterMs;
-          // Empty QF side → no circle / not clickable, unless this side is on.
-          if (qfMs <= 0 && !sideOn) return plainGlyph(isPlusSlot, sign, hasValue);
+          const sideOn = side === 'before' ? beforeSet.has(rowKey) : afterSet.has(rowKey);
+          const qfMs = side === 'before' ? deltaBeforeMs : deltaAfterMs;
+          if (qfMs <= 0) return plainGlyph(isPlusSlot, sign, hasValue);
           const btn = contextBtn(side);
           // Edge with no Δt glyph: hide until row hover, unless this side is on.
           if (!hasValue && !sideOn) {
@@ -5032,50 +4537,20 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               {c.id === 'delta' && quickEnabled
                 && isQuickColumnEnabled('delta')
                 && activeFilters.deltaContextEnabled
-                && (activeFilters.deltaBeforeMs > 0 || activeFilters.deltaAfterMs > 0) && (
-                <span
-                  role="checkbox"
-                  aria-checked={triStateAriaChecked(deltaFlagState)}
-                  data-individual-active={anyIndividualActive ? 'true' : undefined}
-                  onClick={e => {
-                    e.stopPropagation();
-                    handleDeltaToggleClick(e);
-                  }}
-                  title={
-                    deltaFlagState === 'all'
-                      ? 'Time-Delta-Context: around all messages — every visible row has both sides on. Click or Ctrl/Cmd-click to switch it off. Alt-click toggles individual windows (values stay; off uses the quick-filter window).'
-                      : deltaFlagState === 'some'
-                        ? 'Time-Delta-Context: mixed — not every visible message has both sides on. A row can be explicitly off while all-mode stays active. Click to switch all off. Ctrl/Cmd-click turns every visible row on. Alt-click toggles individual windows.'
-                        : 'Time-Delta-Context: around no message. Click or Ctrl/Cmd-click turns every visible row on. Alt-click toggles individual windows.'
-                  }
-                  style={{
-                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                    width: 16, height: 16, flexShrink: 0, boxSizing: 'border-box',
-                    borderRadius: '50%',
-                    borderStyle: 'solid',
-                    borderWidth: anyIndividualActive ? 2.5 : 1.5,
-                    borderColor: deltaFlagState === 'none' ? 'var(--text-dim)' : 'var(--accent-primary)',
-                    userSelect: 'none', cursor: 'pointer',
-                    // Match row +/- context circles (16×16). all: filled inner
-                    // dot; none/some: empty (grey / blue ring). A thick ring
-                    // means some row has an active individual window.
-                    color: deltaFlagState === 'none' ? 'var(--text-dim)' : 'var(--accent-primary)',
-                  }}
-                  aria-label={
-                    deltaFlagState === 'all'
-                      ? 'Time-Delta-Context: all'
-                      : deltaFlagState === 'some'
-                        ? 'Time-Delta-Context: some'
-                        : 'Time-Delta-Context: none'
-                  }
-                >
-                  {deltaFlagState === 'all' && (
-                    <span
-                      aria-hidden
-                      style={{
-                        width: 6, height: 6, borderRadius: '50%',
-                        background: 'var(--accent-primary)',
-                      }}
+                && (deltaBeforeMs > 0 || deltaAfterMs > 0) && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  {deltaBeforeMs > 0 && (
+                    <ContextSideHeaderToggle
+                      side="before"
+                      state={beforeFlagState}
+                      onClick={e => handleHeaderSideClick('before', e)}
+                    />
+                  )}
+                  {deltaAfterMs > 0 && (
+                    <ContextSideHeaderToggle
+                      side="after"
+                      state={afterFlagState}
+                      onClick={e => handleHeaderSideClick('after', e)}
                     />
                   )}
                 </span>
@@ -5783,29 +5258,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       </div>
       </div>
     </div>
-    {contextWindowPopup && createPortal(
-      <ContextWindowPopup
-        popup={contextWindowPopup}
-        captureListScroll={captureListScroll}
-        restoreListScroll={restoreListScroll}
-        onChange={(before, after, on) => {
-          // Draft only — Enter commits; Esc / outside click discards.
-          const draftCan = (contextMs(before) > 0 || contextMs(after) > 0)
-            && Number.isFinite(contextMs(before)) && Number.isFinite(contextMs(after));
-          setContextWindowPopup(pop => {
-            if (!pop) return null;
-            const wasDraftCan = contextMs(pop.before) > 0 || contextMs(pop.after) > 0;
-            const can = draftCan || pop.selectionHasTimes;
-            let nextOn = on;
-            if (!can) nextOn = false;
-            else if (draftCan && !wasDraftCan) nextOn = true;
-            return { ...pop, before, after, on: nextOn };
-          });
-        }}
-        onCommit={commitContextWindowPopup}
-      />,
-      document.body,
-    )}
     </SendToGaHost>
   );
 };

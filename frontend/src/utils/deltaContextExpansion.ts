@@ -1,93 +1,41 @@
-// Time-Delta-Context expansion (#309/#318/#319): given which telegrams
-// already match the active filters, pull in every other telegram within a
-// before/after window around each active context button. A button may use an
-// individual window; otherwise the effective quick-filter window applies.
-// Shared by the live Group Monitor and History Search views.
+// Time-Delta-Context expansion: given which telegrams already match the
+// active filters, pull in every other telegram that sits inside the
+// quick-filter before (−) or after (+) window of a row whose flag is on
+// for that side. A shown context row does not anchor further telegrams
+// unless its own flag is on. Shared by the live Group Monitor and History.
+
+import type { TriState } from './triState';
 
 interface Timestamped {
   timestamp: string;
 }
 
-/** Per-row window in milliseconds, independent of the quick-filter before/after. */
-export interface IndividualContextWindow {
-  beforeMs: number;
-  afterMs: number;
-  /**
-   * Explicit on/off. Absent counts as on. Both sides at 0 are off either way,
-   * and then the quick-filter window applies — unless `off` is set.
-   */
-  enabled?: boolean;
-  /**
-   * Explicitly not an anchor, even in global "all". The row pulls no context.
-   * Stored as `{ beforeMs: 0, afterMs: 0, enabled: false, off: true }`.
-   */
-  off?: boolean;
-}
-
-/** True when this window replaces the quick-filter window. */
-export function individualWindowOn(window: IndividualContextWindow | undefined): boolean {
-  if (!window || window.enabled === false || window.off === true) return false;
-  return window.beforeMs > 0 || window.afterMs > 0;
-}
-
-/** True when the row must not anchor, including while global "all" is on. */
-export function contextExplicitlyOff(window: IndividualContextWindow | undefined): boolean {
-  return window?.off === true;
+/** Keys whose − (before) or + (after) context flag is on. */
+export interface ContextSideFlags {
+  before: ReadonlySet<string>;
+  after: ReadonlySet<string>;
 }
 
 /**
- * Header tristate from the visible rows' sides.
- * No row with a side on → off. Every row has both sides on → all. Otherwise mixed.
- * An empty list is off (no visible side is on).
+ * Header tristate for one side, from the visible rows.
+ * No row on → off. Every row on → on. Otherwise mixed.
+ * An empty list is off (no visible row is on).
  */
-export function contextSidesTristate(
-  sides: readonly { before: boolean; after: boolean }[],
-): 'none' | 'some' | 'all' {
-  if (sides.length === 0) return 'none';
-  let anyOn = false;
-  let allBoth = true;
-  for (const side of sides) {
-    if (side.before || side.after) anyOn = true;
-    if (!side.before || !side.after) allBoth = false;
-  }
-  if (!anyOn) return 'none';
-  if (allBoth) return 'all';
+export function sideFlagsTristate(on: readonly boolean[]): TriState {
+  if (on.length === 0) return 'none';
+  let n = 0;
+  for (const value of on) if (value) n++;
+  if (n === 0) return 'none';
+  if (n === on.length) return 'all';
   return 'some';
 }
 
-/**
- * Alt on the context header. Any active individual window disables every stored
- * window that has a positive side; otherwise those windows are enabled again.
- * Millisecond values stay. Entries without a positive side (including explicit
- * off) are left as they are. Disabled windows fall back to the quick-filter window.
- */
-export function toggleIndividualContextWindows(
-  windows: IndividualContextWindows,
-): IndividualContextWindows {
-  const anyOn = Object.values(windows).some(individualWindowOn);
-  const next: IndividualContextWindows = {};
-  for (const [key, window] of Object.entries(windows)) {
-    if (window.beforeMs <= 0 && window.afterMs <= 0) {
-      next[key] = window;
-      continue;
-    }
-    const enabled = !anyOn;
-    next[key] = window.off
-      ? { beforeMs: window.beforeMs, afterMs: window.afterMs, enabled, off: true }
-      : { beforeMs: window.beforeMs, afterMs: window.afterMs, enabled };
-  }
-  return next;
-}
-
-export type IndividualContextWindows = Record<string, IndividualContextWindow>;
-
 export interface DeltaExpansionOptions {
   /**
-   * Global Time-Delta-Context switch. When false, individual windows stay
-   * stored by the caller but every context list is empty.
+   * Global Time-Delta-Context switch. When false, flags stay stored by the
+   * caller but every context list is empty.
    */
   contextEnabled?: boolean;
-  individualWindows?: IndividualContextWindows;
   /** Filter misses that stay visible (mouse selection, marks, last selected). */
   pinnedKeys?: ReadonlySet<string>;
 }
@@ -116,21 +64,7 @@ export interface ContextRailSigns {
   after: boolean;
 }
 
-const EMPTY_WINDOWS: IndividualContextWindows = {};
-
-function windowOf(
-  key: string,
-  windows: IndividualContextWindows,
-  beforeMs: number,
-  afterMs: number,
-): { beforeMs: number; afterMs: number } {
-  const individual = windows[key];
-  if (individual?.off) return { beforeMs: 0, afterMs: 0 };
-  if (individualWindowOn(individual)) {
-    return { beforeMs: individual!.beforeMs, afterMs: individual!.afterMs };
-  }
-  return { beforeMs, afterMs };
-}
+const EMPTY_SIDE_FLAGS: ContextSideFlags = { before: new Set(), after: new Set() };
 
 function lowerBoundTime(order: readonly number[], times: readonly number[], target: number): number {
   let lo = 0;
@@ -158,24 +92,21 @@ function upperBoundTime(order: readonly number[], times: readonly number[], targ
  * @param items The full buffer. Display order is preserved in the result.
  * @param matches Per-item primary-filter result, same order as `items`.
  * @param anchorKeyOf Stable per-item identity.
- * @param flaggedKeys Keys whose context button is on.
- * @param beforeMs / @param afterMs Effective quick-filter window (0 when that window is off).
- * @param anchorMatches Global "all". Every visible row except an explicit-off
- *   row anchors, and context rows keep anchoring until the chain reaches a
- *   fixed point (a gap wider than the window, or an explicit-off bridge).
+ * @param sideFlags Keys with the before and/or after flag on.
+ * @param beforeMs / @param afterMs Quick-filter window (0 when that side is off).
+ *   Only a row whose flag is on for a side with a positive window anchors that side.
+ *   Context rows are not anchors unless they carry their own flag.
  */
 export function expandWithDeltaContext<T extends Timestamped>(
   items: readonly T[],
   matches: boolean[],
   anchorKeyOf: (t: T) => string,
-  flaggedKeys: ReadonlySet<string>,
-  beforeMs: number,
-  afterMs: number,
-  anchorMatches = true,
+  sideFlags: ContextSideFlags = EMPTY_SIDE_FLAGS,
+  beforeMs = 0,
+  afterMs = 0,
   options?: DeltaExpansionOptions,
 ): DeltaExpansionResult<T> {
   const contextEnabled = options?.contextEnabled !== false;
-  const windows = options?.individualWindows ?? EMPTY_WINDOWS;
   const pinned = options?.pinnedKeys;
 
   const keys = new Array<string>(items.length);
@@ -200,26 +131,29 @@ export function expandWithDeltaContext<T extends Timestamped>(
   const indexByKey = new Map<string, number>();
   for (let i = 0; i < items.length; i++) indexByKey.set(keys[i], i);
 
-  const explicitlyOff = (i: number) => windows[keys[i]]?.off === true;
+  const wantBefore = (i: number) => beforeMs > 0 && sideFlags.before.has(keys[i]);
+  const wantAfter = (i: number) => afterMs > 0 && sideFlags.after.has(keys[i]);
 
-  // One binary search per anchor on the time-sorted index. Each anchor is
-  // published once, then a BFS walks newly visible rows to the fixed point.
-  // That is O(n log n + W) for W window hits, not a rescan of the whole buffer.
+  // One binary search per flagged side. Member lists are published even when
+  // the row is hidden; only a visible row contributes them to the display.
+  // A context row is queued only when it already has its own flag.
   const publishMembers = (i: number) => {
-    if (contextMembers.has(keys[i]) || explicitlyOff(i)) return;
-    const span = windowOf(keys[i], windows, beforeMs, afterMs);
+    if (contextMembers.has(keys[i])) return;
+    const before = wantBefore(i);
+    const after = wantAfter(i);
+    if (!before && !after) return;
     const members: string[] = [];
-    if ((span.beforeMs > 0 || span.afterMs > 0) && Number.isFinite(times[i])) {
-      const lo = times[i] - span.beforeMs;
-      const hi = times[i] + span.afterMs;
+    if (Number.isFinite(times[i])) {
+      const lo = before ? times[i] - beforeMs : times[i];
+      const hi = after ? times[i] + afterMs : times[i];
       const from = lowerBoundTime(order, times, lo);
       const to = upperBoundTime(order, times, hi);
       for (let k = from; k < to; k++) {
         const j = order[k];
         if (j === i || matches[j] || keys[j] === keys[i]) continue;
         const tj = times[j];
-        const older = span.beforeMs > 0 && tj < times[i] && tj >= times[i] - span.beforeMs;
-        const newer = span.afterMs > 0 && tj > times[i] && tj <= times[i] + span.afterMs;
+        const older = before && tj < times[i] && tj >= times[i] - beforeMs;
+        const newer = after && tj > times[i] && tj <= times[i] + afterMs;
         if (older || newer) members.push(keys[j]);
       }
     }
@@ -231,18 +165,10 @@ export function expandWithDeltaContext<T extends Timestamped>(
     }
   };
 
-  // Seeds: flagged rows, and — in "all" — every match and every pinned row.
-  // Explicit-off rows are not seeds. Context rows join once they are visible.
   for (let i = 0; i < items.length; i++) {
-    if (explicitlyOff(i)) continue;
-    const flagged = flaggedKeys.has(keys[i]);
-    const seed = anchorMatches && (matches[i] || (pinned?.has(keys[i]) ?? false));
-    if (flagged || seed) publishMembers(i);
+    if (wantBefore(i) || wantAfter(i)) publishMembers(i);
   }
 
-  // An active button keeps its member list even when the row is hidden.
-  // Only a visible row contributes that list to the display. In "all", a
-  // context row that becomes visible anchors too, until nothing new is reached.
   const queue: number[] = [];
   for (let i = 0; i < items.length; i++) {
     if (visible[i] && contextMembers.has(keys[i])) queue.push(i);
@@ -257,10 +183,9 @@ export function expandWithDeltaContext<T extends Timestamped>(
     for (const member of members) {
       const j = indexByKey.get(member);
       if (j == null) continue;
-      if (anchorMatches && !explicitlyOff(j)) publishMembers(j);
       if (!visible[j]) {
         visible[j] = 1;
-        queue.push(j);
+        if (contextMembers.has(keys[j])) queue.push(j);
       } else if (!expanded[j] && contextMembers.has(keys[j])) {
         queue.push(j);
       }

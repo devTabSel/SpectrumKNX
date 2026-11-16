@@ -40,10 +40,18 @@ describe('activeQuickFilter', () => {
     expect(activeQuickFilter(true, true, { delta: { top: '100', bottom: '' } })).toBeNull();
   });
 
-  test('quick-filter matches anchor the Time-Delta-Context window (#520)', () => {
+  test('a flagged quick-filter match anchors the Time-Delta-Context window (#520)', () => {
     const quick = activeQuickFilter(true, true, { target: { top: '', bottom: 'regex:^EG' } })!;
     const matches = TELEGRAMS.map(quick);
-    const { items, contextKeys } = expandWithDeltaContext(TELEGRAMS, matches, anchorKey, new Set(), 1000, 1000);
+    const matchKey = anchorKey(TELEGRAMS[0]);
+    const idle = expandWithDeltaContext(TELEGRAMS, matches, anchorKey, { before: new Set(), after: new Set() }, 1000, 1000);
+    expect(idle.items.map(t => t.target_name)).toEqual(['EG Licht']);
+
+    const { items, contextKeys } = expandWithDeltaContext(
+      TELEGRAMS, matches, anchorKey,
+      { before: new Set(), after: new Set([matchKey]) },
+      1000, 1000,
+    );
     expect(items.map(t => t.target_name)).toEqual(['EG Licht', 'OG Jalousie']);
     expect([...contextKeys]).toEqual([anchorKey(TELEGRAMS[1])]);
   });
