@@ -181,8 +181,26 @@ describe('status and anchor-edge counts', () => {
     expect(anchorEdgeCount(2, 3, 'backward')).not.toBe(10);
   });
 
-  it('adds the pause backlog to both status-pill figures', () => {
-    expect(bufferBacklogCounts(4, 2, 1, 1)).toEqual({ filtered: 2, total: 6 });
-    expect(bufferBacklogCounts(4, 0, 4, 0)).toEqual({ filtered: 4, total: 4 });
+  it('shows x / y only while the quick filter is effective, with the backlog in both', () => {
+    const counts = {
+      bufferCount: 20,
+      backlogCount: 5,
+      sidePanelBufferCount: 8,
+      sidePanelBacklogCount: 2,
+      quickBufferCount: 3,
+      quickBacklogCount: 1,
+    };
+    // Quick filter on: x is side panel + quick filter, y is the side-panel count.
+    expect(bufferBacklogCounts({ ...counts, sidePanelActive: true, quickFilterActive: true }))
+      .toEqual({ filtered: 4, total: 10, unfiltered: 25 });
+    // Side panel only: the pill shows y, the side-panel length, not x / y.
+    expect(bufferBacklogCounts({ ...counts, sidePanelActive: true, quickFilterActive: false }))
+      .toEqual({ filtered: 10, total: 10, unfiltered: 25 });
+    // Neither filter: y is the raw buffer plus backlog.
+    expect(bufferBacklogCounts({ ...counts, sidePanelActive: false, quickFilterActive: false }))
+      .toEqual({ filtered: 25, total: 25, unfiltered: 25 });
+    // Quick filter only: y stays the raw total.
+    expect(bufferBacklogCounts({ ...counts, sidePanelActive: false, quickFilterActive: true }))
+      .toEqual({ filtered: 4, total: 25, unfiltered: 25 });
   });
 });

@@ -232,20 +232,42 @@ export function statusPillCount(
 }
 
 /**
- * Status-pill figures. Both include the pause backlog.
- * The filtered side is the visible filtered length of that side, not a second
- * definition of "filtered".
+ * Inputs for the header status-pill digits.
+ *
+ * `total` (y) is the row count after the side-panel filter only: buffer rows
+ * the list would show with the quick filter off (matches, context, and
+ * force-visible marks) plus backlog rows that match the side panel. With the
+ * side panel off, y is the raw buffer plus the raw backlog.
+ *
+ * `filtered` (x) is the row count after the side panel and the quick filter,
+ * counted the same way, with backlog limited to direct hits. The pill shows
+ * `x / y` only while the quick filter is effective; otherwise it shows y.
+ *
+ * `unfiltered` is the raw buffer plus the raw backlog. The range tooltip and
+ * the empty-buffer clear stay on this figure.
  */
+export interface BufferBacklogCountInput {
+  bufferCount: number;
+  backlogCount: number;
+  sidePanelBufferCount: number;
+  sidePanelBacklogCount: number;
+  quickBufferCount: number;
+  quickBacklogCount: number;
+  sidePanelActive: boolean;
+  quickFilterActive: boolean;
+}
+
 export function bufferBacklogCounts(
-  bufferCount: number,
-  backlogCount: number,
-  filteredBufferCount: number,
-  filteredBacklogCount: number,
-): { filtered: number; total: number } {
-  return {
-    filtered: filteredBufferCount + filteredBacklogCount,
-    total: bufferCount + backlogCount,
-  };
+  input: BufferBacklogCountInput,
+): { filtered: number; total: number; unfiltered: number } {
+  const unfiltered = input.bufferCount + input.backlogCount;
+  const total = input.sidePanelActive
+    ? input.sidePanelBufferCount + input.sidePanelBacklogCount
+    : unfiltered;
+  const filtered = input.quickFilterActive
+    ? input.quickBufferCount + input.quickBacklogCount
+    : total;
+  return { filtered, total, unfiltered };
 }
 
 /**

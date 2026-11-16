@@ -72,8 +72,16 @@ export interface BufferStatusPillProps {
   /** Editable time window in minutes. */
   rangeMinutes: number;
   onRangeMinutesChange: (n: number) => void;
+  /** x: rows after the side panel and the quick filter. */
   filteredCount: number;
+  /** y: rows after the side panel, or the raw total when the side panel is off. */
   totalCount: number;
+  /**
+   * Raw buffer plus backlog. The range tooltip and the empty-buffer clear
+   * stay on this figure. Defaults to `totalCount`.
+   */
+  unfilteredCount?: number;
+  /** Quick filter is effective: show `x / y`. Otherwise show y. */
   filterActive: boolean;
   onClear: () => void;
   /**
@@ -154,6 +162,7 @@ export function BufferStatusPill({
   onRangeMinutesChange,
   filteredCount,
   totalCount,
+  unfilteredCount,
   filterActive,
   onClear,
   readingEnd = null,
@@ -207,12 +216,16 @@ export function BufferStatusPill({
   const countText = filterActive
     ? `${filteredCount} / ${totalCount}`
     : String(totalCount);
+  const countLabel = filterActive
+    ? `${filteredCount} quick-filtered of ${totalCount}`
+    : `${totalCount} in buffer and backlog`;
 
   const countWidthCh = useMemo(() => Math.max(1, countText.length), [countText]);
 
-  const bufferEmpty = totalCount <= 0;
+  const heldCount = unfilteredCount ?? totalCount;
+  const bufferEmpty = heldCount <= 0;
   const endMarked = readingEnd === 'range' || readingEnd === 'loadlimit' || readingEnd === 'data';
-  const rangeTitle = `${totalCount}/${loadLimit}`;
+  const rangeTitle = `${heldCount}/${loadLimit}`;
   const clearLabel = 'Clear (also wipes the local telegram cache).';
   const clearTitle = bufferEmpty
     ? 'Buffer is empty'
@@ -587,10 +600,8 @@ export function BufferStatusPill({
           whiteSpace: 'nowrap',
           flexShrink: 0,
         }}
-        title={filterActive ? 'Filtered / buffer and backlog' : 'Telegrams in buffer and backlog'}
-        aria-label={filterActive
-          ? `${filteredCount} filtered of ${totalCount} in buffer and backlog`
-          : `${totalCount} in buffer and backlog`}
+        title={countLabel}
+        aria-label={countLabel}
       >
         {countText}
       </span>

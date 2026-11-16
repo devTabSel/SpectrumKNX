@@ -35,6 +35,7 @@ import {
 } from './utils/monitorView';
 import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTelegramView';
 import { matchVisibleTelegram } from './utils/selectVisibleTelegrams';
+import { activeQuickFilter } from './utils/quickFilter';
 import { bufferBacklogCounts } from './utils/telegramDisplay';
 import { LayoutDashboard, History, Settings, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
@@ -1179,6 +1180,26 @@ function App() {
     lastSelectedTelegramKey,
   ]);
 
+  // Side-panel view of the same rows. Quick-filter fields stay off so a
+  // pattern edit does not rebuild this list; the published view still uses
+  // visibleOpts.
+  const sidePanelOpts = useMemo(() => ({
+    filters: appliedFilters,
+    filtersEnabled,
+    quickFilterOpen: false,
+    quickFilterEnabled: false,
+    quickPatterns: {},
+    flaggedBeforeKeys,
+    flaggedAfterKeys,
+    markedKeys: telegramMarkedKeys,
+    mouseSelectedKeys: telegramMouseSelectedKeys,
+    lastSelectedKey: lastSelectedTelegramKey,
+  }), [
+    appliedFilters, filtersEnabled,
+    flaggedBeforeKeys, flaggedAfterKeys, telegramMarkedKeys,
+    telegramMouseSelectedKeys, lastSelectedTelegramKey,
+  ]);
+
   // Backlog rows are mutated in place; pausedCount is the render signal.
   const filteredBacklogCount = useMemo(() => {
     if (pausedCount <= 0 || pausedTelegrams.length === 0) return 0;
@@ -1188,7 +1209,25 @@ function App() {
     return n;
   }, [pausedCount, pausedTelegrams, visibleOpts]);
 
+  // Orange quick-filter bar: the bar is open, the filter is enabled, and at
+  // least one enabled non-delta cell has a pattern. Closed, disabled, or
+  // empty does not filter the list.
+  const quickFilterActive = activeQuickFilter(
+    quickFilterOpen, quickFilterEnabled, quickPatterns, quickColumnEnabled,
+  ) != null;
+  const sidePanelActive = filtersEnabled && hasActiveFilters(appliedFilters);
+
+  const sidePanelBacklogCount = useMemo(() => {
+    if (pausedCount <= 0 || pausedTelegrams.length === 0) return 0;
+    if (!sidePanelActive) return pausedTelegrams.length;
+    const match = matchVisibleTelegram(sidePanelOpts);
+    let n = 0;
+    for (const t of pausedTelegrams) if (match(t)) n += 1;
+    return n;
+  }, [pausedCount, pausedTelegrams, sidePanelActive, sidePanelOpts]);
+
   const liveViewRef = useRef<LiveTelegramView | null>(null);
+  const sidePanelViewRef = useRef<LiveTelegramView | null>(null);
   // The previous view has to be read while rendering: an effect would apply the
   // prepend a frame late. deriveLiveTelegramView is idempotent for the same
   // source, so StrictMode's second render does not edit the list twice.
@@ -1198,12 +1237,28 @@ function App() {
   liveViewRef.current = liveView;
   const sortedLiveTelegrams = liveView.sorted;
   const filteredLiveTelegrams = liveView.items;
-  const pillCounts = bufferBacklogCounts(
-    liveTelegrams.length,
-    pausedCount > 0 ? pausedTelegrams.length : 0,
-    filteredLiveTelegrams.length,
-    filteredBacklogCount,
-  );
+  // y while the quick filter is also on: today's list with the quick filter
+  // forced off (side panel, context rows, force-visible marks). A second view
+  // so a live prepend does not rescan the buffer. It is not published.
+  const countSidePanel = sidePanelActive && quickFilterActive;
+  // eslint-disable-next-line react-hooks/refs
+  const sidePanelPrev = sidePanelViewRef.current;
+  const sidePanelView = countSidePanel
+    ? deriveLiveTelegramView(sidePanelPrev, liveTelegrams, sortConfig, sidePanelOpts)
+    : null;
+  // eslint-disable-next-line react-hooks/refs
+  sidePanelViewRef.current = sidePanelView;
+  const backlogCount = pausedCount > 0 ? pausedTelegrams.length : 0;
+  const pillCounts = bufferBacklogCounts({
+    bufferCount: liveTelegrams.length,
+    backlogCount,
+    sidePanelBufferCount: sidePanelView ? sidePanelView.items.length : filteredLiveTelegrams.length,
+    sidePanelBacklogCount,
+    quickBufferCount: filteredLiveTelegrams.length,
+    quickBacklogCount: filteredBacklogCount,
+    sidePanelActive,
+    quickFilterActive,
+  });
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = liveView.contextKeys;
   const contextTelegramParents = liveView.contextParents;
@@ -1419,7 +1474,8 @@ function App() {
                   onRangeMinutesChange={n => { void applyBufferRange(n); }}
                   filteredCount={pillCounts.filtered}
                   totalCount={pillCounts.total}
-                  filterActive={activeFilterCount > 0}
+                  unfilteredCount={pillCounts.unfiltered}
+                  filterActive={quickFilterActive}
                   readingEnd={readingEnd}
                   onClear={() => {
                     setMonitorView(v => ({

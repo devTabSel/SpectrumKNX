@@ -56,16 +56,36 @@ test('renders range like SecondsField with clickable unit; filtered count is x /
   expect(range).toHaveValue('60');
   expect(range.title).toBe('10/1000');
   expect(screen.getByRole('button', { name: 'Cycle range unit (s / m / h)' })).toHaveTextContent('m');
-  expect(screen.getByLabelText('3 filtered of 10 in buffer and backlog')).toHaveTextContent('3 / 10');
+  const count = screen.getByLabelText('3 quick-filtered of 10');
+  expect(count).toHaveTextContent('3 / 10');
+  expect(count).toHaveAttribute('title', '3 quick-filtered of 10');
   expect(screen.queryByLabelText('Load limit')).not.toBeInTheDocument();
   expect(screen.queryByText(/History: loading/)).not.toBeInTheDocument();
 });
 
-test('count shows only the total when no filter is active', () => {
+test('count shows only y when the quick filter is off', () => {
   render(<BufferStatusPill {...baseProps} filterActive={false} />);
   const count = screen.getByLabelText('10 in buffer and backlog');
   expect(count).toHaveTextContent('10');
+  expect(count).toHaveAttribute('title', '10 in buffer and backlog');
   expect(count.textContent).not.toContain('/');
+});
+
+test('range tooltip stays on the raw buffer and backlog while the count shows y', () => {
+  render(
+    <BufferStatusPill
+      {...baseProps}
+      filteredCount={2}
+      totalCount={4}
+      unfilteredCount={10}
+      filterActive={false}
+    />,
+  );
+  expect(screen.getByLabelText('Buffer range').title).toBe('10/1000');
+  const count = screen.getByLabelText('4 in buffer and backlog');
+  expect(count).toHaveTextContent('4');
+  expect(count.textContent).not.toContain('/');
+  expect(screen.getByRole('button', { name: /Clear \(also wipes/ })).toBeEnabled();
 });
 
 test('clicking range unit cycles s → m → h and keeps duration', () => {
