@@ -400,6 +400,10 @@ function App() {
     clear: clearTelegrams,
     cancelLoad,
     setEvictionMode,
+    bufferAnchor,
+    setBufferAnchor,
+    adoptAnchorDirection,
+    setBufferRangeMinutes: setCacheRangeMinutes,
     enforceTimeWindow,
   } = useTelegramCache(loadLimit, restoreOnStartup, monitorPageSize);
   const [pauseMode, setPauseMode] = useState<PauseMode>('playing');
@@ -583,10 +587,14 @@ function App() {
     setPref('restoreOnStartup', String(restoreOnStartup));
   }, [loadLimit, monitorPageSize, bufferRangeMinutes, visibleColumns, rateMode, restoreOnStartup]);
 
-  // Keep buffer eviction aligned with the fill/read axis.
+  // Eviction, the anchor direction, and the live admission window follow the
+  // read axis. A direction change without a timestamp clears the anchor so the
+  // buffer edge is used until Rewind, fast-forward or Goto sets one.
   useEffect(() => {
     setEvictionMode(readDirection === 'forward' ? 'keepOldest' : 'keepNewest');
-  }, [readDirection, setEvictionMode]);
+    adoptAnchorDirection(readDirection);
+    setCacheRangeMinutes(bufferRangeMinutes);
+  }, [readDirection, bufferRangeMinutes, setEvictionMode, adoptAnchorDirection, setCacheRangeMinutes]);
 
   // ── Persist workspace (#211) ────────────────────────────────────────────────
   // What the address bar currently says, in normalised form, and how the next
@@ -1133,19 +1141,22 @@ function App() {
     if (changed) {
       setReadDirection(dir);
       setEvictionMode(dir === 'forward' ? 'keepOldest' : 'keepNewest');
+      adoptAnchorDirection(dir);
       syncSortToReadDirection(dir);
     }
     // Rewind / FF / Goto-outside always wipe; pill direction only clears on change.
     if (changed || opts?.forceClear) await clearTelegrams();
     await after?.();
-  }, [readDirection, setEvictionMode, syncSortToReadDirection, clearTelegrams]);
+  }, [readDirection, setEvictionMode, adoptAnchorDirection, syncSortToReadDirection, clearTelegrams]);
 
   /** Apply a new minute window: trim when shrinking, fill gaps when expanding. */
   const applyBufferRange = useCallback(async (nextMinutes: number) => {
     const prev = bufferRangeMinutes;
     setBufferRangeMinutes(nextMinutes);
+    setCacheRangeMinutes(nextMinutes);
     const oldest = bufferOldestTs;
     const newest = bufferNewestTs;
+    const anchored = bufferAnchor.direction === readDirection ? bufferAnchor.ts : null;
     if (oldest == null || newest == null) {
       enforceTimeWindow(readDirection, nextMinutes);
       return;
@@ -1155,18 +1166,19 @@ function App() {
       enforceTimeWindow(readDirection, nextMinutes);
       return;
     }
-    // Expanding: fetch the missing side of the window, then trim to limit.
+    // Expanding: fetch the missing side of the anchor window, then trim.
+    // No explicit anchor uses the same buffer edge as before.
     if (readDirection === 'forward') {
-      const end = oldest + rangeMs;
+      const end = (anchored ?? oldest) + rangeMs;
       if (newest < end) await loadRange(newest, end);
     } else {
-      const start = newest - rangeMs;
+      const start = (anchored ?? newest) - rangeMs;
       if (oldest > start) await loadRange(start, oldest);
     }
     enforceTimeWindow(readDirection, nextMinutes);
   }, [
-    bufferRangeMinutes, bufferOldestTs, bufferNewestTs, readDirection,
-    enforceTimeWindow, loadRange,
+    bufferRangeMinutes, bufferOldestTs, bufferNewestTs, readDirection, bufferAnchor,
+    enforceTimeWindow, loadRange, setCacheRangeMinutes,
   ]);
 
   // Replace the app with a login screen when authentication is required. Early
@@ -1258,6 +1270,7 @@ function App() {
                   onOldestCommit={ms => {
                     void (async () => {
                       await changeReadDirection('forward');
+                      setBufferAnchor({ direction: 'forward', ts: ms });
                       await fillForwardFrom(ms);
                       enforceTimeWindow('forward', bufferRangeMinutes);
                     })();
@@ -1265,6 +1278,7 @@ function App() {
                   onNewestCommit={ms => {
                     void (async () => {
                       await changeReadDirection('backward');
+                      setBufferAnchor({ direction: 'backward', ts: ms });
                       const start = ms - bufferRangeMinutes * 60_000;
                       await loadRange(start, ms);
                       enforceTimeWindow('backward', bufferRangeMinutes);
@@ -1281,6 +1295,7 @@ function App() {
                         const ms = new Date(raw).getTime();
                         if (Number.isNaN(ms)) return;
                         await changeReadDirection('forward', async () => {
+                          setBufferAnchor({ direction: 'forward', ts: ms });
                           await fillForwardFrom(ms);
                           enforceTimeWindow('forward', bufferRangeMinutes);
                         }, { forceClear: true });
@@ -1304,6 +1319,7 @@ function App() {
                         const ms = new Date(raw).getTime();
                         if (Number.isNaN(ms)) return;
                         await changeReadDirection('backward', async () => {
+                          setBufferAnchor({ direction: 'backward', ts: ms });
                           await loadRange(ms - bufferRangeMinutes * 60_000, ms);
                           enforceTimeWindow('backward', bufferRangeMinutes);
                         }, { forceClear: true });
@@ -1846,12 +1862,14 @@ function App() {
                     }}
                     onGotoFillOlder={async ms => {
                       await changeReadDirection('forward', async () => {
+                        setBufferAnchor({ direction: 'forward', ts: ms });
                         await fillForwardFrom(ms);
                         enforceTimeWindow('forward', bufferRangeMinutes);
                       }, { forceClear: true });
                     }}
                     onGotoFillNewer={async ms => {
                       await changeReadDirection('backward', async () => {
+                        setBufferAnchor({ direction: 'backward', ts: ms });
                         await loadRange(ms - bufferRangeMinutes * 60_000, ms);
                         enforceTimeWindow('backward', bufferRangeMinutes);
                       }, { forceClear: true });

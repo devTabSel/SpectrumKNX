@@ -948,6 +948,199 @@ describe('useTelegramCache', () => {
   });
 });
 
+describe('buffer anchor', () => {
+  const sources = (rows: { source_address: string }[]) => rows.map(t => t.source_address);
+
+  const savedCoverage = () =>
+    JSON.parse(localStorage.getItem(COVERAGE_STORAGE_KEY)!) as [number, number][];
+
+  it('trims forward from an explicit anchor, not from the buffer edge', async () => {
+    const { result } = renderHook(() => useTelegramCache(100, false));
+    await settle(result);
+    act(() => {
+      result.current.addLive(tg(0, 'a'));
+      result.current.addLive(tg(60_000, 'b'));
+      result.current.addLive(tg(120_000, 'c'));
+      result.current.addLive(tg(180_000, 'd'));
+      result.current.setBufferAnchor({ direction: 'forward', ts: 60_000 });
+      result.current.enforceTimeWindow('forward', 1);
+    });
+    expect(sources(result.current.telegrams)).toEqual(['1.2.c', '1.2.b']);
+    expect(result.current.bufferAnchor).toEqual({ direction: 'forward', ts: 60_000 });
+  });
+
+  it('trims backward from an explicit anchor, not from the newest edge', async () => {
+    const { result } = renderHook(() => useTelegramCache(100, false));
+    await settle(result);
+    act(() => {
+      result.current.addLive(tg(0, 'a'));
+      result.current.addLive(tg(60_000, 'b'));
+      result.current.addLive(tg(120_000, 'c'));
+      result.current.addLive(tg(180_000, 'd'));
+      result.current.setBufferAnchor({ direction: 'backward', ts: 120_000 });
+      result.current.enforceTimeWindow('backward', 1);
+    });
+    expect(sources(result.current.telegrams)).toEqual(['1.2.c', '1.2.b']);
+    expect(result.current.bufferAnchor).toEqual({ direction: 'backward', ts: 120_000 });
+  });
+
+  it('drops the newest on forward overflow and the oldest on backward overflow', async () => {
+    const { result: forward } = renderHook(() => useTelegramCache(3, false));
+    await settle(forward);
+    act(() => {
+      forward.current.setBufferAnchor({ direction: 'forward', ts: 0 });
+      forward.current.setBufferRangeMinutes(60);
+      forward.current.addLive(tg(1000, 'a'));
+      forward.current.addLive(tg(2000, 'b'));
+    });
+    telegramResponses.push({
+      telegrams: [tg(3000, 'c'), tg(4000, 'd'), tg(5000, 'e')],
+    });
+    await act(async () => {
+      await forward.current.loadRange(3000, 5000, 'forward');
+    });
+    expect(sources(forward.current.telegrams)).toEqual(['1.2.c', '1.2.b', '1.2.a']);
+    expect(_idb.has(toEntry(tg(4000, 'd')).id)).toBe(true);
+    expect(_idb.has(toEntry(tg(5000, 'e')).id)).toBe(true);
+
+    const { result: backward } = renderHook(() => useTelegramCache(3, false));
+    await settle(backward);
+    act(() => {
+      backward.current.setBufferAnchor({ direction: 'backward', ts: 5000 });
+      backward.current.addLive(tg(4000, 'd'));
+      backward.current.addLive(tg(5000, 'e'));
+    });
+    telegramResponses.push({
+      telegrams: [tg(3000, 'c'), tg(2000, 'b'), tg(1000, 'a')],
+    });
+    await act(async () => {
+      await backward.current.loadRange(1000, 3000);
+    });
+    expect(sources(backward.current.telegrams)).toEqual(['1.2.e', '1.2.d', '1.2.c']);
+    expect(backward.current.bufferAnchor).toEqual({ direction: 'backward', ts: 5000 });
+    expect(_idb.has(toEntry(tg(1000, 'a')).id)).toBe(true);
+    expect(_idb.has(toEntry(tg(2000, 'b')).id)).toBe(true);
+  });
+
+  it('admits a forward telegram inside the window and keeps x fixed', async () => {
+    const { result, unmount } = renderHook(() => useTelegramCache(10, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferAnchor({ direction: 'forward', ts: 0 });
+      result.current.setBufferRangeMinutes(1);
+      result.current.addLive(tg(0, 'edge'));
+      result.current.addLive(tg(60_000, 'inside'));
+    });
+    expect(sources(result.current.telegrams)).toEqual(['1.2.inside', '1.2.edge']);
+    expect(result.current.bufferAnchor).toEqual({ direction: 'forward', ts: 0 });
+    unmount();
+    await waitFor(() => {
+      expect(_idb.has(toEntry(tg(0, 'edge')).id)).toBe(true);
+      expect(_idb.has(toEntry(tg(60_000, 'inside')).id)).toBe(true);
+    });
+  });
+
+  it('keeps a forward telegram outside the window out of the buffer and in IndexedDB', async () => {
+    const { result, unmount } = renderHook(() => useTelegramCache(10, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferAnchor({ direction: 'forward', ts: 0 });
+      result.current.setBufferRangeMinutes(1);
+      result.current.addLive(tg(0, 'edge'));
+    });
+    const frozen = result.current.telegrams;
+    const outside = tg(120_000, 'out');
+    act(() => {
+      result.current.addLive(outside);
+    });
+    expect(result.current.telegrams).toBe(frozen);
+    expect(result.current.bufferAnchor).toEqual({ direction: 'forward', ts: 0 });
+    unmount();
+    await waitFor(() => {
+      expect(_idb.has(toEntry(outside).id)).toBe(true);
+      expect(savedCoverage().some(([s, e]) => s <= 120_000 && 120_000 <= e)).toBe(true);
+    });
+  });
+
+  it('does not persist coverage for a forward miss when the cache write fails', async () => {
+    const { result, unmount } = renderHook(() => useTelegramCache(10, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferAnchor({ direction: 'forward', ts: 0 });
+      result.current.setBufferRangeMinutes(1);
+    });
+    storeShouldFail = true;
+    act(() => {
+      result.current.addLive(tg(120_000, 'out'));
+    });
+    unmount();
+    await act(async () => {
+      await new Promise(r => setTimeout(r, 20));
+    });
+    expect(_idb.has(toEntry(tg(120_000, 'out')).id)).toBe(false);
+    expect(localStorage.getItem(COVERAGE_STORAGE_KEY)).toBeNull();
+  });
+
+  it('leaves the forward buffer unchanged when it is already full', async () => {
+    const { result, unmount } = renderHook(() => useTelegramCache(2, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferAnchor({ direction: 'forward', ts: 0 });
+      result.current.setBufferRangeMinutes(60);
+      result.current.addLive(tg(1000, 'a'));
+      result.current.addLive(tg(2000, 'b'));
+    });
+    const frozen = result.current.telegrams;
+    const extra = tg(1500, 'mid');
+    act(() => {
+      result.current.addLive(extra);
+    });
+    expect(result.current.telegrams).toBe(frozen);
+    expect(sources(result.current.telegrams)).toEqual(['1.2.b', '1.2.a']);
+    expect(result.current.bufferAnchor).toEqual({ direction: 'forward', ts: 0 });
+    unmount();
+    await waitFor(() => {
+      expect(_idb.has(toEntry(extra).id)).toBe(true);
+    });
+  });
+
+  it('moves the backward anchor with the newest live telegram and drops the oldest', async () => {
+    const { result } = renderHook(() => useTelegramCache(2, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferAnchor({ direction: 'backward', ts: 1000 });
+      result.current.addLive(tg(1000, 'a'));
+      result.current.addLive(tg(2000, 'b'));
+    });
+    expect(result.current.bufferAnchor).toEqual({ direction: 'backward', ts: 2000 });
+    act(() => {
+      result.current.addLive(tg(1500, 'mid'));
+    });
+    expect(result.current.bufferAnchor.ts).toBe(2000);
+    expect(sources(result.current.telegrams)).toEqual(['1.2.b', '1.2.mid']);
+    act(() => {
+      result.current.addLive(tg(3000, 'c'));
+    });
+    expect(result.current.bufferAnchor).toEqual({ direction: 'backward', ts: 3000 });
+    expect(sources(result.current.telegrams)).toEqual(['1.2.c', '1.2.b']);
+  });
+
+  it('adopts a direction change by clearing the timestamp and keeping it when the direction stays', async () => {
+    const { result } = renderHook(() => useTelegramCache(10, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferAnchor({ direction: 'forward', ts: 5 });
+      result.current.adoptAnchorDirection('backward');
+    });
+    expect(result.current.bufferAnchor).toEqual({ direction: 'backward', ts: null });
+    act(() => {
+      result.current.setBufferAnchor({ direction: 'backward', ts: 9 });
+      result.current.adoptAnchorDirection('backward');
+    });
+    expect(result.current.bufferAnchor).toEqual({ direction: 'backward', ts: 9 });
+  });
+});
+
 describe('clampMonitorPageSize', () => {
   it('defaults, clamps, and rounds', () => {
     expect(clampMonitorPageSize(Number.NaN)).toBe(MONITOR_PAGE_SIZE_DEFAULT);

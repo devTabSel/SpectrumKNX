@@ -89,6 +89,10 @@ vi.mock('./hooks/useTelegramCache', async (importOriginal) => {
         },
         cancelLoad: () => {},
         setEvictionMode: () => {},
+        bufferAnchor: { direction: 'backward' as const, ts: null },
+        setBufferAnchor: () => {},
+        adoptAnchorDirection: () => {},
+        setBufferRangeMinutes: () => {},
         trimToTimeWindow: () => {},
         enforceTimeWindow: () => {},
       };

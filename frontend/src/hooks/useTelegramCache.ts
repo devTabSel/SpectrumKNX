@@ -69,6 +69,43 @@ function millisecondBoundsIso(ms: number): { startIso: string; endIso: string } 
 export type FillDirection = 'backward' | 'forward';
 
 /**
+ * Where the in-memory window is measured from. Not the table scroll anchor
+ * and not the paging edge of a history load.
+ */
+export interface BufferAnchor {
+  direction: 'forward' | 'backward';
+  /**
+   * Explicit instant. `null` means the matching buffer edge: oldest when
+   * forward, newest when backward.
+   */
+  ts: number | null;
+}
+
+function rangeMsOf(minutes: number): number {
+  const mins = Number.isFinite(minutes) ? minutes : 1;
+  return Math.max(1, mins) * 60_000;
+}
+
+/**
+ * Timestamp a trim is measured from. An explicit `ts` applies only when the
+ * anchor direction matches the trim; otherwise the buffer edge for `direction`
+ * is used.
+ */
+function anchorOrigin(
+  anchor: BufferAnchor,
+  direction: 'forward' | 'backward',
+  oldestTs: number | null,
+  newestTs: number | null,
+): number | null {
+  if (anchor.direction === direction && anchor.ts != null) return anchor.ts;
+  return direction === 'forward' ? oldestTs : newestTs;
+}
+
+function evictionFor(direction: 'forward' | 'backward'): EvictionMode {
+  return direction === 'forward' ? 'keepOldest' : 'keepNewest';
+}
+
+/**
  * Full-buffer early-break decision for gap paging (#313).
  * Overflow always evicts the oldest rows, so:
  * - backward below `oldestTs` → stop (discardable)
@@ -149,8 +186,8 @@ export interface TelegramCache {
   /**
    * Load a time range. IndexedDB and the database together contribute at most
    * `maxSize` new buffer rows (a finished millisecond may run past that).
-   * `direction` selects the anchor: backward reads from `endMs`, forward from
-   * `startMs`. Default is backward (newest-first).
+   * `direction` selects the paging edge: backward reads from `endMs`, forward
+   * from `startMs`. Default is backward (newest-first).
    */
   loadRange: (startMs: number, endMs: number, direction?: FillDirection) => Promise<void>;
   /**
@@ -179,13 +216,28 @@ export interface TelegramCache {
   /** keepOldest = forward read; keepNewest = backward read. */
   setEvictionMode: (mode: EvictionMode) => void;
   /**
+   * Trim and forward-admission anchor. `ts === null` uses the buffer edge
+   * (oldest forward, newest backward). Backward live moves `ts` to the newest
+   * telegram; an explicit forward `ts` stays put.
+   */
+  bufferAnchor: BufferAnchor;
+  /** Rewind, fast-forward and goto. Also selects the overflow end. */
+  setBufferAnchor: (anchor: BufferAnchor) => void;
+  /**
+   * Read-direction change without a timestamp. Keeps `ts` when the direction
+   * is unchanged; otherwise clears it so the buffer edge is used.
+   */
+  adoptAnchorDirection: (direction: 'forward' | 'backward') => void;
+  /** Minute window used when deciding whether a forward live telegram fits. */
+  setBufferRangeMinutes: (minutes: number) => void;
+  /**
    * Drop telegrams outside `[minTs, maxTs]` and enforce maxSize with the
    * current eviction mode. Publishes when anything changed.
    */
   trimToTimeWindow: (minTs: number, maxTs: number) => void;
   /**
-   * Trim to the directional minute window anchored at the current buffer
-   * oldest (forward) or newest (backward).
+   * Trim to `[x, x + range]` (forward) or `[y - range, y]` (backward).
+   * `x` / `y` is the buffer anchor when one is set, otherwise the buffer edge.
    */
   enforceTimeWindow: (direction: 'forward' | 'backward', rangeMinutes: number) => void;
 }
@@ -254,7 +306,7 @@ async function fetchWholeMillisecond(
  * - On mount, cached telegrams and coverage gaps up to "now" share one
  *   `maxSize` budget, newest-first (#211, #222).
  * - Live telegrams extend the open coverage interval and are flushed to
- *   IndexedDB in batches.
+ *   IndexedDB in batches, including rows the forward window does not keep.
  * - Disconnect/close windows become gaps that are re-fetched on reconnect.
  *
  * The persistent cache is advisory: every IDB/backend failure degrades to
@@ -312,6 +364,14 @@ export function useTelegramCache(
   const pausedBacklogRef = useRef<Telegram[]>([]);
   /** Mirrors `pausedCount` for synchronous reads (addLive / revealPaused). */
   const pausedCountRef = useRef(0);
+  /**
+   * Trim / admission anchor. The ref is what addLive and enforceTimeWindow
+   * read; state publishes it to the monitor.
+   */
+  const [bufferAnchor, setAnchorState] = useState<BufferAnchor>({ direction: 'backward', ts: null });
+  const anchorRef = useRef(bufferAnchor);
+  /** Last minute window announced by the monitor. Forward admission uses it. */
+  const rangeMinutesRef = useRef(60);
   const [activeLoads, setActiveLoads] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -821,27 +881,92 @@ export function useTelegramCache(
     }
   }, [maxSize, trackRemoved, publish]);
 
+  /**
+   * Remember a live telegram for IndexedDB and extend coverage. Rows that never
+   * enter the buffer still take this path so a discard cannot drop them or
+   * leave coverage claiming a range the cache does not hold. Coverage is
+   * persisted only after the store succeeds (see the flush effect).
+   */
+  const queueLivePersist = useCallback((entry: TelegramEntry) => {
+    coverageRef.current!.extendLive(entry.ts);
+    pendingRef.current.push(entry);
+    if (pendingRef.current.length >= FLUSH_BATCH_SIZE) {
+      const batch = pendingRef.current;
+      pendingRef.current = [];
+      pendingStoreCountRef.current++;
+      cacheRef.current!.store(batch).then(
+        () => { pendingStoreCountRef.current--; saveCoverage(); },
+        () => { pendingStoreCountRef.current--; },
+      );
+    }
+  }, [saveCoverage]);
+
+  /** Backward live: y follows the newest buffered telegram and never moves back. */
+  const slideBackwardAnchor = useCallback((newest: number) => {
+    const cur = anchorRef.current;
+    if (cur.direction !== 'backward') return;
+    if (cur.ts != null && newest <= cur.ts) return;
+    const next: BufferAnchor = { direction: 'backward', ts: newest };
+    anchorRef.current = next;
+    setAnchorState(next);
+  }, []);
+
+  const setBufferAnchor = useCallback((next: BufferAnchor) => {
+    const ts = next.ts == null || !Number.isFinite(next.ts) ? null : next.ts;
+    const normalized: BufferAnchor = { direction: next.direction, ts };
+    bufferRef.current!.setEvictionMode(evictionFor(normalized.direction));
+    const cur = anchorRef.current;
+    if (cur.direction === normalized.direction && cur.ts === normalized.ts) return;
+    anchorRef.current = normalized;
+    setAnchorState(normalized);
+  }, []);
+
+  const adoptAnchorDirection = useCallback((direction: 'forward' | 'backward') => {
+    bufferRef.current!.setEvictionMode(evictionFor(direction));
+    const cur = anchorRef.current;
+    if (cur.direction === direction) return;
+    const next: BufferAnchor = { direction, ts: null };
+    anchorRef.current = next;
+    setAnchorState(next);
+  }, []);
+
+  const setBufferRangeMinutes = useCallback((minutes: number) => {
+    if (!Number.isFinite(minutes)) return;
+    rangeMinutesRef.current = minutes;
+  }, []);
+
   const addLive = useCallback(
     (t: Telegram) => {
       const entry = toEntry(t);
       // A gap fetch racing the live stream may already have delivered this row.
       if (idsRef.current.has(entry.id)) return;
-      const removed = bufferRef.current!.add(entry);
+      const buf = bufferRef.current!;
+      const anchor = anchorRef.current;
+      // Forward has no live follow. The row always goes to IndexedDB. It enters
+      // the buffer only inside [x, x + range] while loadLimit still has room.
+      // Otherwise the buffer and x stay as they are.
+      if (anchor.direction === 'forward') {
+        const rangeMs = rangeMsOf(rangeMinutesRef.current);
+        const x = anchor.ts != null ? anchor.ts : buf.oldestTs;
+        const inWindow = x == null || (entry.ts >= x && entry.ts <= x + rangeMs);
+        if (!inWindow || buf.length >= buf.maxSize) {
+          queueLivePersist(entry);
+          return;
+        }
+      }
+      const removed = buf.add(entry);
       trackRemoved(removed);
-      // keepOldest at capacity drops the newest entry immediately — do not publish
-      // a telegram the buffer already discarded.
-      if (removed.some(e => e.id === entry.id)) return;
+      // Overflow dropped this row immediately. Do not publish it, but do not
+      // drop it from IndexedDB or coverage either.
+      if (removed.some(e => e.id === entry.id)) {
+        queueLivePersist(entry);
+        return;
+      }
       idsRef.current.add(entry.id);
-      coverageRef.current!.extendLive(entry.ts);
-      pendingRef.current.push(entry);
-      if (pendingRef.current.length >= FLUSH_BATCH_SIZE) {
-        const batch = pendingRef.current;
-        pendingRef.current = [];
-        pendingStoreCountRef.current++;
-        cacheRef.current!.store(batch).then(
-          () => { pendingStoreCountRef.current--; saveCoverage(); },
-          () => { pendingStoreCountRef.current--; },
-        );
+      queueLivePersist(entry);
+      if (anchorRef.current.direction === 'backward') {
+        const newest = buf.newestTs;
+        if (newest != null) slideBackwardAnchor(newest);
       }
       if (pausedRef.current) {
         if (!structuralWhilePausedRef.current) {
@@ -860,7 +985,7 @@ export function useTelegramCache(
         else publish();
       }
     },
-    [trackRemoved, publish, publishPrepend, saveCoverage, updatePausedCount],
+    [trackRemoved, publish, publishPrepend, queueLivePersist, slideBackwardAnchor, updatePausedCount],
   );
 
   const setConnected = useCallback(
@@ -980,16 +1105,13 @@ export function useTelegramCache(
   }, [trackRemoved, publish, updatePausedCount]);
 
   const enforceTimeWindow = useCallback((direction: 'forward' | 'backward', rangeMinutes: number) => {
+    rangeMinutesRef.current = rangeMinutes;
     const buf = bufferRef.current!;
-    const oldest = buf.oldestTs;
-    const newest = buf.newestTs;
-    if (oldest == null || newest == null) return;
-    const rangeMs = Math.max(1, rangeMinutes) * 60_000;
-    if (direction === 'forward') {
-      trimToTimeWindow(oldest, oldest + rangeMs);
-    } else {
-      trimToTimeWindow(newest - rangeMs, newest);
-    }
+    const origin = anchorOrigin(anchorRef.current, direction, buf.oldestTs, buf.newestTs);
+    if (origin == null) return;
+    const rangeMs = rangeMsOf(rangeMinutes);
+    if (direction === 'forward') trimToTimeWindow(origin, origin + rangeMs);
+    else trimToTimeWindow(origin - rangeMs, origin);
   }, [trimToTimeWindow]);
 
   // Appended in place. `pausedCount` is the render signal — copying this array
@@ -1036,6 +1158,10 @@ export function useTelegramCache(
     clear,
     cancelLoad,
     setEvictionMode,
+    bufferAnchor,
+    setBufferAnchor,
+    adoptAnchorDirection,
+    setBufferRangeMinutes,
     trimToTimeWindow,
     enforceTimeWindow,
   };
