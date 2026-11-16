@@ -3938,3 +3938,45 @@ test('DPT cell shows key and description; visualize sits on source/target', () =
   fireEvent.click(screen.getByTitle('visualize this GA'));
   expect(onQuickVisualize).toHaveBeenCalledWith('1/2/3');
 });
+
+test('edge pill says newer and sits at top for desc, bottom for asc', () => {
+  const frozen = makeList(6, 5);
+  const { unmount } = render(
+    <TelegramTable
+      telegrams={frozen}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      isPaused
+      isManualPause
+      {...pauseBacklogFor(frozen, 3)}
+    />,
+  );
+  const descPill = screen.getByRole('button', { name: '3 newer telegrams' });
+  expect(descPill).toHaveAttribute('data-edge', 'top');
+  expect(descPill).toHaveAttribute('data-edge-kind', 'newer');
+  unmount();
+
+  render(
+    <TelegramTable
+      telegrams={frozen.slice().reverse()}
+      visibleColumns={visibleColumns}
+      sortConfig={[{ key: 'timestamp', direction: 'asc' }]}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      listFollow={false}
+      isPaused
+      isManualPause
+      {...pauseBacklogFor(frozen, 3)}
+    />,
+  );
+  const ascPill = screen.getByRole('button', { name: '3 newer telegrams' });
+  expect(ascPill).toHaveAttribute('data-edge', 'bottom');
+  expect(ascPill).toHaveAttribute('data-edge-kind', 'newer');
+});

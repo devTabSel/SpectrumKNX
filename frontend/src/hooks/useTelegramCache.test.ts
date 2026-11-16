@@ -843,4 +843,75 @@ describe('useTelegramCache', () => {
     expect(Date.parse(params.get('start_time')!)).toBe(endMs);
     expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.n', '1.2.m']);
   });
+
+  it('cancelLoad invalidates an in-flight load so late chunks are ignored', async () => {
+    const { result } = renderHook(() => useTelegramCache(1000, false));
+    await settle(result);
+
+    let release!: () => void;
+    const blocked = new Promise<void>(r => { release = r; });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) => {
+        const u = String(url);
+        fetchCalls.push(u);
+        if (u.includes('/api/database/info')) return jsonRes({ retention_days: null });
+        if (u.includes('/api/telegrams')) {
+          await blocked;
+          return jsonRes({
+            telegrams: [tg(1000, 'a')],
+            metadata: { limit_reached: false },
+          });
+        }
+        return jsonRes({});
+      }),
+    );
+
+    let load!: Promise<void>;
+    act(() => {
+      load = result.current.loadRange(0, 5000);
+    });
+    await waitFor(() => expect(result.current.isLoading).toBe(true));
+    act(() => {
+      result.current.cancelLoad();
+    });
+    expect(result.current.isLoading).toBe(false);
+    await act(async () => {
+      release();
+      await load;
+    });
+    // Cancelled load must not have published the delayed chunk.
+    expect(result.current.telegrams).toEqual([]);
+  });
+
+  it('enforceTimeWindow trims forward to [oldest, oldest+range]', async () => {
+    const { result } = renderHook(() => useTelegramCache(100, false));
+    await settle(result);
+    act(() => {
+      result.current.setEvictionMode('keepOldest');
+      result.current.addLive(tg(0, 'a'));
+      result.current.addLive(tg(60_000, 'b'));
+      result.current.addLive(tg(120_000, 'c'));
+    });
+    act(() => {
+      result.current.enforceTimeWindow('forward', 1);
+    });
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual([
+      '1.2.b', '1.2.a',
+    ]);
+  });
+
+  it('keepOldest eviction drops newest live telegrams when over maxSize', async () => {
+    const { result } = renderHook(() => useTelegramCache(2, false));
+    await settle(result);
+    act(() => {
+      result.current.setEvictionMode('keepOldest');
+      result.current.addLive(tg(1000, 'a'));
+      result.current.addLive(tg(2000, 'b'));
+      result.current.addLive(tg(3000, 'c'));
+    });
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual([
+      '1.2.b', '1.2.a',
+    ]);
+  });
 });

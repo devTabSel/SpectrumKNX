@@ -190,6 +190,55 @@ describe('TelegramBufferService', () => {
       expect(removed).toEqual(entries.slice(0, 2));
       expect(service.snapshot).toEqual(entries.slice(2));
     });
+
+    it('keepOldest drops newest on overflow (forward)', () => {
+      service = new TelegramBufferService(3);
+      service.setEvictionMode('keepOldest');
+      const entries = makeEntries(5);
+      const removed = service.add(entries);
+
+      expect(service.length).toBe(3);
+      expect(removed).toEqual(entries.slice(3));
+      expect(service.snapshot).toEqual(entries.slice(0, 3));
+      expect(service.evictionMode).toBe('keepOldest');
+    });
+
+    it('keepNewest drops oldest on overflow (backward)', () => {
+      service = new TelegramBufferService(3);
+      service.setEvictionMode('keepNewest');
+      const entries = makeEntries(5);
+      const removed = service.add(entries);
+
+      expect(service.length).toBe(3);
+      expect(removed).toEqual(entries.slice(0, 2));
+      expect(service.snapshot).toEqual(entries.slice(2));
+    });
+  });
+
+  describe('trimToWindow', () => {
+    it('drops entries outside the window then enforces maxSize', () => {
+      service = new TelegramBufferService(10);
+      const entries = makeEntries(5);
+      service.add(entries);
+      const lo = entries[1].ts;
+      const hi = entries[3].ts;
+      const removed = service.trimToWindow(lo, hi);
+
+      expect(removed.map(e => e.id)).toEqual([entries[0].id, entries[4].id]);
+      expect(service.snapshot).toEqual(entries.slice(1, 4));
+      expect(service.oldestTs).toBe(lo);
+      expect(service.newestTs).toBe(hi);
+    });
+
+    it('forward window keeps oldest side when over limit', () => {
+      service = new TelegramBufferService(2);
+      service.setEvictionMode('keepOldest');
+      const entries = makeEntries(5);
+      service.add(entries);
+      // Window covers all remaining after prior eviction; limit 2 keeps oldest.
+      service.trimToWindow(entries[0].ts, entries[4].ts);
+      expect(service.snapshot).toEqual(entries.slice(0, 2));
+    });
   });
 
   describe('edge cases', () => {

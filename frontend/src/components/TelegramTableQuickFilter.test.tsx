@@ -228,8 +228,17 @@ test('ctrl/cmd-click on the DELTA TIME toggle disables/enables the window withou
   expect(onDeltaContextChange).toHaveBeenCalledWith(750, 250);
 });
 
-const flagButton = (row: Element) => row.querySelector('button[title*="around this message"]')!;
-const isFlagged = (row: Element) => flagButton(row).getAttribute('title')!.startsWith('Context is shown');
+const flagButton = (row: Element, side: 'before' | 'after' = 'after') =>
+  row.querySelector(`button[data-context-side="${side}"]`) as HTMLElement;
+const isSideOn = (row: Element, side: 'before' | 'after') =>
+  flagButton(row, side)?.getAttribute('data-context-side-on') === 'true';
+/** Both before and after sides on (full QF-style context). */
+const isFlagged = (row: Element) => isSideOn(row, 'before') && isSideOn(row, 'after');
+/** Ctrl/Cmd toggles both sides — former plain whole-flag click. */
+const clickBothSides = (btn: HTMLElement) => {
+  fireEvent.mouseDown(btn, { ctrlKey: true, button: 0 });
+  fireEvent.click(btn, { ctrlKey: true });
+};
 
 test('plain click on the DELTA TIME toggle switches the context between all and no messages (#319)', () => {
   const { container } = renderTable({ activeFilters: FILTERS_WITH_DELTA });
@@ -262,7 +271,7 @@ test('flagging a single row limits the context to that message (#319)', () => {
 
   const rows = [...container.querySelectorAll('.log-row')];
   const row = rows.find(r => r.textContent?.includes('Licht Flur'))!;
-  fireEvent.click(flagButton(row));
+  clickBothSides(flagButton(row));
 
   expect(screen.getByTitle(/around the flagged messages only/)).toBeInTheDocument();
   expect(rows.filter(isFlagged)).toEqual([row]);
@@ -274,7 +283,7 @@ test('switching one row off while all are on keeps the context around the others
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
   const rows = [...container.querySelectorAll('.log-row')];
 
-  fireEvent.click(flagButton(rows[0]));
+  clickBothSides(flagButton(rows[0]));
 
   expect(screen.getByTitle(/around the flagged messages only/)).toBeInTheDocument();
   expect(rows.map(isFlagged)).toEqual([false, ...rows.slice(1).map(() => true)]);
@@ -298,7 +307,7 @@ test('context-row button flags that row as its own anchor without leaving all-mo
     .find(r => r.getAttribute('data-akey') === contextKey)!;
   expect(isFlagged(contextRow)).toBe(false);
 
-  fireEvent.click(flagButton(contextRow));
+  clickBothSides(flagButton(contextRow));
   expect(onFlaggedKeysChange).toHaveBeenLastCalledWith([contextKey]);
   // Personal flag only — do not tear down global "all".
   expect(onContextForAllMatchesChange).not.toHaveBeenCalled();
@@ -320,7 +329,7 @@ test('context-row button flags that row as its own anchor without leaving all-mo
     .find(r => r.getAttribute('data-akey') === contextKey)!;
   expect(flaggedContext.classList.contains('context')).toBe(true);
   expect(isFlagged(flaggedContext)).toBe(true);
-  fireEvent.click(flagButton(flaggedContext));
+  clickBothSides(flagButton(flaggedContext));
   expect(onFlaggedKeysChange).toHaveBeenLastCalledWith([]);
   expect(onContextForAllMatchesChange).not.toHaveBeenCalled();
 });
@@ -375,7 +384,7 @@ test('toggling a row context button pins the preferred row as the scroll anchor'
   fireEvent.click(row);
   onListAnchorKeyChange.mockClear();
   onListFollowChange.mockClear();
-  fireEvent.click(flagButton(row));
+  clickBothSides(flagButton(row));
 
   await vi.waitFor(() => {
     expect(onListAnchorKeyChange).toHaveBeenCalledWith(key);
@@ -403,8 +412,7 @@ test("a selected row's context flag applies to every selected row, not rail mark
   onMouseSelectedKeysChange.mockClear();
   onFlaggedKeysChange.mockClear();
   // Real click: mousedown must not collapse the multi-selection.
-  fireEvent.mouseDown(flagButton(rows[0]), { button: 0 });
-  fireEvent.click(flagButton(rows[0]));
+  clickBothSides(flagButton(rows[0]));
 
   expect(onMouseSelectedKeysChange).not.toHaveBeenCalled();
   expect(onFlaggedKeysChange).toHaveBeenLastCalledWith(expect.arrayContaining(selected));
@@ -657,7 +665,7 @@ test('a quick filter hides a flagged non-context row and keeps selection, marks,
   expect(keys).toContain(anchorKey(match));
 });
 
-test('ctrl-click drafts an individual context window; Enter commits, Esc/outside discards', () => {
+test('alt-click drafts an individual context window; Enter commits, Esc/outside discards', () => {
   const onFlaggedKeysChange = vi.fn();
   const onIndividualContextWindowsChange = vi.fn();
   const onMouseSelectedKeysChange = vi.fn();
@@ -670,12 +678,15 @@ test('ctrl-click drafts an individual context window; Enter commits, Esc/outside
     onMouseSelectedKeysChange,
   });
   const logRows = () => [...container.querySelectorAll('.log-row')];
-  // Select row 0, then ctrl-click the context button on row 1: selection gets
-  // the ctrl-click (adds row 1) and the popup opens for the multi-selection.
+  const altOpen = (btn: HTMLElement) => {
+    fireEvent.mouseDown(btn, { altKey: true, button: 0 });
+    fireEvent.click(btn, { altKey: true });
+  };
+  // Select row 0, then alt-click the context button on row 1: selection gets
+  // the alt-click (adds row 1) and the popup opens for the multi-selection.
   fireEvent.click(logRows()[0]);
   const flag1 = flagButton(logRows()[1]);
-  fireEvent.mouseDown(flag1, { ctrlKey: true, button: 0 });
-  fireEvent.click(flag1, { ctrlKey: true });
+  altOpen(flag1);
   const selected = logRows().slice(0, 2).map(r => r.getAttribute('data-akey')!);
   expect(onMouseSelectedKeysChange).toHaveBeenCalled();
   expect(onMouseSelectedKeysChange.mock.lastCall![0]).toEqual(expect.arrayContaining(selected));
@@ -703,8 +714,7 @@ test('ctrl-click drafts an individual context window; Enter commits, Esc/outside
 
   // Re-open, typing stays in the draft — nothing persisted yet.
   // Prefill already has times, so On stays Off until toggled (no empty→valid auto-on).
-  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
-  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  altOpen(flagButton(logRows()[0]));
   fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '200' } });
   fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '300' } });
   expect(onIndividualContextWindowsChange).toHaveBeenCalledTimes(1); // only the QF-clear above
@@ -718,16 +728,14 @@ test('ctrl-click drafts an individual context window; Enter commits, Esc/outside
   expect(onIndividualContextWindowsChange).toHaveBeenCalledTimes(1);
 
   // Re-open, edit, click outside → discard.
-  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
-  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  altOpen(flagButton(logRows()[0]));
   fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '200' } });
   fireEvent.pointerDown(document.body);
   expect(screen.queryByTestId('context-window-popup')).not.toBeInTheDocument();
   expect(onIndividualContextWindowsChange).toHaveBeenCalledTimes(1);
 
   // Enter commits custom times with On, activates context buttons, and closes.
-  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
-  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  altOpen(flagButton(logRows()[0]));
   fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '150' } });
   fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '250' } });
   fireEvent.click(screen.getByRole('button', { name: 'Off' }));
@@ -746,8 +754,7 @@ test('ctrl-click drafts an individual context window; Enter commits, Esc/outside
   expect(isFlagged(logRows()[0])).toBe(true);
 
   // Re-open shows the individual times (not QF), turn off via toggle + Enter.
-  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
-  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  altOpen(flagButton(logRows()[0]));
   expect(screen.getByLabelText('Individual context before (ms)')).toHaveValue('150');
   expect(screen.getByLabelText('Individual context after (ms)')).toHaveValue('250');
   fireEvent.click(screen.getByRole('button', { name: 'On' }));
@@ -759,8 +766,7 @@ test('ctrl-click drafts an individual context window; Enter commits, Esc/outside
   expect(flagButton(logRows()[0]).hasAttribute('data-individual-window')).toBe(false);
 
   // On/off stays adjustable while the selection already has before/after values.
-  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
-  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  altOpen(flagButton(logRows()[0]));
   expect(screen.getByRole('button', { name: 'Off' })).not.toBeDisabled();
   fireEvent.click(screen.getByRole('button', { name: 'Off' }));
   fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
@@ -769,18 +775,28 @@ test('ctrl-click drafts an individual context window; Enter commits, Esc/outside
     [selected[1]]: { beforeMs: 150, afterMs: 250, enabled: true },
   });
 
-  // Commit back to QF times → individual overrides are removed.
-  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
-  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  // Commit On with QF times → keep individual so the thick ring marks On mode.
+  altOpen(flagButton(logRows()[0]));
   fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '100' } });
   fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '100' } });
   fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({
+    [selected[0]]: { beforeMs: 100, afterMs: 100, enabled: true },
+    [selected[1]]: { beforeMs: 100, afterMs: 100, enabled: true },
+  });
+  expect(flagButton(logRows()[0]).getAttribute('data-individual-window')).toBe('true');
+  expect(flagButton(logRows()[0]).style.borderWidth).toBe('2.5px');
+
+  // Off with QF times → drop override; thin ring, header window applies.
+  altOpen(flagButton(logRows()[0]));
+  fireEvent.click(screen.getByRole('button', { name: 'On' }));
+  fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
   expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({});
   expect(flagButton(logRows()[0]).hasAttribute('data-individual-window')).toBe(false);
+  expect(flagButton(logRows()[0]).style.borderWidth).toBe('1px');
 
   // Custom times again, then empty fields on commit also clear individuals.
-  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
-  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  altOpen(flagButton(logRows()[0]));
   fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '150' } });
   fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '250' } });
   fireEvent.click(screen.getByRole('button', { name: 'Off' }));
@@ -789,11 +805,119 @@ test('ctrl-click drafts an individual context window; Enter commits, Esc/outside
     [selected[0]]: { beforeMs: 150, afterMs: 250, enabled: true },
     [selected[1]]: { beforeMs: 150, afterMs: 250, enabled: true },
   });
-  fireEvent.mouseDown(flagButton(logRows()[0]), { ctrlKey: true, button: 0 });
-  fireEvent.click(flagButton(logRows()[0]), { ctrlKey: true });
+  altOpen(flagButton(logRows()[0]));
   fireEvent.change(screen.getByLabelText('Individual context before (ms)'), { target: { value: '' } });
   fireEvent.change(screen.getByLabelText('Individual context after (ms)'), { target: { value: '' } });
   fireEvent.keyDown(screen.getByLabelText('Individual context after (ms)'), { key: 'Enter' });
   expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({});
   expect(flagButton(logRows()[0]).hasAttribute('data-individual-window')).toBe(false);
+});
+
+test('plain + toggles after only; plain − toggles before only; ctrl toggles both', () => {
+  const onFlaggedKeysChange = vi.fn();
+  const onIndividualContextWindowsChange = vi.fn();
+  const onContextForAllMatchesChange = vi.fn();
+  const { container } = renderTable({
+    activeFilters: FILTERS_WITH_DELTA,
+    quickFilterOpen: true,
+    quickFilterEnabled: true,
+    onFlaggedKeysChange,
+    onIndividualContextWindowsChange,
+    onContextForAllMatchesChange,
+  });
+  fireEvent.click(screen.getByTitle(/around all messages/));
+  expect(onContextForAllMatchesChange).toHaveBeenLastCalledWith(false);
+
+  const rows = () => [...container.querySelectorAll('.log-row')];
+  const row = rows().find(r => r.textContent?.includes('Licht Flur'))!;
+  const key = row.getAttribute('data-akey')!;
+
+  // After only.
+  fireEvent.click(flagButton(row, 'after'));
+  expect(onFlaggedKeysChange).toHaveBeenLastCalledWith([key]);
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({
+    [key]: { beforeMs: 0, afterMs: 100, enabled: true },
+  });
+  expect(isSideOn(row, 'after')).toBe(true);
+  expect(isSideOn(row, 'before')).toBe(false);
+
+  // Before on as well → both match QF → individual cleared.
+  onIndividualContextWindowsChange.mockClear();
+  fireEvent.click(flagButton(row, 'before'));
+  expect(onIndividualContextWindowsChange).toHaveBeenLastCalledWith({});
+  expect(isFlagged(row)).toBe(true);
+
+  // Ctrl on + turns both off.
+  onFlaggedKeysChange.mockClear();
+  onIndividualContextWindowsChange.mockClear();
+  clickBothSides(flagButton(row, 'after'));
+  expect(onFlaggedKeysChange).toHaveBeenLastCalledWith([]);
+  expect(isSideOn(row, 'after')).toBe(false);
+  expect(isSideOn(row, 'before')).toBe(false);
+});
+
+test('context circle ring is thin without individual window, thick with — colour independent', () => {
+  const onContextForAllMatchesChange = vi.fn();
+  const { container } = renderTable({
+    activeFilters: FILTERS_WITH_DELTA,
+    quickFilterOpen: true,
+    quickFilterEnabled: true,
+    onContextForAllMatchesChange,
+  });
+  // Default "all" is on — turn it off so sides start inactive.
+  fireEvent.click(screen.getByTitle(/around all messages/));
+  expect(onContextForAllMatchesChange).toHaveBeenLastCalledWith(false);
+
+  const row = () => [...container.querySelectorAll('.log-row')]
+    .find(r => r.textContent?.includes('Licht Flur'))!;
+
+  // Context possible, side off → dim colour, thin ring (no individual window).
+  const off = flagButton(row(), 'after');
+  expect(off).toBeTruthy();
+  expect(off.hasAttribute('data-context-side-on')).toBe(false);
+  expect(off.hasAttribute('data-individual-window')).toBe(false);
+  expect(off.style.borderWidth).toBe('1px');
+
+  // Turn after on with QF times that create an individual override → thick ring.
+  fireEvent.click(off);
+  const onIndiv = flagButton(row(), 'after');
+  expect(onIndiv.getAttribute('data-context-side-on')).toBe('true');
+  expect(onIndiv.getAttribute('data-individual-window')).toBe('true');
+  expect(onIndiv.style.borderWidth).toBe('2.5px');
+
+  // Side still on after clearing individual (both sides = QF) → accent colour, thin ring.
+  fireEvent.click(flagButton(row(), 'before'));
+  const onQf = flagButton(row(), 'after');
+  expect(onQf.getAttribute('data-context-side-on')).toBe('true');
+  expect(onQf.hasAttribute('data-individual-window')).toBe(false);
+  expect(onQf.style.borderWidth).toBe('1px');
+});
+
+test('empty QF before hides − circle; empty after hides + (unless that side is on)', () => {
+  const { container, rerender } = renderTable({
+    activeFilters: { ...DEFAULT_FILTERS, deltaBeforeMs: 0, deltaAfterMs: 100 },
+    quickFilterOpen: true,
+    quickFilterEnabled: true,
+  });
+  const row = () => [...container.querySelectorAll('.log-row')]
+    .find(r => r.textContent?.includes('Licht Flur'))!;
+
+  expect(flagButton(row(), 'after')).toBeTruthy();
+  expect(flagButton(row(), 'before')).toBeNull();
+
+  rerender(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, deltaBeforeMs: 100, deltaAfterMs: 0 }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      quickFilterEnabled
+    />,
+  );
+  expect(flagButton(row(), 'before')).toBeTruthy();
+  expect(flagButton(row(), 'after')).toBeNull();
 });

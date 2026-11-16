@@ -1,4 +1,4 @@
-import { useMemo, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
+import { useMemo, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { format } from 'date-fns';
 import {
   ChevronLeft,
@@ -9,29 +9,72 @@ import {
   Trash2,
   Play,
   Pause,
-  AlertTriangle,
 } from 'lucide-react';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
+import { SecondsField } from './SecondsField';
 
 const INPUT_FMT = "yyyy-MM-dd'T'HH:mm:ss";
 /** Local datetime-with-seconds display width (YYYY-MM-DDTHH:mm:ss). */
 const DT_WIDTH_CH = INPUT_FMT.length;
 
 export type ReadDirection = 'forward' | 'backward';
+export type RangeUnit = 's' | 'm' | 'h';
+
+const RANGE_UNITS: RangeUnit[] = ['s', 'm', 'h'];
+
+/** Format canonical minutes into the active unit for the range field. */
+export function formatRangeMinutes(minutes: number, unit: RangeUnit): string {
+  if (unit === 's') return String(Math.round(minutes * 60));
+  if (unit === 'h') {
+    const h = minutes / 60;
+    return Number.isInteger(h) ? String(h) : (Math.round(h * 100) / 100).toString();
+  }
+  return String(Math.round(minutes));
+}
+
+/** Convert a typed range value in `unit` back to whole minutes (≥ 1). */
+export function rangeValueToMinutes(raw: string, unit: RangeUnit): number | null {
+  const n = Number(raw.trim());
+  if (!Number.isFinite(n) || n <= 0) return null;
+  let minutes = n;
+  if (unit === 's') minutes = n / 60;
+  else if (unit === 'h') minutes = n * 60;
+  const next = Math.max(1, Math.round(minutes));
+  return next;
+}
+
+/** Positive number (optional one decimal) for the range draft. */
+export function sanitizeRangeInput(raw: string): string {
+  const t = raw.trim().replace(',', '.');
+  if (t === '') return '';
+  if (!/^(?:[1-9]\d*(?:\.\d*)?|0?\.\d+)$/.test(t)) return '';
+  const n = Number(t);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  // Keep trailing dot while typing ("1.") — blur will normalize.
+  if (t.endsWith('.')) return t;
+  return String(n);
+}
 
 export interface BufferStatusPillProps {
   /** Oldest telegram in the raw buffer (epoch ms), or null when empty. */
   oldestMs: number | null;
   /** Newest telegram in the raw buffer (epoch ms), or null when empty. */
   newestMs: number | null;
-  /** Time-sort fill axis: forward = asc, backward = desc. */
+  /** Fill/eviction axis: forward = keep oldest, backward = keep newest. */
   readDirection: ReadDirection;
+  /** Click the direction chevron to switch (clears + reloads via parent). */
+  onReadDirectionChange: (dir: ReadDirection) => void;
+  /** Max telegram count (settings); used for tooltip and full-color. */
   loadLimit: number;
-  onLoadLimitChange: (n: number) => void;
+  /** Editable time window in minutes. */
+  rangeMinutes: number;
+  onRangeMinutesChange: (n: number) => void;
   filteredCount: number;
   totalCount: number;
   filterActive: boolean;
   onClear: (opts: { pauseAuto: boolean }) => void;
+  /** Abort in-flight history load. */
+  onCancelLoad: () => void;
   pauseTitle: string;
   pauseColor: string;
   pauseMode: 'playing' | 'auto' | 'manual';
@@ -49,7 +92,6 @@ export interface BufferStatusPillProps {
   onLoadFromDbOldest: () => void;
   /** Load the buffer covering up to the newest telegram in the DB. */
   onLoadFromDbNewest: () => void;
-  bufferLimitWarning?: ReactNode;
 }
 
 const pillStyle: CSSProperties = {
@@ -85,19 +127,23 @@ function parseCommitMs(raw: string): number | null {
 }
 
 /**
- * Live-header buffer status pill: rewind → oldest → direction → loadLimit →
- * clear → direction → newest → fast-forward → play/pause → WS LED → rate → count → export.
+ * Live-header buffer status pill: rewind → oldest → direction → range →
+ * clear/spinner → direction → newest → fast-forward → play/pause →
+ * WS LED → rate → count → export.
  */
 export function BufferStatusPill({
   oldestMs,
   newestMs,
   readDirection,
+  onReadDirectionChange,
   loadLimit,
-  onLoadLimitChange,
+  rangeMinutes,
+  onRangeMinutesChange,
   filteredCount,
   totalCount,
   filterActive,
   onClear,
+  onCancelLoad,
   pauseTitle,
   pauseColor,
   pauseMode,
@@ -113,38 +159,40 @@ export function BufferStatusPill({
   onNewestCommit,
   onLoadFromDbOldest,
   onLoadFromDbNewest,
-  bufferLimitWarning,
 }: BufferStatusPillProps) {
   const [oldestDraft, setOldestDraft] = useState(() => msToInput(oldestMs));
   const [newestDraft, setNewestDraft] = useState(() => msToInput(newestMs));
-  const [limitDraft, setLimitDraft] = useState(String(loadLimit));
-  // Mirror committed buffer bounds into the editable drafts when the parent
-  // value changes (React "adjust state while rendering" pattern).
+  const [rangeUnit, setRangeUnit] = useState<RangeUnit>('m');
+  const [rangeDraft, setRangeDraft] = useState(() => formatRangeMinutes(rangeMinutes, 'm'));
+  const [oldestFocused, setOldestFocused] = useState(false);
+  const [newestFocused, setNewestFocused] = useState(false);
+  const [rangeFocused, setRangeFocused] = useState(false);
+
+  // Outside focus, always mirror buffer bounds.
   const [oldestBaseline, setOldestBaseline] = useState(oldestMs);
   if (oldestMs !== oldestBaseline) {
     setOldestBaseline(oldestMs);
-    setOldestDraft(msToInput(oldestMs));
+    if (!oldestFocused) setOldestDraft(msToInput(oldestMs));
   }
   const [newestBaseline, setNewestBaseline] = useState(newestMs);
   if (newestMs !== newestBaseline) {
     setNewestBaseline(newestMs);
-    setNewestDraft(msToInput(newestMs));
+    if (!newestFocused) setNewestDraft(msToInput(newestMs));
   }
-  const [limitBaseline, setLimitBaseline] = useState(loadLimit);
-  if (loadLimit !== limitBaseline) {
-    setLimitBaseline(loadLimit);
-    setLimitDraft(String(loadLimit));
+  const [rangeBaseline, setRangeBaseline] = useState(rangeMinutes);
+  if (rangeMinutes !== rangeBaseline) {
+    setRangeBaseline(rangeMinutes);
+    if (!rangeFocused) setRangeDraft(formatRangeMinutes(rangeMinutes, rangeUnit));
   }
 
   const countText = filterActive
-    ? `${filteredCount} / ${totalCount}`
+    ? `${filteredCount}/${totalCount}`
     : String(totalCount);
 
   const countWidthCh = useMemo(() => Math.max(1, countText.length), [countText]);
-  const limitWidthCh = useMemo(
-    () => Math.max(1, limitDraft.length || String(loadLimit).length),
-    [limitDraft, loadLimit],
-  );
+
+  const bufferFull = totalCount >= loadLimit;
+  const rangeTitle = `${totalCount}/${loadLimit}`;
 
   const commitOldest = (raw: string) => {
     const ms = parseCommitMs(raw);
@@ -166,23 +214,69 @@ export function BufferStatusPill({
     onNewestCommit(ms);
   };
 
-  const commitLimit = () => {
-    const n = Number(limitDraft);
-    if (!Number.isFinite(n) || n < 1) {
-      setLimitDraft(String(loadLimit));
+  const commitRange = (raw: string = rangeDraft) => {
+    const sanitized = sanitizeRangeInput(raw);
+    const next = rangeValueToMinutes(sanitized, rangeUnit);
+    if (next == null) {
+      setRangeDraft(formatRangeMinutes(rangeMinutes, rangeUnit));
       return;
     }
-    const next = Math.floor(n);
-    if (next !== loadLimit) onLoadLimitChange(next);
-    else setLimitDraft(String(loadLimit));
+    setRangeDraft(formatRangeMinutes(next, rangeUnit));
+    if (next !== rangeMinutes) onRangeMinutesChange(next);
   };
 
-  const onLimitKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      e.preventDefault();
-      (e.target as HTMLInputElement).blur();
-    }
+  const cycleRangeUnit = () => {
+    const idx = RANGE_UNITS.indexOf(rangeUnit);
+    const nextUnit = RANGE_UNITS[(idx + 1) % RANGE_UNITS.length];
+    // Prefer the last committed duration so a half-typed draft does not jump.
+    const fromDraft = rangeValueToMinutes(sanitizeRangeInput(rangeDraft), rangeUnit);
+    const minutes = fromDraft ?? rangeMinutes;
+    setRangeUnit(nextUnit);
+    setRangeDraft(formatRangeMinutes(minutes, nextUnit));
   };
+
+  const onRangeKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    // Apply immediately in the selected unit, then leave the field.
+    commitRange((e.target as HTMLInputElement).value);
+    (e.target as HTMLInputElement).blur();
+  };
+
+  const rangeAction = isHistoryLoading ? (
+    <button
+      type="button"
+      className="icon-button"
+      onClick={onCancelLoad}
+      title={historyLoadError ? `Cancel loading (${historyLoadError})` : 'Cancel loading'}
+      aria-label="Cancel loading"
+      style={{ color: 'var(--accent-primary)', padding: 0, flexShrink: 0 }}
+    >
+      <span className="chip-spinner" style={{ width: 14, height: 14, display: 'inline-block' }} />
+    </button>
+  ) : (
+    <button
+      type="button"
+      className="icon-button"
+      onClick={e => onClear({ pauseAuto: e.ctrlKey || e.metaKey })}
+      title={
+        bufferFull
+          ? `Buffer full (${totalCount}/${loadLimit}). Clear (also wipes the local telegram cache). Ctrl-click pauses automatically.`
+          : 'Clear (also wipes the local telegram cache). Ctrl-click pauses automatically.'
+      }
+      aria-label="Clear (also wipes the local telegram cache). Ctrl-click pauses automatically."
+      style={{
+        color: bufferFull ? 'var(--warning-text)' : 'var(--text-dim)',
+        padding: 0,
+        flexShrink: 0,
+      }}
+    >
+      <Trash2 size={14} />
+    </button>
+  );
+
+  // Backward: icon left, value+unit right. Forward: value+unit left, icon right.
+  const rangeIconLeft = readDirection === 'backward';
 
   return (
     <div data-buffer-status-pill="" style={pillStyle}>
@@ -204,86 +298,93 @@ export function BufferStatusPill({
       </button>
 
       <ThemedDatetimePicker
-        value={oldestDraft}
-        onChange={setOldestDraft}
+        value={oldestFocused ? oldestDraft : msToInput(oldestMs)}
+        onChange={v => {
+          setOldestFocused(true);
+          setOldestDraft(v);
+        }}
         withSeconds
         variant="field"
         aria-label="Oldest telegram in buffer"
         placeholder="Oldest"
         style={dtStyle}
-        onBlur={() => commitOldest(oldestDraft)}
+        onBlur={() => {
+          setOldestFocused(false);
+          commitOldest(oldestDraft);
+        }}
         onKeyDown={e => {
           if (e.key !== 'Enter') return;
-          // Do not preventDefault — picker Enter applies draft + closes.
           commitOldest((e.currentTarget as HTMLInputElement).value);
         }}
       />
 
-      {readDirection === 'forward' && (
-        <span title="Reading forward" style={{ display: 'inline-flex', flexShrink: 0 }}>
-          <ChevronRight
-            size={14}
-            aria-label="Reading forward"
-            style={{ color: 'var(--accent-primary)' }}
-          />
-        </span>
-      )}
+      {readDirection === 'forward' ? (
+        <button
+          type="button"
+          className="icon-button"
+          title="Reading forward — click for backward"
+          aria-label="Reading forward"
+          onClick={() => onReadDirectionChange('backward')}
+          style={{ color: 'var(--accent-primary)', padding: '0.15rem', flexShrink: 0 }}
+        >
+          <ChevronRight size={14} />
+        </button>
+      ) : null}
 
-      <input
-        type="text"
-        inputMode="numeric"
-        pattern="[0-9]*"
-        className="glass-input"
-        aria-label="Load limit"
-        title="Load limit"
-        value={limitDraft}
-        onChange={e => setLimitDraft(e.target.value.replace(/\D/g, ''))}
-        onBlur={commitLimit}
-        onKeyDown={onLimitKeyDown}
-        style={{
-          width: `${limitWidthCh}ch`,
-          fontSize: '0.7rem',
-          padding: '0.15rem 0.3rem',
-          height: '1.55rem',
-          minHeight: 0,
-          textAlign: 'right',
-          fontVariantNumeric: 'tabular-nums',
+      <SecondsField
+        value={rangeDraft}
+        onChange={v => {
+          setRangeFocused(true);
+          setRangeDraft(v);
         }}
+        placeholder="range"
+        title={rangeTitle}
+        ariaLabel="Buffer range"
+        unit={rangeUnit}
+        alwaysShowUnit
+        sanitize={sanitizeRangeInput}
+        onUnitClick={cycleRangeUnit}
+        unitTitle="Cycle range unit (s / m / h)"
+        textAlign={rangeIconLeft ? 'right' : 'left'}
+        startSlot={rangeIconLeft ? rangeAction : undefined}
+        endSlot={rangeIconLeft ? undefined : rangeAction}
+        onBlur={sanitized => {
+          setRangeFocused(false);
+          commitRange(sanitized);
+        }}
+        onKeyDown={onRangeKeyDown}
       />
 
-      <button
-        type="button"
-        className="icon-button"
-        onClick={e => onClear({ pauseAuto: e.ctrlKey || e.metaKey })}
-        title="Clear (also wipes the local telegram cache). Ctrl-click pauses automatically."
-        aria-label="Clear (also wipes the local telegram cache). Ctrl-click pauses automatically."
-        style={{ color: 'var(--text-dim)', padding: '0.15rem' }}
-      >
-        <Trash2 size={15} />
-      </button>
-
-      {readDirection === 'backward' && (
-        <span title="Reading backward" style={{ display: 'inline-flex', flexShrink: 0 }}>
-          <ChevronLeft
-            size={14}
-            aria-label="Reading backward"
-            style={{ color: 'var(--accent-primary)' }}
-          />
-        </span>
-      )}
+      {readDirection === 'backward' ? (
+        <button
+          type="button"
+          className="icon-button"
+          title="Reading backward — click for forward"
+          aria-label="Reading backward"
+          onClick={() => onReadDirectionChange('forward')}
+          style={{ color: 'var(--accent-primary)', padding: '0.15rem', flexShrink: 0 }}
+        >
+          <ChevronLeft size={14} />
+        </button>
+      ) : null}
 
       <ThemedDatetimePicker
-        value={newestDraft}
-        onChange={setNewestDraft}
+        value={newestFocused ? newestDraft : msToInput(newestMs)}
+        onChange={v => {
+          setNewestFocused(true);
+          setNewestDraft(v);
+        }}
         withSeconds
         variant="field"
         aria-label="Newest telegram in buffer"
         placeholder="Newest"
         style={dtStyle}
-        onBlur={() => commitNewest(newestDraft)}
+        onBlur={() => {
+          setNewestFocused(false);
+          commitNewest(newestDraft);
+        }}
         onKeyDown={e => {
           if (e.key !== 'Enter') return;
-          // Do not preventDefault — picker Enter applies draft + closes.
           commitNewest((e.currentTarget as HTMLInputElement).value);
         }}
       />
@@ -362,7 +463,6 @@ export function BufferStatusPill({
           display: 'inline-flex',
           alignItems: 'center',
           justifyContent: 'flex-start',
-          gap: '0.3rem',
           fontFamily: 'var(--font-mono, ui-monospace, monospace)',
           width: `${countWidthCh}ch`,
           minWidth: `${countWidthCh}ch`,
@@ -371,11 +471,10 @@ export function BufferStatusPill({
           whiteSpace: 'nowrap',
           flexShrink: 0,
         }}
-        title={filterActive ? 'Filtered / buffer' : 'Telegrams in buffer'}
+        title={filterActive ? 'Filtered/buffer' : 'Telegrams in buffer'}
         aria-label={filterActive ? `${filteredCount} filtered of ${totalCount} in buffer` : `${totalCount} in buffer`}
       >
         {countText}
-        {bufferLimitWarning}
       </span>
 
       <button
@@ -388,20 +487,6 @@ export function BufferStatusPill({
       >
         <Download size={15} />
       </button>
-
-      {isHistoryLoading && (
-        <span style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', color: 'var(--accent-primary)' }}>
-          <span className="chip-spinner" /> History: loading…
-        </span>
-      )}
-      {!isHistoryLoading && historyLoadError && (
-        <span
-          title={historyLoadError}
-          style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', color: 'var(--error)' }}
-        >
-          <AlertTriangle size={13} /> History: failed
-        </span>
-      )}
     </div>
   );
 }

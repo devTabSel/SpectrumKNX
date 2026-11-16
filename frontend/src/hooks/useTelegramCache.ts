@@ -3,7 +3,7 @@ import type { Telegram } from './useWebSocket';
 import { apiUrl } from '../utils/basePath';
 import { toEntry, telegramTs, type TelegramEntry } from '../utils/telegramId';
 import { tagListEdge } from '../utils/listEdge';
-import { TelegramBufferService } from '../services/telegram-buffer-service';
+import { TelegramBufferService, type EvictionMode } from '../services/telegram-buffer-service';
 import { TelegramCacheService, MAX_CACHE_SIZE } from '../services/telegram-cache-service';
 import {
   TelegramCoverageService,
@@ -115,6 +115,20 @@ export interface TelegramCache {
   loadError: string | null;
   /** Wipe buffer, persistent cache and coverage. */
   clear: () => Promise<void>;
+  /** Abort in-flight history loads without wiping the buffer. */
+  cancelLoad: () => void;
+  /** keepOldest = forward read; keepNewest = backward read. */
+  setEvictionMode: (mode: EvictionMode) => void;
+  /**
+   * Drop telegrams outside `[minTs, maxTs]` and enforce maxSize with the
+   * current eviction mode. Publishes when anything changed.
+   */
+  trimToTimeWindow: (minTs: number, maxTs: number) => void;
+  /**
+   * Trim to the directional minute window anchored at the current buffer
+   * oldest (forward) or newest (backward).
+   */
+  enforceTimeWindow: (direction: 'forward' | 'backward', rangeMinutes: number) => void;
 }
 
 interface FetchResult {
@@ -639,6 +653,9 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
       if (idsRef.current.has(entry.id)) return;
       const removed = bufferRef.current!.add(entry);
       trackRemoved(removed);
+      // keepOldest at capacity drops the newest entry immediately — do not publish
+      // a telegram the buffer already discarded.
+      if (removed.some(e => e.id === entry.id)) return;
       idsRef.current.add(entry.id);
       coverageRef.current!.extendLive(entry.ts);
       pendingRef.current.push(entry);
@@ -743,6 +760,7 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     // Invalidate any in-flight background load so a late-arriving history chunk
     // can't repopulate the buffer we're about to wipe (#339).
     loadGenerationRef.current++;
+    setActiveLoads(0);
     trackRemoved(bufferRef.current!.clear());
     pendingRef.current = [];
     coverageRef.current!.clear();
@@ -756,6 +774,48 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     setTelegrams([]);
     await cacheRef.current!.clear().catch(() => {});
   }, [trackRemoved, saveCoverage, updatePausedCount]);
+
+  const cancelLoad = useCallback(() => {
+    loadGenerationRef.current++;
+    setActiveLoads(0);
+    setLoadError(null);
+  }, []);
+
+  const setEvictionMode = useCallback((mode: EvictionMode) => {
+    bufferRef.current!.setEvictionMode(mode);
+  }, []);
+
+  const trimToTimeWindow = useCallback((minTs: number, maxTs: number) => {
+    const removed = bufferRef.current!.trimToWindow(minTs, maxTs);
+    if (removed.length === 0) return;
+    trackRemoved(removed);
+    if (pausedRef.current) {
+      structuralWhilePausedRef.current = true;
+      const list = pausedBacklogRef.current;
+      if (list.length > 0) {
+        const gone = new Set(removed.map(e => e.id));
+        const next = list.filter(t => !gone.has(toEntry(t).id));
+        list.length = 0;
+        list.push(...next);
+        updatePausedCount(list.length);
+      }
+      return;
+    }
+    publish();
+  }, [trackRemoved, publish, updatePausedCount]);
+
+  const enforceTimeWindow = useCallback((direction: 'forward' | 'backward', rangeMinutes: number) => {
+    const buf = bufferRef.current!;
+    const oldest = buf.oldestTs;
+    const newest = buf.newestTs;
+    if (oldest == null || newest == null) return;
+    const rangeMs = Math.max(1, rangeMinutes) * 60_000;
+    if (direction === 'forward') {
+      trimToTimeWindow(oldest, oldest + rangeMs);
+    } else {
+      trimToTimeWindow(newest - rangeMs, newest);
+    }
+  }, [trimToTimeWindow]);
 
   // Appended in place. `pausedCount` is the render signal — copying this array
   // into React state on every telegram is what made the newer pill stall.
@@ -799,6 +859,10 @@ export function useTelegramCache(maxSize: number, restoreFromCache = true): Tele
     isLoading: activeLoads > 0,
     loadError,
     clear,
+    cancelLoad,
+    setEvictionMode,
+    trimToTimeWindow,
+    enforceTimeWindow,
   };
   /* eslint-enable react-hooks/refs */
 }

@@ -1,12 +1,15 @@
 import type { TelegramEntry } from '../utils/telegramId';
 
+/** Which end to keep when the buffer exceeds maxSize. */
+export type EvictionMode = 'keepOldest' | 'keepNewest';
+
 /**
  * In-memory telegram buffer with ring-buffer behavior, ported from the
  * Home Assistant knx-frontend Group Monitor (#246).
  *
  * - Chronological insertion with a fast-path append for live telegrams.
  * - Deduplicating `merge()` for historical loads.
- * - Automatic overflow eviction of the oldest entries.
+ * - Directional overflow eviction (keep oldest or keep newest).
  * - Immutable `snapshot` for safe use as React state.
  */
 export class TelegramBufferService {
@@ -14,8 +17,18 @@ export class TelegramBufferService {
 
   private _maxSize: number;
 
+  private _eviction: EvictionMode = 'keepNewest';
+
   constructor(maxSize = 2000) {
     this._maxSize = maxSize;
+  }
+
+  get evictionMode(): EvictionMode {
+    return this._eviction;
+  }
+
+  setEvictionMode(mode: EvictionMode): void {
+    this._eviction = mode;
   }
 
   /**
@@ -36,10 +49,7 @@ export class TelegramBufferService {
       this._buffer.sort((a, b) => a.ts - b.ts);
     }
 
-    if (this._buffer.length > this._maxSize) {
-      return this._buffer.splice(0, this._buffer.length - this._maxSize);
-    }
-    return [];
+    return this.evictOverflow();
   }
 
   /**
@@ -54,15 +64,42 @@ export class TelegramBufferService {
   }
 
   /**
-   * Updates the maximum size, evicting the oldest entries when shrinking.
+   * Updates the maximum size, evicting per the current eviction mode.
    * @returns Entries removed by the size reduction (empty if none).
    */
   setMaxSize(size: number): TelegramEntry[] {
     this._maxSize = size;
-    if (this._buffer.length > size) {
-      return this._buffer.splice(0, this._buffer.length - size);
+    return this.evictOverflow();
+  }
+
+  /**
+   * Drop entries outside `[minTs, maxTs]` (inclusive), then enforce maxSize.
+   * @returns Entries removed.
+   */
+  trimToWindow(minTs: number, maxTs: number): TelegramEntry[] {
+    if (this._buffer.length === 0) return [];
+    const lo = Math.min(minTs, maxTs);
+    const hi = Math.max(minTs, maxTs);
+    const kept: TelegramEntry[] = [];
+    const removed: TelegramEntry[] = [];
+    for (const e of this._buffer) {
+      if (e.ts < lo || e.ts > hi) removed.push(e);
+      else kept.push(e);
     }
-    return [];
+    this._buffer = kept;
+    removed.push(...this.evictOverflow());
+    return removed;
+  }
+
+  private evictOverflow(): TelegramEntry[] {
+    if (this._buffer.length <= this._maxSize) return [];
+    const excess = this._buffer.length - this._maxSize;
+    if (this._eviction === 'keepOldest') {
+      // Drop newest (end of oldest-first array).
+      return this._buffer.splice(this._buffer.length - excess, excess);
+    }
+    // keepNewest: drop oldest (start).
+    return this._buffer.splice(0, excess);
   }
 
   get maxSize(): number {

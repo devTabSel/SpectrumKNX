@@ -26,7 +26,7 @@ import { anchorKey } from './utils/anchorKey';
 import type { MarkColorIndexMap } from './utils/markColors';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel } from './utils/sortConfig';
 import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTelegramView';
-import { LayoutDashboard, History, Settings, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, AlertTriangle, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
+import { LayoutDashboard, History, Settings, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
 import { useTheme } from './hooks/useTheme';
@@ -74,6 +74,7 @@ import {
   DEFAULT_FILTERS,
   hasActiveFilters,
   enabledFilters,
+  matchesTelegram,
   pruneDisabled,
   countSelections,
   type ActiveFilters,
@@ -334,6 +335,15 @@ function App() {
 
   // ── Settings & Persistence ──────────────────────────────────────────────────
   const [loadLimit, setLoadLimit] = useState(Number(getPref('loadLimit') || 100000));
+  const [bufferRangeMinutes, setBufferRangeMinutes] = useState(() => {
+    const n = Number(getPref('bufferRangeMinutes') || 60);
+    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 60;
+  });
+  const [readDirection, setReadDirection] = useState<'forward' | 'backward'>(() => {
+    const sort = readSortConfigPref();
+    const dir = sort.find(l => l.key === 'timestamp')?.direction ?? sort[0]?.direction ?? 'desc';
+    return dir === 'asc' ? 'forward' : 'backward';
+  });
   const [visibleColumns, setVisibleColumns] = useState<{ [key: string]: boolean }>(() => {
     try {
       const cookie = getPref('visibleColumns');
@@ -371,14 +381,27 @@ function App() {
     revealPaused,
     loadRange,
     fillForwardFrom,
-    fillBackwardTo,
     oldestTs: bufferOldestTs,
     newestTs: bufferNewestTs,
     isLoading: isHistoryLoading,
     loadError: historyLoadError,
     clear: clearTelegrams,
+    cancelLoad,
+    setEvictionMode,
+    enforceTimeWindow,
   } = useTelegramCache(loadLimit, restoreOnStartup);
   const [pauseMode, setPauseMode] = useState<PauseMode>('playing');
+  // Live-trim policy for handleTelegram (declared before filters; synced below).
+  const liveTrimRef = useRef({
+    pauseMode: 'playing' as PauseMode,
+    readDirection: 'backward' as 'forward' | 'backward',
+    rangeMinutes: 60,
+    filters: DEFAULT_FILTERS as ActiveFilters,
+    filtersEnabled: true,
+  });
+  liveTrimRef.current.pauseMode = pauseMode;
+  liveTrimRef.current.readDirection = readDirection;
+  liveTrimRef.current.rangeMinutes = bufferRangeMinutes;
   // Snapshot frozen in auto/manual; flush moves mode to playing without
   // necessarily enabling live-follow (edge flush keeps the viewport + pill).
   const isPaused = cachePausedForMode(pauseMode);
@@ -410,6 +433,8 @@ function App() {
   }, [noteTtViewChange]);
   // The filters in effect: selections minus the ones switched off (#437).
   const appliedFilters = useMemo(() => enabledFilters(activeFilters), [activeFilters]);
+  liveTrimRef.current.filters = activeFilters;
+  liveTrimRef.current.filtersEnabled = filtersEnabled;
 
   const refreshServerConfig = useCallback(() => {
     fetch(apiUrl('/api/server/config'))
@@ -492,7 +517,15 @@ function App() {
     // The cache keeps ingesting while paused; only the snapshot is frozen, so
     // nothing is lost and resume simply reveals what arrived in between.
     addLive(t);
-  }, [addLive]);
+
+    // While playing, enforce the minute window when a filter-matching telegram arrives.
+    const pol = liveTrimRef.current;
+    if (pol.pauseMode !== 'playing') return;
+    const filters = enabledFilters(pol.filters);
+    const filterOn = pol.filtersEnabled && hasActiveFilters(filters);
+    if (filterOn && !matchesTelegram(t, filters)) return;
+    enforceTimeWindow(pol.readDirection, pol.rangeMinutes);
+  }, [addLive, enforceTimeWindow]);
 
   const handleConnectionState = useCallback((e: ConnectionStateEvent) => {
     // Flip the badge immediately, then refetch for authoritative state
@@ -531,10 +564,16 @@ function App() {
   // ── Persist settings ────────────────────────────────────────────────────────
   useEffect(() => {
     setPref('loadLimit', loadLimit.toString());
+    setPref('bufferRangeMinutes', String(bufferRangeMinutes));
     setPref('visibleColumns', JSON.stringify(visibleColumns));
     setPref('rateMode', rateMode);
     setPref('restoreOnStartup', String(restoreOnStartup));
-  }, [loadLimit, visibleColumns, rateMode, restoreOnStartup]);
+  }, [loadLimit, bufferRangeMinutes, visibleColumns, rateMode, restoreOnStartup]);
+
+  // Keep buffer eviction aligned with the fill/read axis.
+  useEffect(() => {
+    setEvictionMode(readDirection === 'forward' ? 'keepOldest' : 'keepNewest');
+  }, [readDirection, setEvictionMode]);
 
   // ── Persist workspace (#211) ────────────────────────────────────────────────
   // What the address bar currently says, in normalised form, and how the next
@@ -1065,16 +1104,62 @@ function App() {
   // that panel consumes the main filter, so the pane shows only when it is active.
   const showFilterPane = activePanel === 'list' && isFilterOpen;
 
-  // Inline "buffer full" marker shown next to the count in the stats pill (#284).
-  const bufferLimitWarning = filteredLiveTelegrams.length >= loadLimit ? (
-    <span
-      onClick={() => setIsSettingsOpen(true)}
-      title={`Buffer full (${loadLimit.toLocaleString()}). Click to adjust in settings.`}
-      style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--warning-text)', cursor: 'pointer' }}
-    >
-      <AlertTriangle size={13} />
-    </span>
-  ) : null;
+  const syncSortToReadDirection = useCallback((dir: 'forward' | 'backward') => {
+    const want: 'asc' | 'desc' = dir === 'forward' ? 'asc' : 'desc';
+    setSortConfig(prev => {
+      const ts = prev.find(l => l.key === 'timestamp');
+      if (ts?.direction === want && prev[0]?.key === 'timestamp') return prev;
+      const next: SortConfig = [{ key: 'timestamp', direction: want }];
+      writeSortConfigPref(next);
+      return next;
+    });
+  }, []);
+
+  /** Clear buffer and switch fill/eviction axis; optionally run a fill afterward. */
+  const changeReadDirection = useCallback(async (
+    dir: 'forward' | 'backward',
+    after?: () => Promise<void>,
+    opts?: { forceClear?: boolean },
+  ) => {
+    const changed = readDirection !== dir;
+    if (changed) {
+      setReadDirection(dir);
+      setEvictionMode(dir === 'forward' ? 'keepOldest' : 'keepNewest');
+      syncSortToReadDirection(dir);
+    }
+    // Rewind / FF / Goto-outside always wipe; pill direction only clears on change.
+    if (changed || opts?.forceClear) await clearTelegrams();
+    await after?.();
+  }, [readDirection, setEvictionMode, syncSortToReadDirection, clearTelegrams]);
+
+  /** Apply a new minute window: trim when shrinking, fill gaps when expanding. */
+  const applyBufferRange = useCallback(async (nextMinutes: number) => {
+    const prev = bufferRangeMinutes;
+    setBufferRangeMinutes(nextMinutes);
+    const oldest = bufferOldestTs;
+    const newest = bufferNewestTs;
+    if (oldest == null || newest == null) {
+      enforceTimeWindow(readDirection, nextMinutes);
+      return;
+    }
+    const rangeMs = nextMinutes * 60_000;
+    if (nextMinutes < prev) {
+      enforceTimeWindow(readDirection, nextMinutes);
+      return;
+    }
+    // Expanding: fetch the missing side of the window, then trim to limit.
+    if (readDirection === 'forward') {
+      const end = oldest + rangeMs;
+      if (newest < end) await loadRange(newest, end);
+    } else {
+      const start = newest - rangeMs;
+      if (oldest > start) await loadRange(start, oldest);
+    }
+    enforceTimeWindow(readDirection, nextMinutes);
+  }, [
+    bufferRangeMinutes, bufferOldestTs, bufferNewestTs, readDirection,
+    enforceTimeWindow, loadRange,
+  ]);
 
   // Replace the app with a login screen when authentication is required. Early
   // so an unauthenticated visitor triggers no data fetching or WebSocket work
@@ -1134,15 +1219,11 @@ function App() {
                 <BufferStatusPill
                   oldestMs={bufferOldestTs}
                   newestMs={bufferNewestTs}
-                  readDirection={
-                    (sortConfig.find(l => l.key === 'timestamp')?.direction
-                      ?? sortConfig[0]?.direction
-                      ?? 'desc') === 'asc'
-                      ? 'forward'
-                      : 'backward'
-                  }
+                  readDirection={readDirection}
+                  onReadDirectionChange={dir => { void changeReadDirection(dir); }}
                   loadLimit={loadLimit}
-                  onLoadLimitChange={setLoadLimit}
+                  rangeMinutes={bufferRangeMinutes}
+                  onRangeMinutesChange={n => { void applyBufferRange(n); }}
                   filteredCount={filteredLiveTelegrams.length}
                   totalCount={liveTelegrams.length}
                   filterActive={activeFilterCount > 0}
@@ -1154,6 +1235,7 @@ function App() {
                     }
                     void clearTelegrams();
                   }}
+                  onCancelLoad={cancelLoad}
                   pauseTitle={pauseTitle}
                   pauseColor={pauseColor}
                   pauseMode={pauseMode}
@@ -1165,8 +1247,21 @@ function App() {
                   wsConnected={isConnected}
                   isHistoryLoading={isHistoryLoading}
                   historyLoadError={historyLoadError}
-                  onOldestCommit={ms => { void fillForwardFrom(ms); }}
-                  onNewestCommit={ms => { void fillBackwardTo(ms); }}
+                  onOldestCommit={ms => {
+                    void (async () => {
+                      await changeReadDirection('forward');
+                      await fillForwardFrom(ms);
+                      enforceTimeWindow('forward', bufferRangeMinutes);
+                    })();
+                  }}
+                  onNewestCommit={ms => {
+                    void (async () => {
+                      await changeReadDirection('backward');
+                      const start = ms - bufferRangeMinutes * 60_000;
+                      await loadRange(start, ms);
+                      enforceTimeWindow('backward', bufferRangeMinutes);
+                    })();
+                  }}
                   onLoadFromDbOldest={() => {
                     void (async () => {
                       try {
@@ -1177,13 +1272,16 @@ function App() {
                         if (!raw) return;
                         const ms = new Date(raw).getTime();
                         if (Number.isNaN(ms)) return;
-                        await fillForwardFrom(ms);
+                        await changeReadDirection('forward', async () => {
+                          await fillForwardFrom(ms);
+                          enforceTimeWindow('forward', bufferRangeMinutes);
+                        }, { forceClear: true });
                         handleListFollowChange(false);
                         setActivePanel('list');
                         listGotoSeq.current += 1;
                         setListGoto({ id: listGotoSeq.current, targetMs: ms });
                       } catch {
-                        // Status pill already surfaces historyLoadError from the cache.
+                        // spinner / loadError cover failures
                       }
                     })();
                   }}
@@ -1197,17 +1295,19 @@ function App() {
                         if (!raw) return;
                         const ms = new Date(raw).getTime();
                         if (Number.isNaN(ms)) return;
-                        await fillBackwardTo(ms);
+                        await changeReadDirection('backward', async () => {
+                          await loadRange(ms - bufferRangeMinutes * 60_000, ms);
+                          enforceTimeWindow('backward', bufferRangeMinutes);
+                        }, { forceClear: true });
                         handleListFollowChange(false);
                         setActivePanel('list');
                         listGotoSeq.current += 1;
                         setListGoto({ id: listGotoSeq.current, targetMs: ms });
                       } catch {
-                        // Status pill already surfaces historyLoadError from the cache.
+                        // spinner / loadError cover failures
                       }
                     })();
                   }}
-                  bufferLimitWarning={bufferLimitWarning}
                 />
 
                 {/* Main-panel switch (#374): the five panels close back to the
@@ -1715,7 +1815,18 @@ function App() {
                       // Reveal the entire pause backlog into the published list.
                       revealPaused(Number.MAX_SAFE_INTEGER);
                     }}
-                    onGotoFillOlder={ms => fillForwardFrom(ms)}
+                    onGotoFillOlder={async ms => {
+                      await changeReadDirection('forward', async () => {
+                        await fillForwardFrom(ms);
+                        enforceTimeWindow('forward', bufferRangeMinutes);
+                      }, { forceClear: true });
+                    }}
+                    onGotoFillNewer={async ms => {
+                      await changeReadDirection('backward', async () => {
+                        await loadRange(ms - bufferRangeMinutes * 60_000, ms);
+                        enforceTimeWindow('backward', bufferRangeMinutes);
+                      }, { forceClear: true });
+                    }}
                     listAnchorKey={listAnchorKey}
                     onListAnchorKeyChange={setListAnchorKey}
                     viewChangeToken={ttViewChangeToken}

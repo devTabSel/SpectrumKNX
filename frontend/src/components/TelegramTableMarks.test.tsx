@@ -535,6 +535,59 @@ test('a time-only gotoRequest jumps by time without selecting a row', async () =
   expect(onMouseSelectedKeysChange).not.toHaveBeenCalled();
 });
 
+test('goto older outside buffer asks fill; in-buffer older only navigates', async () => {
+  const onGotoFillOlder = vi.fn(async () => {});
+  const onListFollowChange = vi.fn();
+  const bufferOldest = new Date(TELEGRAMS[4].timestamp).getTime();
+  const bufferNewest = new Date(TELEGRAMS[0].timestamp).getTime();
+
+  // Outside buffer → fill.
+  renderTable({
+    listFollow: true,
+    onListFollowChange,
+    bufferOldestMs: bufferOldest,
+    bufferNewestMs: bufferNewest,
+    onGotoFillOlder,
+    gotoRequest: { id: 10, targetMs: bufferOldest - 60_000 },
+  });
+  await vi.waitFor(() => {
+    expect(onGotoFillOlder).toHaveBeenCalledWith(bufferOldest - 60_000);
+  });
+
+  // Filtered view omits oldest row; target still in raw buffer → navigate, no fill.
+  onGotoFillOlder.mockClear();
+  onListFollowChange.mockClear();
+  renderTable({
+    telegrams: TELEGRAMS.slice(0, 4),
+    listFollow: true,
+    onListFollowChange,
+    bufferOldestMs: bufferOldest,
+    bufferNewestMs: bufferNewest,
+    onGotoFillOlder,
+    gotoRequest: { id: 11, targetMs: bufferOldest },
+  });
+  await vi.waitFor(() => {
+    expect(onListFollowChange).toHaveBeenCalledWith(false);
+  });
+  expect(onGotoFillOlder).not.toHaveBeenCalled();
+});
+
+test('goto newer outside buffer asks fill', async () => {
+  const onGotoFillNewer = vi.fn(async () => {});
+  const bufferOldest = new Date(TELEGRAMS[4].timestamp).getTime();
+  const bufferNewest = new Date(TELEGRAMS[0].timestamp).getTime();
+  renderTable({
+    listFollow: true,
+    bufferOldestMs: bufferOldest,
+    bufferNewestMs: bufferNewest,
+    onGotoFillNewer,
+    gotoRequest: { id: 12, targetMs: bufferNewest + 60_000 },
+  });
+  await vi.waitFor(() => {
+    expect(onGotoFillNewer).toHaveBeenCalledWith(bufferNewest + 60_000);
+  });
+});
+
 test('Alt-click on the colour swatch sets the hide flag', () => {
   const onMarkedKeysChange = vi.fn();
   const onHiddenKeysChange = vi.fn();

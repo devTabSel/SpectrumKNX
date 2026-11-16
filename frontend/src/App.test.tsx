@@ -85,6 +85,10 @@ vi.mock('./hooks/useTelegramCache', () => {
           setPausedCount(0);
           setTelegrams([]);
         },
+        cancelLoad: () => {},
+        setEvictionMode: () => {},
+        trimToTimeWindow: () => {},
+        enforceTimeWindow: () => {},
       };
     },
   };
