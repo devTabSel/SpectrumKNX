@@ -1,8 +1,11 @@
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
-import { expect, test, vi } from 'vitest';
+import { beforeEach, expect, test, vi } from 'vitest';
 import React from 'react';
 import App from './App';
 import { makeTelegram } from './test/telegramFactory';
+import { readMonitorViewPref, writeMonitorViewPref } from './utils/monitorView';
+import { getPref } from './utils/prefs';
+import { readSortConfigPref, writeSortConfigPref } from './utils/sortConfig';
 
 // Mock the WebSocket hook
 vi.mock('./hooks/useWebSocket', () => ({
@@ -18,6 +21,8 @@ const cacheCtl = vi.hoisted(() => ({
   revealCalls: [] as number[],
   /** Per-test hook run on every reveal (e.g. to simulate the row pin). */
   onReveal: null as null | ((n: number) => void),
+  loadRangeCalls: [] as [number, number][],
+  fillForwardCalls: [] as number[],
 }));
 
 /** Controllable cache so pause/clear tests can leave the empty-buffer lock. */
@@ -71,8 +76,12 @@ vi.mock('./hooks/useTelegramCache', async (importOriginal) => {
           setPausedCount(remaining);
           return remaining;
         },
-        loadRange: async () => {},
-        fillForwardFrom: async () => {},
+        loadRange: async (start: number, end: number) => {
+          cacheCtl.loadRangeCalls.push([start, end]);
+        },
+        fillForwardFrom: async (start: number) => {
+          cacheCtl.fillForwardCalls.push(start);
+        },
         fillBackwardTo: async () => {},
         oldestTs: telegrams.length > 0
           ? new Date(telegrams[telegrams.length - 1].timestamp).getTime()
@@ -106,6 +115,14 @@ vi.stubGlobal('fetch', vi.fn().mockImplementation(() =>
     json: () => Promise.resolve({}),
   })
 ));
+
+beforeEach(() => {
+  localStorage.clear();
+  window.history.replaceState(null, '', '/');
+  cacheCtl.revealCalls.length = 0;
+  cacheCtl.loadRangeCalls.length = 0;
+  cacheCtl.fillForwardCalls.length = 0;
+});
 
 test('renders app title', async () => {
   render(<App />);
@@ -363,6 +380,74 @@ test('Back and Forward step through panel changes', async () => {
   await waitFor(() => expect(selected()).toBe('Visualization'));
   // Navigating must not have pushed anything itself.
   expect(window.history.length).toBe(start + 2);
+});
+
+test('a bare URL starts live and does not load an anchor window', async () => {
+  render(<App />);
+  expect(await screen.findByRole('button', { name: 'Reading backward' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Playing' })).toBeInTheDocument();
+  expect(cacheCtl.loadRangeCalls).toEqual([]);
+  expect(cacheCtl.fillForwardCalls).toEqual([]);
+});
+
+test('a saved anchor loads from that timestamp and restores pause mode', async () => {
+  writeMonitorViewPref({
+    direction: 'backward',
+    anchorTs: 1_700_000_000_000,
+    follow: true,
+    pauseMode: 'auto',
+  });
+  render(<App />);
+  await waitFor(() => {
+    expect(cacheCtl.loadRangeCalls).toEqual([[1_700_000_000_000 - 60 * 60_000, 1_700_000_000_000]]);
+  });
+  expect(cacheCtl.fillForwardCalls).toEqual([]);
+  expect(screen.getByRole('button', { name: 'Paused automatically' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reading backward' })).toBeInTheDocument();
+});
+
+test('the monitor URL wins over prefs for direction, anchor and range', async () => {
+  writeMonitorViewPref({
+    direction: 'backward',
+    anchorTs: null,
+    follow: false,
+    pauseMode: 'manual',
+  });
+  writeSortConfigPref([{ key: 'timestamp', direction: 'desc' }]);
+  window.history.replaceState(null, '', '/?view=monitor&rd=forward&anchor=5000&range=15');
+  render(<App />);
+  await waitFor(() => expect(cacheCtl.fillForwardCalls).toEqual([5000]));
+  expect(cacheCtl.loadRangeCalls).toEqual([]);
+  expect(screen.getByRole('button', { name: 'Reading forward' })).toBeInTheDocument();
+  // Follow and pause are not in the URL, so the preference still wins.
+  expect(screen.getByRole('button', { name: 'Paused manually' })).toBeInTheDocument();
+  await waitFor(() => expect(getPref('bufferRangeMinutes')).toBe('15'));
+  await waitFor(() => {
+    expect(readMonitorViewPref()).toMatchObject({
+      direction: 'forward',
+      anchorTs: 5000,
+      follow: false,
+      pauseMode: 'manual',
+    });
+  });
+  await waitFor(() => {
+    expect(readSortConfigPref()).toEqual([{ key: 'timestamp', direction: 'asc' }]);
+  });
+});
+
+test('sort follows a restored forward direction instead of the sort preference', async () => {
+  writeSortConfigPref([{ key: 'source_address', direction: 'asc' }]);
+  writeMonitorViewPref({
+    direction: 'forward',
+    anchorTs: null,
+    follow: true,
+    pauseMode: 'playing',
+  });
+  render(<App />);
+  await waitFor(() => {
+    expect(readSortConfigPref()).toEqual([{ key: 'timestamp', direction: 'asc' }]);
+  });
+  expect(screen.getByRole('button', { name: 'Reading forward' })).toBeInTheDocument();
 });
 
 test('toggling the filter pane updates the URL without a history entry', async () => {

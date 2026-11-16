@@ -1,5 +1,6 @@
 import { DEFAULT_FILTERS, DIRECTIONS, pruneDisabled, type ActiveFilters } from '../types/filters';
 import { getBasePath } from './basePath';
+import { BUFFER_RANGE_MINUTES_DEFAULT, type ReadDirection } from './monitorView';
 
 /**
  * Group Monitor workspace persistence (#211).
@@ -14,8 +15,11 @@ import { getBasePath } from './basePath';
  * - Regular browser tab: the URL (`view=monitor` query), so reloads and
  *   bookmarks restore the workspace and the address bar stays shareable.
  *
- * Durable UI *preferences* (theme, columns, sort, …) live in `utils/prefs.ts`
- * and are deliberately not part of the workspace.
+ * Durable UI *preferences* (theme, columns, sort, …) live in `utils/prefs.ts`.
+ * The group-monitor view is one of them (`utils/monitorView.ts`). Direction,
+ * anchor and the minute range are also mirrored here when they differ from
+ * the defaults, and that URL wins over the preference on startup. Follow and
+ * pause mode stay in the preference only.
  */
 
 export type WorkspaceTab = 'live' | 'history' | 'import';
@@ -30,6 +34,12 @@ export interface WorkspaceState {
   plot: string[];
   lastSeenAddresses: string[];
   lastSeenMode: 'ga' | 'pa';
+  /** Read axis. Default backward is omitted from the URL. */
+  readDirection: ReadDirection;
+  /** Explicit anchor in ms. Null is the live / buffer edge and is omitted. */
+  anchorTs: number | null;
+  /** Minute window. Omitted when it equals the preference default. */
+  rangeMinutes: number;
 }
 
 export const DEFAULT_WORKSPACE: WorkspaceState = {
@@ -40,6 +50,9 @@ export const DEFAULT_WORKSPACE: WorkspaceState = {
   plot: [],
   lastSeenAddresses: [],
   lastSeenMode: 'ga',
+  readDirection: 'backward',
+  anchorTs: null,
+  rangeMinutes: BUFFER_RANGE_MINUTES_DEFAULT,
 };
 
 export const WORKSPACE_STORAGE_KEY = 'spectrum-knx-workspace';
@@ -112,7 +125,22 @@ function sanitize(p: Partial<WorkspaceState>): WorkspaceState {
     plot: strings(p.plot),
     lastSeenAddresses: strings(p.lastSeenAddresses),
     lastSeenMode: p.lastSeenMode === 'pa' ? 'pa' : 'ga',
+    readDirection: p.readDirection === 'forward' || p.readDirection === 'backward' ? p.readDirection : 'backward',
+    anchorTs: typeof p.anchorTs === 'number' && Number.isFinite(p.anchorTs) ? p.anchorTs : null,
+    rangeMinutes: sanitizeRangeMinutes(p.rangeMinutes),
   });
+}
+
+function sanitizeRangeMinutes(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n) || n < 1) return BUFFER_RANGE_MINUTES_DEFAULT;
+  return Math.floor(n);
+}
+
+function queryNumber(value: string | null): number | undefined {
+  if (value == null || value.trim() === '') return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 /** A hand-edited URL may switch off entries that are not selected; drop those. */
@@ -144,6 +172,11 @@ export function buildMonitorSearch(state: WorkspaceState): string {
   if (state.plot.length > 0) p.set('plot', state.plot.join(','));
   if (state.lastSeenAddresses.length > 0) p.set('ls', state.lastSeenAddresses.join(','));
   if (state.lastSeenMode !== 'ga') p.set('lsm', state.lastSeenMode);
+  // Read axis, anchor and range. Omitted values mean the defaults
+  // (backward, live edge, preference default), same as the other fields.
+  if (state.readDirection !== 'backward') p.set('rd', state.readDirection);
+  if (state.anchorTs != null) p.set('anchor', String(state.anchorTs));
+  if (state.rangeMinutes !== BUFFER_RANGE_MINUTES_DEFAULT) p.set('range', String(state.rangeMinutes));
   if ([...p.keys()].length === 0) return '';
   p.set('view', 'monitor');
   return p.toString();
@@ -175,6 +208,9 @@ export function parseMonitorSearch(search: string): WorkspaceState | null {
     plot: list(p.get('plot')),
     lastSeenAddresses: list(p.get('ls')),
     lastSeenMode: (p.get('lsm') as 'ga' | 'pa') ?? 'ga',
+    readDirection: p.get('rd') === 'forward' ? 'forward' : 'backward',
+    anchorTs: queryNumber(p.get('anchor')),
+    rangeMinutes: queryNumber(p.get('range')),
   });
 }
 

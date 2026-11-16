@@ -16,7 +16,7 @@ export interface UiSessionState {
     /** Per-column filter on/off. Absent keys default to on. */
     columnEnabled: QuickFilterColumnEnabled;
   };
-  listFollow: boolean;
+  /** Display pin for the telegram list. Follow lives on the monitor view. */
   listAnchorKey: string | null;
   /** Quick info bar open/closed state above the telegram list header (#311). */
   infoBarOpen: boolean;
@@ -49,7 +49,6 @@ export const DEFAULT_UI_STATE: UiSessionState = {
     patterns: {},
     columnEnabled: { ...DEFAULT_QUICK_FILTER_COLUMN_ENABLED },
   },
-  listFollow: true,
   listAnchorKey: null,
   infoBarOpen: false,
   zoomRange: null,
@@ -156,7 +155,6 @@ function sanitize(p: Partial<StoredUiState>): UiSessionState {
       patterns,
       columnEnabled,
     },
-    listFollow: typeof p.listFollow === 'boolean' ? p.listFollow : true,
     listAnchorKey: typeof p.listAnchorKey === 'string' ? p.listAnchorKey : null,
     infoBarOpen: typeof p.infoBarOpen === 'boolean' ? p.infoBarOpen : false,
     zoomRange: zoom,

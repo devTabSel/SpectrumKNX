@@ -20,7 +20,6 @@ test('round-trip save/load works correctly', () => {
       patterns: { source: { top: '1.1.1', bottom: '' } },
       columnEnabled: { time: true, delta: true, source: false, target: true, type: true, dpt: true, value: true },
     },
-    listFollow: false,
     listAnchorKey: 'some-key',
     infoBarOpen: true,
     zoomRange: [1000, 2000],
@@ -119,7 +118,6 @@ test('sanitize drops invalid fields and fills defaults', () => {
         enabled: true,
         patterns: ['invalid array instead of object'],
       },
-      listFollow: 'not a boolean',
       zoomRange: [10, 'not a number'],
     })
   );
@@ -133,7 +131,6 @@ test('sanitize drops invalid fields and fills defaults', () => {
       patterns: {},
       columnEnabled: DEFAULT_UI_STATE.quickFilter.columnEnabled,
     },
-    listFollow: true,
     zoomRange: null,
   });
 });

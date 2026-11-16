@@ -25,6 +25,13 @@ import { TelegramTable, type SortConfig, type SortKey, type ListGotoRequest } fr
 import { anchorKey } from './utils/anchorKey';
 import type { MarkColorIndexMap } from './utils/markColors';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel } from './utils/sortConfig';
+import {
+  deriveMonitorView,
+  resolveMonitorStartup,
+  sortConfigForReadDirection,
+  writeMonitorViewPref,
+  type MonitorView,
+} from './utils/monitorView';
 import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTelegramView';
 import { LayoutDashboard, History, Settings, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
@@ -256,11 +263,27 @@ function App() {
     initialView ? null : isEmbedded() ? loadWorkspace() : parseMonitorSearch(window.location.search),
   );
   const [initialUiState] = useState(() => loadUiState() ?? DEFAULT_UI_STATE);
+  // URL wins over the preference for direction, anchor and range. Follow and
+  // pause mode always come from the preference. Embedded mode ignores the URL.
+  const [initialMonitor] = useState(() => {
+    const embedded = isEmbedded();
+    const url = initialView || embedded || !initialWorkspace
+      ? null
+      : {
+          direction: initialWorkspace.readDirection,
+          anchorTs: initialWorkspace.anchorTs,
+          rangeMinutes: initialWorkspace.rangeMinutes,
+        };
+    return resolveMonitorStartup({ embedded, url });
+  });
+  const [monitorView, setMonitorView] = useState<MonitorView>(initialMonitor.view);
+  const readDirection = monitorView.direction;
+  const listFollow = monitorView.follow;
+  const pauseMode = monitorView.pauseMode;
   const [quickFilterOpen, setQuickFilterOpen] = useState(initialUiState.quickFilter.open);
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(initialUiState.quickFilter.enabled);
   const [quickPatterns, setQuickPatterns] = useState(initialUiState.quickFilter.patterns);
   const [quickColumnEnabled, setQuickColumnEnabled] = useState(initialUiState.quickFilter.columnEnabled);
-  const [listFollow, setListFollow] = useState(initialUiState.listFollow);
   const [listAnchorKey, setListAnchorKey] = useState<string | null>(initialUiState.listAnchorKey);
   const [infoBarOpen, setInfoBarOpen] = useState(initialUiState.infoBarOpen);
   const [zoomRange, setZoomRange] = useState<[number, number] | null>(initialUiState.zoomRange);
@@ -347,15 +370,7 @@ function App() {
     const n = Number(raw);
     return Number.isFinite(n) ? clampMonitorPageSize(n) : MONITOR_PAGE_SIZE_DEFAULT;
   });
-  const [bufferRangeMinutes, setBufferRangeMinutes] = useState(() => {
-    const n = Number(getPref('bufferRangeMinutes') || 60);
-    return Number.isFinite(n) && n >= 1 ? Math.floor(n) : 60;
-  });
-  const [readDirection, setReadDirection] = useState<'forward' | 'backward'>(() => {
-    const sort = readSortConfigPref();
-    const dir = sort.find(l => l.key === 'timestamp')?.direction ?? sort[0]?.direction ?? 'desc';
-    return dir === 'asc' ? 'forward' : 'backward';
-  });
+  const [bufferRangeMinutes, setBufferRangeMinutes] = useState(initialMonitor.rangeMinutes);
   const [visibleColumns, setVisibleColumns] = useState<{ [key: string]: boolean }>(() => {
     try {
       const cookie = getPref('visibleColumns');
@@ -405,8 +420,13 @@ function App() {
     adoptAnchorDirection,
     setBufferRangeMinutes: setCacheRangeMinutes,
     enforceTimeWindow,
-  } = useTelegramCache(loadLimit, restoreOnStartup, monitorPageSize);
-  const [pauseMode, setPauseMode] = useState<PauseMode>('playing');
+  } = useTelegramCache(
+    loadLimit,
+    // An explicit anchor loads through fillAnchorWindow instead of the
+    // newest-first startup restore. The hook reads this flag once.
+    restoreOnStartup && initialMonitor.view.anchorTs == null,
+    monitorPageSize,
+  );
   // Live-trim policy for handleTelegram (declared before filters; synced below).
   const liveTrimRef = useRef({
     pauseMode: 'playing' as PauseMode,
@@ -418,6 +438,20 @@ function App() {
   liveTrimRef.current.pauseMode = pauseMode;
   liveTrimRef.current.readDirection = readDirection;
   liveTrimRef.current.rangeMinutes = bufferRangeMinutes;
+  // Popstate reads the latest window and loaders. Filled in an effect below,
+  // after those callbacks exist, so render does not touch the refs.
+  const monitorWindowRef = useRef<{
+    direction: 'forward' | 'backward';
+    anchorTs: number | null;
+    rangeMinutes: number;
+  } | null>(null);
+  const monitorActionsRef = useRef<{
+    syncSort: (dir: 'forward' | 'backward') => void;
+    fillAnchor: (dir: 'forward' | 'backward', ts: number, rangeMinutes?: number) => Promise<void>;
+    adoptAnchorDirection: typeof adoptAnchorDirection;
+    setBufferAnchor: typeof setBufferAnchor;
+    setEvictionMode: typeof setEvictionMode;
+  } | null>(null);
   // Snapshot frozen in auto/manual; flush moves mode to playing without
   // necessarily enabling live-follow (edge flush keeps the viewport + pill).
   const isPaused = cachePausedForMode(pauseMode);
@@ -587,14 +621,19 @@ function App() {
     setPref('restoreOnStartup', String(restoreOnStartup));
   }, [loadLimit, monitorPageSize, bufferRangeMinutes, visibleColumns, rateMode, restoreOnStartup]);
 
-  // Eviction, the anchor direction, and the live admission window follow the
-  // read axis. A direction change without a timestamp clears the anchor so the
-  // buffer edge is used until Rewind, fast-forward or Goto sets one.
+  useEffect(() => {
+    writeMonitorViewPref(monitorView);
+  }, [monitorView]);
+
+  // Eviction and the live admission window follow the view. An explicit anchor
+  // is pushed into the cache by the action that set it (and once at startup);
+  // adopting the direction here would clear that timestamp. A null anchor
+  // keeps the buffer edge, and adopt leaves an unchanged direction's cursor.
   useEffect(() => {
     setEvictionMode(readDirection === 'forward' ? 'keepOldest' : 'keepNewest');
-    adoptAnchorDirection(readDirection);
     setCacheRangeMinutes(bufferRangeMinutes);
-  }, [readDirection, bufferRangeMinutes, setEvictionMode, adoptAnchorDirection, setCacheRangeMinutes]);
+    if (monitorView.anchorTs == null) adoptAnchorDirection(readDirection);
+  }, [readDirection, bufferRangeMinutes, monitorView.anchorTs, setEvictionMode, adoptAnchorDirection, setCacheRangeMinutes]);
 
   // ── Persist workspace (#211) ────────────────────────────────────────────────
   // What the address bar currently says, in normalised form, and how the next
@@ -619,6 +658,9 @@ function App() {
       plot: selectedVisualizationTargets,
       lastSeenAddresses,
       lastSeenMode,
+      readDirection,
+      anchorTs: monitorView.anchorTs,
+      rangeMinutes: bufferRangeMinutes,
     };
     const handle = setTimeout(() => {
       if (isEmbedded()) {
@@ -639,7 +681,7 @@ function App() {
       applyWorkspaceUrl(workspace, first || layoutOnly ? 'replace' : 'push');
     }, 500);
     return () => clearTimeout(handle);
-  }, [initialView, activeTab, workspaceView, isFilterOpen, activeFilters, selectedVisualizationTargets, lastSeenAddresses, lastSeenMode]);
+  }, [initialView, activeTab, workspaceView, isFilterOpen, activeFilters, selectedVisualizationTargets, lastSeenAddresses, lastSeenMode, readDirection, monitorView.anchorTs, bufferRangeMinutes]);
 
   // ── Browser Back / Forward ───────────────────────────────────────────
   // The address bar is the source of truth for the entry navigated to: parse
@@ -662,6 +704,29 @@ function App() {
       setLastSeenMode(ws.lastSeenMode);
       // An overlay left open would hide the workspace just navigated to.
       setIsSettingsOpen(false);
+      const cur = monitorWindowRef.current;
+      const sameWindow = cur != null
+        && cur.direction === ws.readDirection
+        && cur.anchorTs === ws.anchorTs
+        && cur.rangeMinutes === ws.rangeMinutes;
+      setMonitorView(prev => (
+        prev.direction === ws.readDirection && prev.anchorTs === ws.anchorTs
+          ? prev
+          : { ...prev, direction: ws.readDirection, anchorTs: ws.anchorTs }
+      ));
+      setBufferRangeMinutes(ws.rangeMinutes);
+      if (sameWindow) return;
+      // Back/Forward restores the window the URL names. Follow and pause stay.
+      const act = monitorActionsRef.current;
+      if (act == null) return;
+      act.setEvictionMode(ws.readDirection === 'forward' ? 'keepOldest' : 'keepNewest');
+      act.syncSort(ws.readDirection);
+      if (ws.anchorTs == null) {
+        act.adoptAnchorDirection(ws.readDirection);
+        return;
+      }
+      act.setBufferAnchor({ direction: ws.readDirection, ts: ws.anchorTs });
+      void act.fillAnchor(ws.readDirection, ws.anchorTs, ws.rangeMinutes);
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -697,17 +762,13 @@ function App() {
     if (bufferEmpty) return;
     const next = pauseModeForToggle(pauseMode);
     if (pauseMode === 'manual' && next === 'auto') {
-      setListFollow(false);
-      setPauseMode('auto');
+      setMonitorView(v => ({ ...v, follow: false, pauseMode: 'auto' }));
       return;
     }
-    setPauseMode(next);
+    setMonitorView(v => ({ ...v, pauseMode: next, follow: next === 'auto' ? false : v.follow }));
     // Sync cache in the same turn so the pill does not see isPaused flip
     // before publish/pausedCount update.
     setCachePaused(cachePausedForMode(next));
-    // Auto-pause implies not live-following; otherwise pauseModeForListFollow
-    // would immediately promote auto → playing while follow is still on.
-    if (next === 'auto') setListFollow(false);
   };
 
   // Status icon: Play=running, Pause=frozen; color separates auto vs manual.
@@ -722,7 +783,7 @@ function App() {
 
   const flushPauseBuffer = useCallback(() => {
     if (pauseMode !== 'auto') return;
-    setPauseMode('playing');
+    setMonitorView(v => ({ ...v, pauseMode: 'playing' }));
     setCachePaused(false);
   }, [pauseMode, setCachePaused]);
 
@@ -734,7 +795,7 @@ function App() {
     if (pauseMode === 'playing') return;
     const remaining = revealPaused(n);
     if (pauseMode === 'auto' && remaining <= 0) {
-      setPauseMode('playing');
+      setMonitorView(v => ({ ...v, pauseMode: 'playing' }));
       setCachePaused(false);
     }
   }, [pauseMode, revealPaused, setCachePaused]);
@@ -742,16 +803,18 @@ function App() {
   // Newer-pill resume. The table only calls this for auto-pause and for a
   // Ctrl-click during manual pause; a plain click stays latched.
   const jumpToLiveResume = useCallback(() => {
-    setPauseMode('playing');
+    setMonitorView(v => ({ ...v, pauseMode: 'playing', follow: true }));
     setCachePaused(false);
-    setListFollow(true);
   }, [setCachePaused]);
 
   // Couple list live-follow to pause mode in the same turn as follow changes
   // (table scroll unfollow, chart jump, etc.) — avoid syncing via an effect.
   const handleListFollowChange = useCallback((follow: boolean) => {
-    setListFollow(follow);
-    setPauseMode(prev => pauseModeForListFollow(prev, follow));
+    setMonitorView(prev => ({
+      ...prev,
+      follow,
+      pauseMode: pauseModeForListFollow(prev.pauseMode, follow),
+    }));
   }, []);
 
   useEffect(() => {
@@ -804,7 +867,6 @@ function App() {
           patterns: quickPatterns,
           columnEnabled: quickColumnEnabled,
         },
-        listFollow,
         listAnchorKey,
         infoBarOpen,
         zoomRange,
@@ -828,7 +890,6 @@ function App() {
     quickFilterEnabled,
     quickPatterns,
     quickColumnEnabled,
-    listFollow,
     listAnchorKey,
     infoBarOpen,
     zoomRange,
@@ -1121,11 +1182,9 @@ function App() {
   const showFilterPane = activePanel === 'list' && isFilterOpen;
 
   const syncSortToReadDirection = useCallback((dir: 'forward' | 'backward') => {
-    const want: 'asc' | 'desc' = dir === 'forward' ? 'asc' : 'desc';
     setSortConfig(prev => {
-      const ts = prev.find(l => l.key === 'timestamp');
-      if (ts?.direction === want && prev[0]?.key === 'timestamp') return prev;
-      const next: SortConfig = [{ key: 'timestamp', direction: want }];
+      const next = sortConfigForReadDirection(prev, dir);
+      if (!next) return prev;
       writeSortConfigPref(next);
       return next;
     });
@@ -1134,36 +1193,85 @@ function App() {
   /**
    * Trim to the anchor window, then fill its gaps from the anchor outward.
    * Matching rows stay. IndexedDB is read before the database, and only new
-   * rows spend the shared load budget.
+   * rows spend the shared load budget. `rangeMinutes` overrides the state
+   * value when Back/Forward restores a window before React has committed it.
    */
   const fillAnchorWindow = useCallback(async (
     dir: 'forward' | 'backward',
     anchorTs: number,
+    rangeMinutes: number = bufferRangeMinutes,
   ) => {
-    enforceTimeWindow(dir, bufferRangeMinutes);
+    enforceTimeWindow(dir, rangeMinutes);
     if (dir === 'forward') {
       await fillForwardFrom(anchorTs);
       return;
     }
-    await loadRange(anchorTs - bufferRangeMinutes * 60_000, anchorTs);
+    await loadRange(anchorTs - rangeMinutes * 60_000, anchorTs);
   }, [bufferRangeMinutes, enforceTimeWindow, fillForwardFrom, loadRange]);
 
   /**
    * Switch the fill/eviction axis without wiping the buffer. `after` runs once
    * the anchor direction has been adopted (timestamp cleared when it changed).
+   * Sort follows the direction.
    */
   const changeReadDirection = useCallback(async (
     dir: 'forward' | 'backward',
     after?: () => Promise<void>,
   ) => {
     if (readDirection !== dir) {
-      setReadDirection(dir);
+      setMonitorView(v => ({ ...v, direction: dir, anchorTs: null }));
       setEvictionMode(dir === 'forward' ? 'keepOldest' : 'keepNewest');
       adoptAnchorDirection(dir);
       syncSortToReadDirection(dir);
     }
     await after?.();
   }, [readDirection, setEvictionMode, adoptAnchorDirection, syncSortToReadDirection]);
+
+  /** User-chosen anchor. The view is the source; the cache trims from it. */
+  const placeAnchor = useCallback((dir: 'forward' | 'backward', ts: number) => {
+    setMonitorView(v => ({ ...v, direction: dir, anchorTs: ts }));
+    setBufferAnchor({ direction: dir, ts });
+  }, [setBufferAnchor]);
+
+  useEffect(() => {
+    monitorWindowRef.current = {
+      direction: readDirection,
+      anchorTs: monitorView.anchorTs,
+      rangeMinutes: bufferRangeMinutes,
+    };
+    monitorActionsRef.current = {
+      syncSort: syncSortToReadDirection,
+      fillAnchor: fillAnchorWindow,
+      adoptAnchorDirection,
+      setBufferAnchor,
+      setEvictionMode,
+    };
+  }, [
+    readDirection,
+    monitorView.anchorTs,
+    bufferRangeMinutes,
+    syncSortToReadDirection,
+    fillAnchorWindow,
+    adoptAnchorDirection,
+    setBufferAnchor,
+    setEvictionMode,
+  ]);
+
+  // Direction owns the timestamp sort, including the direction restored at
+  // startup. An explicit anchor loads through the same window fill as a
+  // rewind; no anchor keeps today's newest-first startup. Forward restored
+  // together with pauseMode 'playing' is left as-is (Live is backward-only;
+  // the pill still offers Play until that is disabled).
+  const startupAnchorOnce = useRef(false);
+  useEffect(() => {
+    if (startupAnchorOnce.current) return;
+    startupAnchorOnce.current = true;
+    const derived = deriveMonitorView(initialMonitor.view);
+    syncSortToReadDirection(derived.readDirection);
+    if (derived.bufferAnchor.ts == null) return;
+    setBufferAnchor(derived.bufferAnchor);
+    void fillAnchorWindow(derived.readDirection, derived.bufferAnchor.ts, initialMonitor.rangeMinutes);
+  }, [initialMonitor, syncSortToReadDirection, setBufferAnchor, fillAnchorWindow]);
 
   /** Apply a new minute window: trim when shrinking, fill gaps when expanding. */
   const applyBufferRange = useCallback(async (nextMinutes: number) => {
@@ -1272,11 +1380,13 @@ function App() {
                   totalCount={liveTelegrams.length}
                   filterActive={activeFilterCount > 0}
                   onClear={({ pauseAuto }) => {
-                    setListFollow(false);
-                    if (pauseAuto) {
-                      setPauseMode('auto');
-                      setCachePaused(true);
-                    }
+                    setMonitorView(v => ({
+                      ...v,
+                      follow: false,
+                      pauseMode: pauseAuto ? 'auto' : v.pauseMode,
+                      anchorTs: null,
+                    }));
+                    if (pauseAuto) setCachePaused(true);
                     // Real wipe. clear() also drops the anchor timestamp.
                     void clearTelegrams();
                   }}
@@ -1294,13 +1404,13 @@ function App() {
                   historyLoadError={historyLoadError}
                   onOldestCommit={ms => {
                     void changeReadDirection('forward', async () => {
-                      setBufferAnchor({ direction: 'forward', ts: ms });
+                      placeAnchor('forward', ms);
                       await fillAnchorWindow('forward', ms);
                     });
                   }}
                   onNewestCommit={ms => {
                     void changeReadDirection('backward', async () => {
-                      setBufferAnchor({ direction: 'backward', ts: ms });
+                      placeAnchor('backward', ms);
                       await fillAnchorWindow('backward', ms);
                     });
                   }}
@@ -1315,7 +1425,7 @@ function App() {
                         const ms = new Date(raw).getTime();
                         if (Number.isNaN(ms)) return;
                         await changeReadDirection('forward', async () => {
-                          setBufferAnchor({ direction: 'forward', ts: ms });
+                          placeAnchor('forward', ms);
                           await fillAnchorWindow('forward', ms);
                         });
                         handleListFollowChange(false);
@@ -1338,7 +1448,7 @@ function App() {
                         const ms = new Date(raw).getTime();
                         if (Number.isNaN(ms)) return;
                         await changeReadDirection('backward', async () => {
-                          setBufferAnchor({ direction: 'backward', ts: ms });
+                          placeAnchor('backward', ms);
                           await fillAnchorWindow('backward', ms);
                         });
                         handleListFollowChange(false);
@@ -1868,11 +1978,14 @@ function App() {
                     bufferOldestMs={bufferOldestTs}
                     bufferNewestMs={bufferNewestTs}
                     onGotoMergeNewer={() => {
-                      setListFollow(false);
+                      setMonitorView(v => ({
+                        ...v,
+                        follow: false,
+                        pauseMode: v.pauseMode === 'playing' ? 'auto' : v.pauseMode,
+                      }));
                       if (pauseMode === 'playing') {
                         // Latch auto-pause so subsequent live rows buffer, then
                         // merge whatever is already waiting toward newer.
-                        setPauseMode('auto');
                         setCachePaused(true);
                       }
                       // Reveal the entire pause backlog into the published list.
@@ -1880,13 +1993,13 @@ function App() {
                     }}
                     onGotoFillOlder={async ms => {
                       await changeReadDirection('forward', async () => {
-                        setBufferAnchor({ direction: 'forward', ts: ms });
+                        placeAnchor('forward', ms);
                         await fillAnchorWindow('forward', ms);
                       });
                     }}
                     onGotoFillNewer={async ms => {
                       await changeReadDirection('backward', async () => {
-                        setBufferAnchor({ direction: 'backward', ts: ms });
+                        placeAnchor('backward', ms);
                         await fillAnchorWindow('backward', ms);
                       });
                     }}

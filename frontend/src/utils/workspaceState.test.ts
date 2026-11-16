@@ -32,6 +32,9 @@ const sampleWorkspace = (): WorkspaceState => ({
   plot: ['0/1/2'],
   lastSeenAddresses: ['0/1/2'],
   lastSeenMode: 'pa',
+  readDirection: 'backward',
+  anchorTs: null,
+  rangeMinutes: 60,
 });
 
 beforeEach(() => {
@@ -91,6 +94,46 @@ describe('monitor URL encoding', () => {
     const search = buildMonitorSearch(ws);
     expect(search).toContain('view=monitor');
     expect(parseMonitorSearch('?' + search)).toEqual(ws);
+  });
+
+  it('encodes read direction, anchor and range only when they differ from the defaults', () => {
+    expect(buildMonitorSearch(DEFAULT_WORKSPACE)).toBe('');
+
+    const search = buildMonitorSearch({
+      ...DEFAULT_WORKSPACE,
+      readDirection: 'forward',
+      anchorTs: 1_700_000_000_000,
+      rangeMinutes: 15,
+    });
+    const p = new URLSearchParams(search);
+    expect(p.get('view')).toBe('monitor');
+    expect(p.get('rd')).toBe('forward');
+    expect(p.get('anchor')).toBe('1700000000000');
+    expect(p.get('range')).toBe('15');
+    expect(parseMonitorSearch('?' + search)).toMatchObject({
+      readDirection: 'forward',
+      anchorTs: 1_700_000_000_000,
+      rangeMinutes: 15,
+    });
+  });
+
+  it('round-trips anchor 0 and drops hostile direction, anchor and range', () => {
+    const zero = buildMonitorSearch({ ...DEFAULT_WORKSPACE, anchorTs: 0 });
+    expect(new URLSearchParams(zero).get('anchor')).toBe('0');
+    expect(parseMonitorSearch(zero)?.anchorTs).toBe(0);
+
+    const hostile = parseMonitorSearch('?view=monitor&rd=sideways&anchor=nope&range=-4');
+    expect(hostile).toMatchObject({
+      readDirection: 'backward',
+      anchorTs: null,
+      rangeMinutes: 60,
+    });
+    expect(parseMonitorSearch('?view=monitor&range=15.9')?.rangeMinutes).toBe(15);
+  });
+
+  it('does not treat a direction change as layout', () => {
+    const forward = buildMonitorSearch({ ...DEFAULT_WORKSPACE, readDirection: 'forward' });
+    expect(sameWorkspaceApartFromLayout(forward, '')).toBe(false);
   });
 
   it('encodes only non-default fields', () => {
