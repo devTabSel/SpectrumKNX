@@ -198,7 +198,11 @@ export const GaValuesTable: React.FC<GaValuesTableProps> = ({
                     <TelegramWhenJump
                       timestamp={t.timestamp}
                       eventType={telegramEventType(t)}
-                      onJump={onGotoTelegram ? () => onGotoTelegram(t) : undefined}
+                      onJump={onGotoTelegram ? mods => {
+                        if (mods && (mods.load || mods.additive || mods.range)) {
+                          (onGotoTelegram as (telegram: Telegram, m: typeof mods) => void)(t, mods);
+                        } else onGotoTelegram(t);
+                      } : undefined}
                     />
                   ) : null}
                 </td>

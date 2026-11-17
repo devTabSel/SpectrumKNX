@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { TelegramTable, type SortConfig, type SortKey } from './TelegramTable';
+import { GotoBufferProvider } from './GotoBufferContext';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from '../utils/sortConfig';
 import { expandWithDeltaContext } from '../utils/deltaContextExpansion';
 import { activeQuickFilter, type QuickPatterns } from '../utils/quickFilter';
@@ -68,6 +69,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   const [markedKeys, setMarkedKeys] = useState<string[]>([]);
   const [mouseSelectedKeys, setMouseSelectedKeys] = useState<string[]>([]);
   const [lastSelectedKey, setLastSelectedKey] = useState<string | null>(null);
+  const [jumpTargetKeys, setJumpTargetKeys] = useState<string[]>([]);
   // Quick filter bar state, lifted so its matches anchor the context (#520).
   const [quickFilterOpen, setQuickFilterOpen] = useState(false);
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(false);
@@ -190,6 +192,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     };
     const pinned = new Set(markedKeys);
     for (const key of mouseSelectedKeys) pinned.add(key);
+    for (const key of jumpTargetKeys) pinned.add(key);
     if (lastSelectedKey) pinned.add(lastSelectedKey);
     return expandWithDeltaContext(
       sortedTelegrams, matches, anchorKey, sideFlags, before, after, {
@@ -199,10 +202,21 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     );
   }, [
     sortedTelegrams, activeFilters, effectiveFilters, filtering, flaggedBeforeKeys, flaggedAfterKeys,
-    markedKeys, mouseSelectedKeys, lastSelectedKey,
+    markedKeys, mouseSelectedKeys, lastSelectedKey, jumpTargetKeys,
     quickFilterOpen, quickFilterEnabled, quickPatterns,
   ]);
   const filteredSortedTelegrams = deltaExpandedHistory.items;
+  const loadedSpan = useMemo(() => {
+    let oldest: number | null = null;
+    let newest: number | null = null;
+    for (const t of telegrams) {
+      const ms = Date.parse(t.timestamp);
+      if (!Number.isFinite(ms)) continue;
+      if (oldest == null || ms < oldest) oldest = ms;
+      if (newest == null || ms > newest) newest = ms;
+    }
+    return { oldest, newest };
+  }, [telegrams]);
   // Keys of rows shown only as unfiltered context around a match/flag (#343).
   const contextTelegramKeys = deltaExpandedHistory.contextKeys;
   const contextTelegramParents = deltaExpandedHistory.contextParents;
@@ -390,8 +404,22 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               </button>
             </div>
           ) : (
+            <GotoBufferProvider
+              scope="history"
+              oldestMs={loadedSpan.oldest}
+              newestMs={loadedSpan.newest}
+            >
             <TelegramTable
               telegrams={filteredSortedTelegrams}
+              gotoScope="history"
+              bufferOldestMs={loadedSpan.oldest}
+              bufferNewestMs={loadedSpan.newest}
+              jumpTargetKeys={jumpTargetKeys}
+              onJumpTarget={(key, mode) => {
+                setJumpTargetKeys(prev => (
+                  mode === 'add' ? (prev.includes(key) ? prev : [...prev, key]) : [key]
+                ));
+              }}
               forceIncludeFrom={sortedTelegrams}
               visibleColumns={visibleColumns}
               sortConfig={sortConfig}
@@ -421,6 +449,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               contextParents={contextTelegramParents}
               viewChangeToken={viewChangeToken}
             />
+            </GotoBufferProvider>
           )}
         </div>
       </div>

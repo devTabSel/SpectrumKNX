@@ -4,6 +4,13 @@ import { Clock } from 'lucide-react';
 
 import type { Telegram } from '../hooks/useWebSocket';
 import { EventTypeLabel } from './EventTypeLabel';
+import {
+  MISSING_GOTO_TITLE,
+  OUTSIDE_GOTO_TITLE,
+  gotoIconTone,
+  useGotoBuffer,
+  type GotoIconTone,
+} from '../utils/gotoBuffer';
 
 /** Shared event timestamp shape used by send panel, popover, and building views. */
 // eslint-disable-next-line react-refresh/only-export-components -- shared timestamp helper
@@ -23,8 +30,12 @@ export function telegramEventType(telegram: Pick<Telegram, 'simplified_type' | '
   return raw;
 }
 
-/** Ctrl/Cmd adds to the selection; Shift ranges from the last selected row. */
-export type TelegramJumpMods = { additive?: boolean; range?: boolean };
+/**
+ * Ctrl/Cmd adds to the jump targets when the row is in the buffer, and is
+ * the load gesture when it is outside. Shift ranges from the last selected row.
+ * `load` is set only for an outside Ctrl-click.
+ */
+export type TelegramJumpMods = { additive?: boolean; range?: boolean; load?: boolean };
 
 interface Props {
   /** ISO timestamp or Date of the bus event. */
@@ -36,6 +47,11 @@ interface Props {
   /** When set, render the jump button immediately right of the timestamp.
    *  Ctrl/Cmd and Shift are forwarded as selection modifiers. */
   onJump?: (mods?: TelegramJumpMods) => void;
+  /**
+   * Overrides the buffer-span tone. History uses `missing` when the target
+   * telegram is not in the loaded set.
+   */
+  tone?: GotoIconTone;
   /** aria-label / title for the jump button. */
   jumpLabel?: string;
   /** Reserve the usual row height with no content (empty send-panel cells). */
@@ -55,12 +71,14 @@ export function TelegramWhenJump({
   eventType,
   readAnswered = false,
   onJump,
+  tone: toneProp,
   jumpLabel = 'Go to telegram',
   empty = false,
   reserveJump = false,
   className,
   style,
 }: Props) {
+  const buf = useGotoBuffer();
   if (empty) {
     return <span aria-hidden className={className} style={{ display: 'inline-block', height: 18, ...style }} />;
   }
@@ -71,19 +89,37 @@ export function TelegramWhenJump({
     return <span aria-hidden className={className} style={{ display: 'inline-block', height: 18, ...style }} />;
   }
 
+  const targetMs = timestamp == null || timestamp === ''
+    ? null
+    : new Date(timestamp instanceof Date ? timestamp : timestamp).getTime();
+  const tone = toneProp ?? gotoIconTone(Number.isFinite(targetMs) ? targetMs : null, buf);
+  const missing = tone === 'missing';
+  const outside = tone === 'outside';
+  const label = missing ? MISSING_GOTO_TITLE : outside ? OUTSIDE_GOTO_TITLE : jumpLabel;
   const jump = onJump ? (
     <button
       type="button"
-      className="quick-filter-bar-toggle"
-      title={jumpLabel}
-      aria-label={jumpLabel}
+      className={`quick-filter-bar-toggle${outside ? ' tt-goto-outside' : ''}${missing ? ' tt-goto-missing' : ''}`}
+      title={label}
+      aria-label={label}
       onClick={e => {
-        const additive = e.ctrlKey || e.metaKey;
+        if (missing) return;
+        const ctrl = e.ctrlKey || e.metaKey;
+        if (outside) {
+          if (!ctrl) return;
+          onJump({ load: true });
+          return;
+        }
+        const additive = ctrl;
         const range = e.shiftKey;
         if (additive || range) onJump({ additive, range });
         else onJump();
       }}
-      style={{ flexShrink: 0, margin: 0 }}
+      style={{
+        flexShrink: 0,
+        margin: 0,
+        color: outside || missing ? 'var(--warning-text)' : undefined,
+      }}
     >
       <Clock size={13} />
     </button>
@@ -93,7 +129,7 @@ export function TelegramWhenJump({
 
   return (
     <span
-      className={className}
+      className={['tt-when-jump', className].filter(Boolean).join(' ')}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -115,6 +151,15 @@ export function TelegramWhenJump({
       )}
       {typeLabel ? (
         <EventTypeLabel kind={typeLabel} answered={readAnswered} style={{ flexShrink: 0 }} />
+      ) : null}
+      {missing || outside ? (
+        <style>{`
+          .tt-goto-missing { opacity: 0; }
+          .log-row:hover .tt-goto-missing,
+          .tt-when-jump:hover .tt-goto-missing { opacity: 1; }
+          .quick-filter-bar-toggle.tt-goto-outside:hover,
+          .quick-filter-bar-toggle.tt-goto-missing:hover { color: var(--warning-text); }
+        `}</style>
       ) : null}
     </span>
   );

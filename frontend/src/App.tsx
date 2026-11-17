@@ -37,6 +37,8 @@ import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTeleg
 import { pinnedVisibleKeys } from './utils/selectVisibleTelegrams';
 import { activeQuickFilter } from './utils/quickFilter';
 import { backlogStatusCount, bufferBacklogCounts, statusViewRowCount } from './utils/telegramDisplay';
+import { classifyGotoTarget, enterForward, gotoWindow, nextJumpTargets, parkOnFixedY } from './utils/gotoTarget';
+import { GotoBufferProvider } from './components/GotoBufferContext';
 import { LayoutDashboard, History, Settings, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
 import { getLabel, getFileName } from './utils/labels';
@@ -426,6 +428,8 @@ function App() {
     adoptAnchorDirection,
     setBufferRangeMinutes: setCacheRangeMinutes,
     enforceTimeWindow,
+    retainPausedInWindow,
+    publishBuffer,
     covered: coveredIntervals,
     readingEnd,
   } = useTelegramCache(
@@ -865,6 +869,9 @@ function App() {
   // it when that exact telegram is in the buffer.
   const listGotoSeq = useRef(0);
   const [listGoto, setListGoto] = useState<ListGotoRequest | null>(null);
+  /** Rows a goto landed on. Force-visible, not marks and not context flags. */
+  const [jumpTargetKeys, setJumpTargetKeys] = useState<string[]>([]);
+  const loadOutsideGotoRef = useRef<(ms: number) => Promise<void>>(async () => {});
 
   // ── Per-message Time-Delta-Context flags ────────────────────────────────────
   // Same lifting rationale as marks. A side flag anchors that side's
@@ -988,21 +995,36 @@ function App() {
   // Last value in a write row: open the telegram list on that telegram.
   // Ctrl/Cmd and Shift are the same selection modifiers as a row click.
   // The table selects it once the row is visible, and only if it is in the buffer.
-  const handleGotoTelegram = useCallback((telegram: Telegram, mods?: { additive?: boolean; range?: boolean }) => {
-    handleListFollowChange(false);
+  const handleGotoTelegram = useCallback((telegram: Telegram, mods?: { additive?: boolean; range?: boolean; load?: boolean }) => {
     // Drop a restored anchor so mounting the list does not pin a different row
     // after this jump. The table captures a new anchor once it has centered.
     setListAnchorKey(null);
     setIsDatabaseOpen(false);
     setActivePanel('list');
+    const ms = new Date(telegram.timestamp).getTime();
+    if (mods?.load && Number.isFinite(ms)) {
+      void (async () => {
+        await loadOutsideGotoRef.current(ms);
+        listGotoSeq.current += 1;
+        setListGoto({
+          id: listGotoSeq.current,
+          telegram,
+          allowFill: false,
+        });
+      })();
+      return;
+    }
+    // In the buffer: scroll only. Direction, anchor and pause stay.
     listGotoSeq.current += 1;
     setListGoto({
       id: listGotoSeq.current,
       telegram,
       additive: mods?.additive,
       range: mods?.range,
+      preserveFollow: true,
+      allowFill: false,
     });
-  }, [handleListFollowChange]);
+  }, []);
 
   const handleAltSend = useCallback(() => {
     setIsSendOpen(o => {
@@ -1174,10 +1196,11 @@ function App() {
     markedKeys: telegramMarkedKeys,
     mouseSelectedKeys: telegramMouseSelectedKeys,
     lastSelectedKey: lastSelectedTelegramKey,
+    jumpTargetKeys,
   }), [
     appliedFilters, filtersEnabled, quickFilterOpen, quickFilterEnabled, quickPatterns, quickColumnEnabled,
     flaggedBeforeKeys, flaggedAfterKeys, telegramMarkedKeys, telegramMouseSelectedKeys,
-    lastSelectedTelegramKey,
+    lastSelectedTelegramKey, jumpTargetKeys,
   ]);
 
   // Side-panel view of the same rows. Quick-filter fields stay off so a
@@ -1194,10 +1217,11 @@ function App() {
     markedKeys: telegramMarkedKeys,
     mouseSelectedKeys: telegramMouseSelectedKeys,
     lastSelectedKey: lastSelectedTelegramKey,
+    jumpTargetKeys,
   }), [
     appliedFilters, filtersEnabled,
     flaggedBeforeKeys, flaggedAfterKeys, telegramMarkedKeys,
-    telegramMouseSelectedKeys, lastSelectedTelegramKey,
+    telegramMouseSelectedKeys, lastSelectedTelegramKey, jumpTargetKeys,
   ]);
 
   // Orange quick-filter bar: the bar is open, the filter is enabled, and at
@@ -1307,14 +1331,14 @@ function App() {
     // Forward has nothing to restore. Latch auto only after `after` publishes
     // the window — pausing first would hide that fill.
     const parkAuto = switched && dir === 'backward' && (edge || pauseMode === 'off');
+    setMonitorView(v => {
+      const dirChanged = v.direction !== dir;
+      let next: MonitorView = dirChanged ? { ...v, direction: dir, anchorTs: null } : v;
+      if (dir === 'forward') next = enterForward({ ...next, direction: 'forward' });
+      else if (parkAuto && dirChanged) next = { ...next, pauseMode: 'off', follow: false };
+      return next;
+    });
     if (switched) {
-      setMonitorView(v => {
-        let next: MonitorView = { ...v, direction: dir, anchorTs: null };
-        if ((edge && dir === 'forward') || parkAuto) {
-          next = { ...next, pauseMode: 'off', follow: false };
-        }
-        return next;
-      });
       setEvictionMode(dir === 'forward' ? 'keepOldest' : 'keepNewest');
       adoptAnchorDirection(dir);
     }
@@ -1333,6 +1357,48 @@ function App() {
     setMonitorView(v => ({ ...v, direction: dir, anchorTs: ts }));
     setBufferAnchor({ direction: dir, ts });
   }, [setBufferAnchor]);
+
+  /**
+   * Target outside the buffer. Older → forward, x = target. Newer → backward,
+   * y = target (fixed; it does not slide). A direction change rebuilds;
+   * staying on the same axis only moves the anchor and fills gaps. Going
+   * forward clears live in memory. A fixed y turns live off. The pause
+   * backlog keeps only rows that fit the new window.
+   */
+  const loadOutsideGoto = useCallback(async (targetMs: number) => {
+    const place = classifyGotoTarget(targetMs, bufferOldestTs, bufferNewestTs);
+    const dir: 'forward' | 'backward' = place === 'newer' ? 'backward' : 'forward';
+    const windowPlace = dir === 'forward' ? 'older' as const : 'newer' as const;
+    const win = gotoWindow(windowPlace, targetMs, bufferRangeMinutes);
+    retainPausedInWindow(win.min, win.max);
+    if (readDirection !== dir) {
+      await changeReadDirection(dir, async () => {
+        placeAnchor(dir, targetMs);
+        await fillAnchorWindow(dir, targetMs);
+      });
+    } else {
+      if (dir === 'forward') {
+        setMonitorView(v => enterForward({ ...v, direction: 'forward' }));
+      }
+      placeAnchor(dir, targetMs);
+      await fillAnchorWindow(dir, targetMs);
+    }
+    if (dir === 'forward') {
+      setMonitorView(v => enterForward({ ...v, direction: 'forward', anchorTs: targetMs }));
+    } else {
+      setMonitorView(v => parkOnFixedY(v, targetMs));
+      setBufferAnchor({ direction: 'backward', ts: targetMs });
+    }
+    publishBuffer();
+  }, [
+    bufferOldestTs, bufferNewestTs, bufferRangeMinutes, readDirection,
+    retainPausedInWindow, changeReadDirection, placeAnchor, fillAnchorWindow,
+    setBufferAnchor, publishBuffer,
+  ]);
+
+  useEffect(() => {
+    loadOutsideGotoRef.current = loadOutsideGoto;
+  }, [loadOutsideGoto]);
 
   useEffect(() => {
     monitorWindowRef.current = {
@@ -1410,6 +1476,7 @@ function App() {
   }
 
   return (
+    <GotoBufferProvider scope="live" oldestMs={bufferOldestTs} newestMs={bufferNewestTs}>
     <DptCatalogProvider value={filterOptions.dpts}>
     <GaReadPhaseProvider rows={ingestedTelegrams}>
     <div className="container dashboard-grid" style={{ padding: '1.5rem', gap: '1.5rem' }}>
@@ -1501,17 +1568,27 @@ function App() {
                   isHistoryLoading={isHistoryLoading}
                   fixedAnchor={readDirection === 'backward' && monitorView.anchorTs != null}
                   historyLoadError={historyLoadError}
-                  onOldestCommit={ms => {
-                    void changeReadDirection('forward', async () => {
-                      placeAnchor('forward', ms);
-                      await fillAnchorWindow('forward', ms);
+                  onScrollToTime={ms => {
+                    listGotoSeq.current += 1;
+                    setListGoto({
+                      id: listGotoSeq.current,
+                      targetMs: ms,
+                      preserveFollow: true,
+                      allowFill: false,
                     });
+                    setActivePanel('list');
                   }}
-                  onNewestCommit={ms => {
-                    void changeReadDirection('backward', async () => {
-                      placeAnchor('backward', ms);
-                      await fillAnchorWindow('backward', ms);
-                    });
+                  onCommitOutside={ms => {
+                    void (async () => {
+                      await loadOutsideGoto(ms);
+                      listGotoSeq.current += 1;
+                      setListGoto({
+                        id: listGotoSeq.current,
+                        targetMs: ms,
+                        allowFill: false,
+                      });
+                      setActivePanel('list');
+                    })();
                   }}
                   onLoadFromDbOldest={() => {
                     void (async () => {
@@ -1527,7 +1604,7 @@ function App() {
                           placeAnchor('forward', ms);
                           await fillAnchorWindow('forward', ms);
                         });
-                        handleListFollowChange(false);
+                        setMonitorView(v => enterForward({ ...v, direction: 'forward', anchorTs: ms }));
                         setActivePanel('list');
                         listGotoSeq.current += 1;
                         setListGoto({ id: listGotoSeq.current, targetMs: ms });
@@ -2111,32 +2188,11 @@ function App() {
                     onJumpToLive={jumpToLiveResume}
                     bufferOldestMs={bufferOldestTs}
                     bufferNewestMs={bufferNewestTs}
-                    onGotoMergeNewer={() => {
-                      setMonitorView(v => ({
-                        ...v,
-                        follow: false,
-                        pauseMode: v.pauseMode === 'playing' ? 'auto' : v.pauseMode,
-                      }));
-                      if (pauseMode === 'playing') {
-                        // Latch auto-pause so subsequent live rows buffer, then
-                        // merge whatever is already waiting toward newer.
-                        // Forward ignores the latch: the snapshot stays live.
-                        applyCachePause(true);
-                      }
-                      // Reveal the entire pause backlog into the published list.
-                      revealPaused(Number.MAX_SAFE_INTEGER);
-                    }}
                     onGotoFillOlder={async ms => {
-                      await changeReadDirection('forward', async () => {
-                        placeAnchor('forward', ms);
-                        await fillAnchorWindow('forward', ms);
-                      });
+                      await loadOutsideGoto(ms);
                     }}
                     onGotoFillNewer={async ms => {
-                      await changeReadDirection('backward', async () => {
-                        placeAnchor('backward', ms);
-                        await fillAnchorWindow('backward', ms);
-                      });
+                      await loadOutsideGoto(ms);
                     }}
                     listAnchorKey={listAnchorKey}
                     onListAnchorKeyChange={setListAnchorKey}
@@ -2155,6 +2211,10 @@ function App() {
                     onFlaggedBeforeKeysChange={setFlaggedBeforeKeys}
                     flaggedAfterKeys={flaggedAfterKeys}
                     onFlaggedAfterKeysChange={setFlaggedAfterKeys}
+                    jumpTargetKeys={jumpTargetKeys}
+                    onJumpTarget={(key, mode) => {
+                      setJumpTargetKeys(prev => nextJumpTargets(prev, key, mode === 'add'));
+                    }}
                     contextKeys={contextTelegramKeys}
                     contextParents={contextTelegramParents}
                     infoBarOpen={infoBarOpen}
@@ -2260,6 +2320,7 @@ function App() {
     </div>
     </GaReadPhaseProvider>
     </DptCatalogProvider>
+    </GotoBufferProvider>
   );
 }
 

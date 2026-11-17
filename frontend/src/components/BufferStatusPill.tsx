@@ -15,6 +15,7 @@ import {
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 import { SecondsField } from './SecondsField';
 import { READING_END_LABEL, type ReadingEndCause } from '../utils/telegramDisplay';
+import { classifyGotoTarget } from '../utils/gotoTarget';
 
 const INPUT_FMT = "yyyy-MM-dd'T'HH:mm:ss";
 /** Local datetime-with-seconds display width (YYYY-MM-DDTHH:mm:ss). */
@@ -107,8 +108,14 @@ export interface BufferStatusPillProps {
    */
   fixedAnchor?: boolean;
   historyLoadError: string | null;
-  onOldestCommit: (ms: number) => void;
-  onNewestCommit: (ms: number) => void;
+  /** Target is inside the buffer: scroll only. Direction and pause stay. */
+  onScrollToTime: (ms: number) => void;
+  /**
+   * Typed Enter/Blur, or a Ctrl-click on the goto icon, when the time is
+   * outside the buffer. The parent loads forward from an older target and
+   * backward from a newer one.
+   */
+  onCommitOutside: (ms: number) => void;
   /** Load the buffer forward starting at the oldest telegram in the DB. */
   onLoadFromDbOldest: () => void;
   /** Load the buffer covering up to the newest telegram in the DB. */
@@ -179,8 +186,8 @@ export function BufferStatusPill({
   isHistoryLoading,
   fixedAnchor = false,
   historyLoadError,
-  onOldestCommit,
-  onNewestCommit,
+  onScrollToTime,
+  onCommitOutside,
   onLoadFromDbOldest,
   onLoadFromDbNewest,
 }: BufferStatusPillProps) {
@@ -233,41 +240,52 @@ export function BufferStatusPill({
       ? `${READING_END_LABEL[readingEnd]}. ${clearLabel}`
       : clearLabel;
 
-  const commitOldest = (raw: string) => {
+  const OUTSIDE_GOTO_TITLE = 'Ctrl-Klick lädt nach';
+
+  const applyTime = (raw: string, via: 'enter' | 'blur' | 'icon', ctrl: boolean, reset: () => void) => {
     const ms = parseCommitMs(raw);
     if (ms == null) {
-      setOldestDraft(msToInput(oldestMs));
+      reset();
       return;
     }
-    if (oldestMs != null && ms === oldestMs) return;
-    onOldestCommit(ms);
-  };
-
-  const commitNewest = (raw: string) => {
-    const ms = parseCommitMs(raw);
-    if (ms == null) {
-      setNewestDraft(msToInput(newestMs));
+    const place = classifyGotoTarget(ms, oldestMs, newestMs);
+    if (place === 'inside') {
+      onScrollToTime(ms);
       return;
     }
-    if (newestMs != null && ms === newestMs) return;
-    onNewestCommit(ms);
+    // The icon only loads on Ctrl. Enter and blur still commit a typed time.
+    if (via === 'icon' && !ctrl) return;
+    onCommitOutside(ms);
   };
 
-  const jumpOldest = (raw: string) => {
+  const commitOldest = (raw: string, via: 'enter' | 'blur' | 'icon', ctrl = false) => {
+    applyTime(raw, via, ctrl, () => setOldestDraft(msToInput(oldestMs)));
+  };
+
+  const commitNewest = (raw: string, via: 'enter' | 'blur' | 'icon', ctrl = false) => {
+    applyTime(raw, via, ctrl, () => setNewestDraft(msToInput(newestMs)));
+  };
+
+  const jumpOldest = (raw: string, ctrl: boolean) => {
     const el = oldestRef.current;
     const focused = el != null && document.activeElement === el;
     if (focused) oldestCancel.current = true;
-    commitOldest(raw);
+    commitOldest(raw, 'icon', ctrl);
     if (focused) el.blur();
   };
 
-  const jumpNewest = (raw: string) => {
+  const jumpNewest = (raw: string, ctrl: boolean) => {
     const el = newestRef.current;
     const focused = el != null && document.activeElement === el;
     if (focused) newestCancel.current = true;
-    commitNewest(raw);
+    commitNewest(raw, 'icon', ctrl);
     if (focused) el.blur();
   };
+
+  const oldestShown = parseCommitMs(oldestFocused ? oldestDraft : msToInput(oldestMs));
+  const newestShown = parseCommitMs(newestFocused ? newestDraft : msToInput(newestMs));
+  const oldestOutside = oldestShown != null && classifyGotoTarget(oldestShown, oldestMs, newestMs) !== 'inside';
+  const newestOutside = newestShown != null && classifyGotoTarget(newestShown, oldestMs, newestMs) !== 'inside';
 
   const gotoStyle: CSSProperties = {
     color: 'var(--text-dim)',
@@ -393,7 +411,7 @@ export function BufferStatusPill({
             setOldestDraft(msToInput(oldestMs));
             return;
           }
-          commitOldest(oldestRef.current?.value ?? oldestDraft);
+          commitOldest(oldestRef.current?.value ?? oldestDraft, 'blur');
         }}
         onKeyDown={e => {
           if (e.key === 'Escape') {
@@ -403,18 +421,24 @@ export function BufferStatusPill({
           }
           if (e.key !== 'Enter') return;
           e.preventDefault();
-          jumpOldest((e.currentTarget as HTMLInputElement).value);
+          const el = e.currentTarget as HTMLInputElement;
+          if (document.activeElement === el) oldestCancel.current = true;
+          commitOldest(el.value, 'enter');
+          if (document.activeElement === el) el.blur();
         }}
       />
       <button
         type="button"
         className="icon-button"
         aria-label="Go to oldest time"
-        title="Go to oldest time"
+        title={oldestOutside ? OUTSIDE_GOTO_TITLE : 'Go to oldest time'}
         disabled={isHistoryLoading}
         onMouseDown={e => e.preventDefault()}
-        onClick={() => jumpOldest(oldestRef.current?.value ?? (oldestFocused ? oldestDraft : msToInput(oldestMs)))}
-        style={gotoStyle}
+        onClick={e => jumpOldest(
+          oldestRef.current?.value ?? (oldestFocused ? oldestDraft : msToInput(oldestMs)),
+          e.ctrlKey || e.metaKey,
+        )}
+        style={{ ...gotoStyle, color: oldestOutside ? 'var(--warning-text)' : gotoStyle.color }}
       >
         <CornerDownLeft size={13} />
       </button>
@@ -488,7 +512,7 @@ export function BufferStatusPill({
             setNewestDraft(msToInput(newestMs));
             return;
           }
-          commitNewest(newestRef.current?.value ?? newestDraft);
+          commitNewest(newestRef.current?.value ?? newestDraft, 'blur');
         }}
         onKeyDown={e => {
           if (e.key === 'Escape') {
@@ -498,18 +522,24 @@ export function BufferStatusPill({
           }
           if (e.key !== 'Enter') return;
           e.preventDefault();
-          jumpNewest((e.currentTarget as HTMLInputElement).value);
+          const el = e.currentTarget as HTMLInputElement;
+          if (document.activeElement === el) newestCancel.current = true;
+          commitNewest(el.value, 'enter');
+          if (document.activeElement === el) el.blur();
         }}
       />
       <button
         type="button"
         className="icon-button"
         aria-label="Go to newest time"
-        title="Go to newest time"
+        title={newestOutside ? OUTSIDE_GOTO_TITLE : 'Go to newest time'}
         disabled={isHistoryLoading}
         onMouseDown={e => e.preventDefault()}
-        onClick={() => jumpNewest(newestRef.current?.value ?? (newestFocused ? newestDraft : msToInput(newestMs)))}
-        style={gotoStyle}
+        onClick={e => jumpNewest(
+          newestRef.current?.value ?? (newestFocused ? newestDraft : msToInput(newestMs)),
+          e.ctrlKey || e.metaKey,
+        )}
+        style={{ ...gotoStyle, color: newestOutside ? 'var(--warning-text)' : gotoStyle.color }}
       >
         <CornerDownLeft size={13} />
       </button>

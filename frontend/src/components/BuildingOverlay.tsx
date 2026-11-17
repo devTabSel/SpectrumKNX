@@ -356,7 +356,11 @@ const KoRow: React.FC<{
             <TelegramWhenJump
               timestamp={newest.timestamp}
               eventType={telegramEventType(newest)}
-              onJump={onGotoTelegram ? () => onGotoTelegram(newest) : undefined}
+              onJump={onGotoTelegram ? mods => {
+                if (mods && (mods.load || mods.additive || mods.range)) {
+                  (onGotoTelegram as (telegram: Telegram, m: typeof mods) => void)(newest, mods);
+                } else onGotoTelegram(newest);
+              } : undefined}
               style={{ fontSize: '0.65rem' }}
             />
           </span>

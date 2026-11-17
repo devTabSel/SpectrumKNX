@@ -16,6 +16,7 @@ import { type LinkedRowStatus } from './WriteToBusPanel';
 import type { SendCorrespondenceKey } from '../utils/sendCorrespondence';
 import type { BusPayload } from '../utils/dptValues';
 import { GotoTimeControl } from './GotoTimeControl';
+import { classifyGotoTarget } from '../utils/gotoTarget';
 import { BusValueText } from './BusValueText';
 import { SecondsField } from './SecondsField';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
@@ -99,7 +100,7 @@ interface TelegramTableProps {
   canSend?: boolean;
   /** Jump from the send popover's last-value timestamp to the telegram list.
    *  Ctrl/Cmd and Shift match a row click. */
-  onGotoTelegram?: (telegram: Telegram, mods?: { additive?: boolean; range?: boolean }) => void;
+  onGotoTelegram?: (telegram: Telegram, mods?: { additive?: boolean; range?: boolean; load?: boolean }) => void;
   /** Live bus feed for the send popover's wait-for-read-response. */
   latestTelegram?: Telegram | null;
   /** Alt-click on a row send icon → toggle the send panel. */
@@ -244,18 +245,21 @@ interface TelegramTableProps {
    * that exact telegram is in the buffer. */
   gotoRequest?: ListGotoRequest | null;
 
-  /** Raw-buffer oldest/newest bounds (epoch ms) for out-of-range goto fills. */
+  /** Raw-buffer oldest/newest bounds (epoch ms). A time inside them only scrolls. */
   bufferOldestMs?: number | null;
   bufferNewestMs?: number | null;
   /**
-   * Goto target is newer than the published buffer: pause and merge the
-   * pause-backlog toward newer, then the table jumps again.
-   * Kept for live-edge catch-up when the target is within the buffer span.
+   * `history` cannot reload a target the server filtered out. The jump icon
+   * is then hover-only and does nothing, including on Ctrl-click.
    */
-  onGotoMergeNewer?: () => void;
-  /** Goto target older than the buffer: clear + forward fill from that time. */
+  gotoScope?: 'live' | 'history';
+  /** Rows a goto has landed on. Force-visible, separate from marks and context flags. */
+  jumpTargetKeys?: readonly string[];
+  /** `replace` on a plain goto, `add` on Ctrl when the target is in the buffer. */
+  onJumpTarget?: (key: string, mode: 'replace' | 'add') => void;
+  /** Target older than the buffer: forward window with x = that time. No buffer wipe. */
   onGotoFillOlder?: (targetMs: number) => Promise<void>;
-  /** Goto target newer than the buffer: clear + backward fill from that time. */
+  /** Target newer than the buffer: backward window with y = that time. No buffer wipe. */
   onGotoFillNewer?: (targetMs: number) => Promise<void>;
 
   /**
@@ -287,6 +291,16 @@ export interface ListGotoRequest {
   additive?: boolean;
   /** Shift: select the range from the previous last-selected row. */
   range?: boolean;
+  /**
+   * In-buffer jump: scroll only. Do not change follow or pause. Ctrl still
+   * adds a jump target when `additive` is set.
+   */
+  preserveFollow?: boolean;
+  /**
+   * Outside the buffer, fill only when the caller already confirmed it
+   * (typed time, Ctrl-click, rewind). Default true for an existing request.
+   */
+  allowFill?: boolean;
 }
 
 type ColId = 'time' | 'delta' | 'source' | 'target' | 'type' | 'dpt' | 'value';
@@ -631,7 +645,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   gotoRequest,
   bufferOldestMs = null,
   bufferNewestMs = null,
-  onGotoMergeNewer,
+  gotoScope = 'live',
+  jumpTargetKeys,
+  onJumpTarget,
   onGotoFillOlder,
   onGotoFillNewer,
   viewChangeToken,
@@ -1030,8 +1046,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     for (const key of markedKeyList) if (!hiddenKeySet.has(key)) keys.add(key);
     for (const key of mouseKeyList) if (!hiddenKeySet.has(key)) keys.add(key);
     if (lastSelected && !hiddenKeySet.has(lastSelected)) keys.add(lastSelected);
+    for (const key of jumpTargetKeys ?? []) if (!hiddenKeySet.has(key)) keys.add(key);
     return keys;
-  }, [markedKeyList, mouseKeyList, lastSelected, hiddenKeySet]);
+  }, [markedKeyList, mouseKeyList, lastSelected, jumpTargetKeys, hiddenKeySet]);
   // Two-line pill: one nav button per row; single-line keeps prev+next.
   const twoLineMarksPill = actionableMarkedKeys.length > 0 && hiddenKeyList.length > 0;
   // Row the prev/next-mark jumps continue from (#442); null after a user scroll.
@@ -2804,7 +2821,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     key: string,
     index: number,
     mods: { additive: boolean; range: boolean },
-    opts?: { keepClickPin?: boolean },
+    opts?: { keepClickPin?: boolean; preserveFollow?: boolean },
   ) => {
     const { additive, range } = mods;
     let next = mouseKeyList;
@@ -2829,7 +2846,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     markCursorRef.current = key;
     const selectedKey = next.includes(key) ? key : null;
 
-    detachLiveFollow();
+    if (!opts?.preserveFollow) detachLiveFollow();
+    else atEdgeRef.current = false;
     if (!opts?.keepClickPin && !clickPinHoldRef.current && !atEdgeRef.current) {
       captureAnchor(selectedKey);
     }
@@ -2984,15 +3002,17 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     scrollToEdge();
   };
 
-  // Scrolls to a specific row by index and stops live-following, so the
-  // viewed rows stay put while new ones accumulate. Used by "quick goto time"
-  // and the quick info bar's click-to-jump metrics (#282, #311).
-  const gotoIndex = (idx: number) => {
+  // Scrolls to a specific row by index. A goto that lands inside the buffer
+  // only scrolls (`preserveFollow`): direction, anchor and pause stay.
+  // Info-bar and mark jumps still leave live-follow.
+  const gotoIndex = (idx: number, opts?: { preserveFollow?: boolean }) => {
     if (idx < 0 || idx >= telegramRows.length) return;
     atEdgeRef.current = false;
-    detachedFromEdgeRef.current = true;
-    setFollowingLive(false);
-    onListFollowChange?.(false);
+    if (!opts?.preserveFollow) {
+      detachedFromEdgeRef.current = true;
+      setFollowingLive(false);
+      onListFollowChange?.(false);
+    }
     // The old anchor is about to leave the rendered window on purpose.
     anchorRef.current = null;
     markProgrammatic();
@@ -3002,9 +3022,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     requestAnimationFrame(() => requestAnimationFrame(() => {
       captureAnchor();
       atEdgeRef.current = false;
-      detachedFromEdgeRef.current = true;
-      setFollowingLive(false);
-      onListFollowChange?.(false);
+      if (!opts?.preserveFollow) {
+        detachedFromEdgeRef.current = true;
+        setFollowingLive(false);
+        onListFollowChange?.(false);
+      }
     }));
   };
 
@@ -3052,8 +3074,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // "Quick goto time" (#282): jump to the telegram nearest a given time. Only
   // meaningful for the timestamp sort, where rows are ordered by time — the
   // info bar's jumps use gotoIndex directly since they already know the index.
-  // Out-of-range targets pause+merge newer or ascending-fill older first.
+  // A target inside the raw buffer only scrolls. Outside, a confirmed goto
+  // fills forward from an older time or backward from a newer one.
   const gotoTimeGenRef = useRef(0);
+  const noteJump = (row: TelegramRow | undefined, additive: boolean) => {
+    if (!row) return;
+    onJumpTarget?.(anchorKey(row), additive ? 'add' : 'replace');
+  };
   const nearestTimeIndex = (rows: readonly TelegramRow[], targetMs: number): number | null => {
     if (rows.length === 0) return null;
     let bestIdx = 0;
@@ -3065,21 +3092,17 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     return bestIdx;
   };
 
-  const gotoTime = (targetMs: number): number | null => {
+  const gotoTime = (
+    targetMs: number,
+    mods?: { allowFill?: boolean; additive?: boolean; preserveFollow?: boolean },
+  ): number | null => {
     const rows = telegramRows;
     if (rows.length === 0 && bufferOldestMs == null && bufferNewestMs == null) return null;
 
-    let viewOldest = Infinity;
-    let viewNewest = -Infinity;
-    for (const r of rows) {
-      const ms = new Date(r.timestamp).getTime();
-      if (ms < viewOldest) viewOldest = ms;
-      if (ms > viewNewest) viewNewest = ms;
-    }
-    const hasView = rows.length > 0 && Number.isFinite(viewOldest);
-
-    const inBuffer = bufferOldestMs != null && bufferNewestMs != null
-      && targetMs >= bufferOldestMs && targetMs <= bufferNewestMs;
+    const place = classifyGotoTarget(targetMs, bufferOldestMs, bufferNewestMs);
+    const inBuffer = place === 'inside';
+    const allowFill = mods?.allowFill !== false;
+    const preserveFollow = mods?.preserveFollow ?? inBuffer;
 
     const jumpAfterFill = (fill: Promise<void> | void) => {
       const gen = ++gotoTimeGenRef.current;
@@ -3087,74 +3110,46 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       void Promise.resolve(fill).then(() => {
         if (gotoTimeGenRef.current !== gen) return;
         const idx = nearestTimeIndex(telegramRowsRef.current, targetMs);
-        if (idx != null) gotoIndex(idx);
+        if (idx == null) return;
+        gotoIndex(idx, { preserveFollow: false });
+        noteJump(telegramRowsRef.current[idx], false);
       });
     };
 
-    if (hasView && targetMs < viewOldest) {
-      if (inBuffer) {
+    if (inBuffer) {
+      const bestIdx = nearestTimeIndex(rows, targetMs);
+      if (bestIdx == null) return null;
+      gotoIndex(bestIdx, { preserveFollow });
+      noteJump(rows[bestIdx], !!mods?.additive);
+      return bestIdx;
+    }
+
+    // History cannot fetch a row the server already left out.
+    if (gotoScope === 'history' || place === 'unknown') {
+      if (place === 'unknown') {
         const bestIdx = nearestTimeIndex(rows, targetMs);
-        if (bestIdx != null) gotoIndex(bestIdx);
+        if (bestIdx == null) return null;
+        gotoIndex(bestIdx, { preserveFollow });
+        noteJump(rows[bestIdx], !!mods?.additive);
         return bestIdx;
       }
-      if (onGotoFillOlder) {
-        jumpAfterFill(onGotoFillOlder(targetMs));
-        return null;
-      }
+      return null;
     }
 
-    if (hasView && targetMs > viewNewest) {
-      if (inBuffer) {
-        // Within raw buffer but past the filtered view — navigate; merge pause
-        // backlog when catching up toward live.
-        if (bufferNewestMs != null && targetMs >= bufferNewestMs) {
-          const gen = ++gotoTimeGenRef.current;
-          onListFollowChange?.(false);
-          onGotoMergeNewer?.();
-          requestAnimationFrame(() => {
-            if (gotoTimeGenRef.current !== gen) return;
-            const idx = nearestTimeIndex(telegramRowsRef.current, targetMs);
-            if (idx != null) gotoIndex(idx);
-          });
-          return nearestTimeIndex(rows, targetMs);
-        }
-        const bestIdx = nearestTimeIndex(rows, targetMs);
-        if (bestIdx != null) gotoIndex(bestIdx);
-        return bestIdx;
-      }
-      if (onGotoFillNewer) {
-        jumpAfterFill(onGotoFillNewer(targetMs));
-        return null;
-      }
-      // Legacy fallback: merge newer pause backlog.
-      if (onGotoMergeNewer) {
-        const gen = ++gotoTimeGenRef.current;
-        onListFollowChange?.(false);
-        onGotoMergeNewer();
-        requestAnimationFrame(() => {
-          if (gotoTimeGenRef.current !== gen) return;
-          const idx = nearestTimeIndex(telegramRowsRef.current, targetMs);
-          if (idx != null) gotoIndex(idx);
-        });
-        return nearestTimeIndex(rows, targetMs);
-      }
+    if (!allowFill) return null;
+    if (place === 'older' && onGotoFillOlder) {
+      jumpAfterFill(onGotoFillOlder(targetMs));
+      return null;
     }
-
-    // Outside buffer with empty view: still fill by side vs buffer bounds.
-    if (!hasView) {
-      if (bufferOldestMs != null && targetMs < bufferOldestMs && onGotoFillOlder) {
-        jumpAfterFill(onGotoFillOlder(targetMs));
-        return null;
-      }
-      if (bufferNewestMs != null && targetMs > bufferNewestMs && onGotoFillNewer) {
-        jumpAfterFill(onGotoFillNewer(targetMs));
-        return null;
-      }
+    if (place === 'newer' && onGotoFillNewer) {
+      jumpAfterFill(onGotoFillNewer(targetMs));
+      return null;
     }
-
+    // No loader: the published list is all we can scroll.
     const bestIdx = nearestTimeIndex(rows, targetMs);
     if (bestIdx == null) return null;
-    gotoIndex(bestIdx);
+    gotoIndex(bestIdx, { preserveFollow: false });
+    noteJump(rows[bestIdx], false);
     return bestIdx;
   };
 
@@ -3576,7 +3571,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       if (telegramRows.length === 0) return;
       appliedGotoId.current = gotoRequest.id;
       pendingGotoSelect.current = null;
-      gotoTime(gotoRequest.targetMs);
+      gotoTime(gotoRequest.targetMs, {
+        allowFill: gotoRequest.allowFill !== false,
+        additive: !!gotoRequest.additive,
+        preserveFollow: gotoRequest.preserveFollow,
+      });
       return;
     }
     if (!gotoRequest.telegram) return;
@@ -3589,7 +3588,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         pendingGotoSelect.current = null;
         if (telegramRows.length === 0) return;
         const ms = new Date(gotoRequest.telegram.timestamp).getTime();
-        if (!Number.isNaN(ms)) gotoTime(ms);
+        if (!Number.isNaN(ms)) {
+          gotoTime(ms, {
+            allowFill: gotoRequest.allowFill !== false && !gotoRequest.preserveFollow,
+            additive: !!gotoRequest.additive,
+            ...(gotoRequest.preserveFollow ? { preserveFollow: true } : {}),
+          });
+        }
         return;
       }
       appliedGotoId.current = gotoRequest.id;
@@ -3598,18 +3603,19 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       }
       const additive = !!gotoRequest.additive;
       const range = !!gotoRequest.range;
+      onJumpTarget?.(key, additive && !range ? 'add' : 'replace');
       const idx = telegramRows.findIndex(t => anchorKey(t) === key);
       if (idx !== -1) {
         pendingGotoSelect.current = null;
-        applyRowSelection(key, idx, { additive, range });
-        if (!rowInViewport(key)) gotoIndex(idx);
+        applyRowSelection(key, idx, { additive, range }, { preserveFollow: true });
+        if (!rowInViewport(key)) gotoIndex(idx, { preserveFollow: true });
         flashRow(key);
         return;
       }
       // Not painted yet: pin via mouse selection so force-include can reveal it.
       // A shift range must keep the previous last-selected row as its anchor.
       if (range) setMouseKeyList(prev => addKeys(prev, [key]));
-      else applyRowSelection(key, -1, { additive, range: false });
+      else applyRowSelection(key, -1, { additive, range: false }, { preserveFollow: true });
       pendingGotoSelect.current = { key, additive, range, selected: !range };
     }
     const pending = pendingGotoSelect.current;
@@ -3618,9 +3624,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     if (idx === -1) return;
     pendingGotoSelect.current = null;
     if (!pending.selected) {
-      applyRowSelection(pending.key, idx, { additive: pending.additive, range: pending.range });
+      applyRowSelection(pending.key, idx, { additive: pending.additive, range: pending.range }, { preserveFollow: true });
     }
-    if (!rowInViewport(pending.key)) gotoIndex(idx);
+    if (!rowInViewport(pending.key)) gotoIndex(idx, { preserveFollow: true });
     flashRow(pending.key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gotoRequest, telegramRows, telegrams, forceIncludeFrom]);
@@ -4245,8 +4251,21 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               {followed && (
                 <span onClick={e => e.stopPropagation()}>
                   <TelegramWhenJump
-                    onJump={() => onGotoTelegram?.(followed)}
+                    timestamp={followed.timestamp}
+                    onJump={mods => {
+                      if (mods) onGotoTelegram?.(followed, mods);
+                      else onGotoTelegram?.(followed);
+                    }}
                     jumpLabel="Go to response"
+                  />
+                </span>
+              )}
+              {gotoScope === 'history' && isGroupRead(t) && !followed && (
+                <span onClick={e => e.stopPropagation()}>
+                  <TelegramWhenJump
+                    tone="missing"
+                    timestamp={t.timestamp}
+                    onJump={() => {}}
                   />
                 </span>
               )}
@@ -4708,7 +4727,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           </div>
           <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             {isTimeSort && (
-              <GotoTimeControl seedMs={newestMs} onGoto={gotoTime} />
+              <GotoTimeControl
+                seedMs={newestMs}
+                oldestMs={bufferOldestMs}
+                newestMs={bufferNewestMs}
+                scope={gotoScope}
+                onGoto={(ms, mods) => gotoTime(ms, {
+                  allowFill: mods?.load === true,
+                  additive: !!mods?.additive,
+                })}
+              />
             )}
           </div>
           <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}>

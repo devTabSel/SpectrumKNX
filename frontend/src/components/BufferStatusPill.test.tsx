@@ -32,8 +32,8 @@ const baseProps = {
   wsConnected: true,
   isHistoryLoading: false,
   historyLoadError: null,
-  onOldestCommit: vi.fn(),
-  onNewestCommit: vi.fn(),
+  onScrollToTime: vi.fn(),
+  onCommitOutside: vi.fn(),
   onLoadFromDbOldest: vi.fn(),
   onLoadFromDbNewest: vi.fn(),
 };
@@ -294,14 +294,14 @@ test('clear turns orange for every end-of marker and names the reason', () => {
   expect(clear.style.color).toBe('var(--text-dim)');
 });
 
-test('oldest and newest commit on goto, Enter and blur, and Escape restores', () => {
-  const onOldestCommit = vi.fn();
-  const onNewestCommit = vi.fn();
+test('oldest and newest scroll inside the buffer and load outside on Enter, blur and Ctrl-goto', () => {
+  const onScrollToTime = vi.fn();
+  const onCommitOutside = vi.fn();
   render(
     <BufferStatusPill
       {...baseProps}
-      onOldestCommit={onOldestCommit}
-      onNewestCommit={onNewestCommit}
+      onScrollToTime={onScrollToTime}
+      onCommitOutside={onCommitOutside}
     />,
   );
   const oldest = screen.getByLabelText('Oldest telegram in buffer');
@@ -311,28 +311,44 @@ test('oldest and newest commit on goto, Enter and blur, and Escape restores', ()
   fireEvent.focus(oldest);
   fireEvent.change(oldest, { target: { value: nextOldest } });
   fireEvent.keyDown(oldest, { key: 'Enter' });
-  expect(onOldestCommit).toHaveBeenCalledWith(new Date(nextOldest).getTime());
+  expect(onScrollToTime).toHaveBeenCalledWith(new Date(nextOldest).getTime());
+  expect(onCommitOutside).not.toHaveBeenCalled();
 
-  onOldestCommit.mockClear();
+  onScrollToTime.mockClear();
   fireEvent.focus(oldest);
   fireEvent.change(oldest, { target: { value: '2026-03-01T11:30:00' } });
   fireEvent.blur(oldest);
-  expect(onOldestCommit).toHaveBeenCalledWith(new Date('2026-03-01T11:30:00').getTime());
+  expect(onScrollToTime).toHaveBeenCalledWith(new Date('2026-03-01T11:30:00').getTime());
 
-  onOldestCommit.mockClear();
+  onScrollToTime.mockClear();
   fireEvent.focus(oldest);
   fireEvent.change(oldest, { target: { value: '2026-03-01T11:45:00' } });
   fireEvent.keyDown(oldest, { key: 'Escape' });
-  expect(onOldestCommit).not.toHaveBeenCalled();
+  expect(onScrollToTime).not.toHaveBeenCalled();
+  expect(onCommitOutside).not.toHaveBeenCalled();
   expect(oldest).toHaveValue(oldestText);
 
+  // The goto icon of the buffer edge only scrolls.
+  fireEvent.click(screen.getByRole('button', { name: 'Go to oldest time' }));
+  expect(onScrollToTime).toHaveBeenCalledWith(baseProps.oldestMs);
+  expect(onCommitOutside).not.toHaveBeenCalled();
+
+  onScrollToTime.mockClear();
   fireEvent.focus(oldest);
   fireEvent.change(oldest, { target: { value: '2026-03-01T09:00:00' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Go to oldest time' }));
-  expect(onOldestCommit).toHaveBeenCalledWith(new Date('2026-03-01T09:00:00').getTime());
+  const oldestGoto = screen.getByRole('button', { name: 'Go to oldest time' });
+  expect(oldestGoto).toHaveAttribute('title', 'Ctrl-Klick lädt nach');
+  expect(oldestGoto).toHaveStyle({ color: 'var(--warning-text)' });
+  fireEvent.click(oldestGoto);
+  expect(onCommitOutside).not.toHaveBeenCalled();
+  fireEvent.click(oldestGoto, { ctrlKey: true });
+  expect(onCommitOutside).toHaveBeenCalledWith(new Date('2026-03-01T09:00:00').getTime());
 
+  onCommitOutside.mockClear();
   const newest = screen.getByLabelText('Newest telegram in buffer');
+  fireEvent.focus(newest);
   fireEvent.change(newest, { target: { value: '2026-03-01T13:00:00' } });
-  fireEvent.click(screen.getByRole('button', { name: 'Go to newest time' }));
-  expect(onNewestCommit).toHaveBeenCalledWith(new Date('2026-03-01T13:00:00').getTime());
+  fireEvent.keyDown(newest, { key: 'Enter' });
+  expect(onCommitOutside).toHaveBeenCalledWith(new Date('2026-03-01T13:00:00').getTime());
+  expect(onScrollToTime).not.toHaveBeenCalled();
 });

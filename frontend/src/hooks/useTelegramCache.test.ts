@@ -1192,7 +1192,8 @@ describe('buffer anchor', () => {
     const { result } = renderHook(() => useTelegramCache(2, false));
     await settle(result);
     act(() => {
-      result.current.setBufferAnchor({ direction: 'backward', ts: 1000 });
+      // Null y is the live edge. An explicit timestamp is a fixed goto and
+      // is covered separately.
       result.current.addLive(tg(1000, 'a'));
       result.current.addLive(tg(2000, 'b'));
     });
@@ -1207,6 +1208,48 @@ describe('buffer anchor', () => {
     });
     expect(result.current.bufferAnchor).toEqual({ direction: 'backward', ts: 3000 });
     expect(sources(result.current.telegrams)).toEqual(['1.2.c', '1.2.b']);
+  });
+
+  it('keeps an explicit backward y fixed and leaves live rows outside the window', async () => {
+    const { result } = renderHook(() => useTelegramCache(10, false));
+    await settle(result);
+    act(() => {
+      result.current.setBufferRangeMinutes(1);
+      result.current.setBufferAnchor({ direction: 'backward', ts: 60_000 });
+      result.current.addLive(tg(60_000, 'y'));
+      result.current.addLive(tg(30_000, 'in'));
+      result.current.addLive(tg(120_000, 'newer'));
+      result.current.addLive(tg(-1_000, 'older'));
+    });
+    expect(result.current.bufferAnchor).toEqual({ direction: 'backward', ts: 60_000 });
+    expect(sources(result.current.telegrams)).toEqual(['1.2.y', '1.2.in']);
+  });
+
+  it('discards only the pause backlog that does not fit the new window', async () => {
+    const { result } = renderHook(() => useTelegramCache(10, false));
+    await settle(result);
+    act(() => {
+      result.current.addLive(tg(10_000, 'kept'));
+      result.current.setPaused(true);
+      result.current.addLive(tg(20_000, 'fit'));
+      result.current.addLive(tg(90_000, 'late'));
+    });
+    expect(result.current.pausedCount).toBe(2);
+    expect(result.current.telegrams.map(t => t.source_address)).toEqual(['1.2.kept']);
+
+    act(() => {
+      result.current.retainPausedInWindow(0, 30_000);
+    });
+    // The fitting backlog row is in the window. The later one is gone, and
+    // resuming does not prepend it.
+    expect(sources(result.current.telegrams)).toEqual(['1.2.fit', '1.2.kept']);
+    expect(result.current.pausedCount).toBe(0);
+    expect(result.current.pausedTelegrams).toEqual([]);
+
+    act(() => {
+      result.current.setPaused(false);
+    });
+    expect(sources(result.current.telegrams)).toEqual(['1.2.fit', '1.2.kept']);
   });
 
   it('adopts a direction change by clearing the timestamp and keeping it when the direction stays', async () => {

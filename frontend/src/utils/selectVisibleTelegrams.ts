@@ -12,12 +12,19 @@ import {
 
 const EMPTY_KEY_SET: ReadonlySet<string> = new Set();
 
-/** Rows the filter must keep: marks, the mouse selection, and the last selected row. */
+/**
+ * Rows the filter must keep: marks, the mouse selection, the last selected
+ * row, and goto jump targets. Jump targets are their own set — not context
+ * flags and not marks — and stay force-visible the same way.
+ */
 export function pinnedVisibleKeys(
-  opts: Pick<SelectVisibleOpts, 'markedKeys' | 'mouseSelectedKeys' | 'lastSelectedKey'>,
+  opts: Pick<SelectVisibleOpts, 'markedKeys' | 'mouseSelectedKeys' | 'lastSelectedKey' | 'jumpTargetKeys'>,
 ): Set<string> {
   return new Set(addKeys(
-    addKeys(opts.markedKeys, opts.mouseSelectedKeys),
+    addKeys(
+      addKeys(opts.markedKeys, opts.mouseSelectedKeys),
+      opts.jumpTargetKeys ?? [],
+    ),
     opts.lastSelectedKey ? [opts.lastSelectedKey] : [],
   ));
 }
@@ -39,6 +46,11 @@ export interface SelectVisibleOpts {
   markedKeys: readonly string[];
   mouseSelectedKeys: readonly string[];
   lastSelectedKey: string | null;
+  /**
+   * Rows a goto has landed on. Always force-visible, including in the status
+   * counts. Separate from marks and from the Time-Delta context flags.
+   */
+  jumpTargetKeys?: readonly string[];
 }
 
 function noMainFilter(opts: SelectVisibleOpts): boolean {
@@ -61,7 +73,10 @@ function noMainFilter(opts: SelectVisibleOpts): boolean {
  */
 export function visibleSelectionMode(opts: SelectVisibleOpts): 'identity' | 'incremental' | 'full' {
   const { before, after } = effectiveDeltaContext(opts.filters);
-  const marks = opts.markedKeys.length > 0 || opts.mouseSelectedKeys.length > 0 || opts.lastSelectedKey != null;
+  const marks = opts.markedKeys.length > 0
+    || opts.mouseSelectedKeys.length > 0
+    || opts.lastSelectedKey != null
+    || (opts.jumpTargetKeys?.length ?? 0) > 0;
   const beforeOn = before > 0 && opts.flaggedBeforeKeys.length > 0;
   const afterOn = after > 0 && opts.flaggedAfterKeys.length > 0;
   if (marks || beforeOn || afterOn) return 'full';

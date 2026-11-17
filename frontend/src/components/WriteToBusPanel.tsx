@@ -121,7 +121,7 @@ interface Props {
   dptCatalog?: FilterOption[];
   /** Jump the telegram list to the telegram that carried this row's last value.
    *  Ctrl/Cmd and Shift match a row click: add to the selection, or range from the last selected row. */
-  onGotoTelegram?: (telegram: Telegram, mods?: { additive?: boolean; range?: boolean }) => void;
+  onGotoTelegram?: (telegram: Telegram, mods?: { additive?: boolean; range?: boolean; load?: boolean }) => void;
   /** Reports the top row's GA/DPT when delay/every are empty (legacy hint). */
   onTopRowHintChange?: (hint: SendPanelTopRowHint | null) => void;
   /** Every unique non-empty GA currently in the panel (TT send-icon opaque/blue). */
@@ -2085,7 +2085,7 @@ export function WriteToBusPanel({
                       canJump={Boolean(lastTelegram)}
                       onJump={mods => {
                         if (!lastTelegram) return;
-                        if (mods && (mods.additive || mods.range)) onGotoTelegram?.(lastTelegram, mods);
+                        if (mods && (mods.additive || mods.range || mods.load)) onGotoTelegram?.(lastTelegram, mods);
                         else onGotoTelegram?.(lastTelegram);
                       }}
                     />
@@ -2199,7 +2199,7 @@ export function WriteToBusPanel({
                     }}
                     onJump={mods => {
                       if (!statusTelegram) return;
-                      if (mods && (mods.additive || mods.range)) onGotoTelegram?.(statusTelegram, mods);
+                      if (mods && (mods.additive || mods.range || mods.load)) onGotoTelegram?.(statusTelegram, mods);
                       else onGotoTelegram?.(statusTelegram);
                     }}
                   />
@@ -2709,7 +2709,7 @@ function EventCell({
 }: {
   telegram: Telegram | undefined;
   canJump: boolean;
-  onJump: (mods?: { additive?: boolean; range?: boolean }) => void;
+  onJump: (mods?: { additive?: boolean; range?: boolean; load?: boolean }) => void;
 }) {
   const readAnswered = useReadAnswered(telegram);
   if (!telegram) {
@@ -2802,7 +2802,7 @@ export function SendJobStatusField({
   dpt: string;
   onCancel: () => void;
   onClear: () => void;
-  onJump: (mods?: { additive?: boolean; range?: boolean }) => void;
+  onJump: (mods?: { additive?: boolean; range?: boolean; load?: boolean }) => void;
 }) {
   const historyAnswered = useReadAnswered(statusTelegram);
   const jobLive = job != null && (job.state === 'waiting' || job.state === 'running');

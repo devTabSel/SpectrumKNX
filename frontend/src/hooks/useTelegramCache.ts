@@ -226,13 +226,22 @@ export interface TelegramCache {
   /** keepOldest = forward read; keepNewest = backward read. */
   setEvictionMode: (mode: EvictionMode) => void;
   /**
-   * Trim and forward-admission anchor. `ts === null` uses the buffer edge
-   * (oldest forward, newest backward). Backward live moves `ts` to the newest
-   * telegram; an explicit forward `ts` stays put.
+   * Trim and forward-admission anchor. `ts === null` is the live edge
+   * (oldest forward, newest backward) and a backward null follows the newest
+   * telegram. An explicit timestamp stays put: forward x, and a goto's y.
    */
   bufferAnchor: BufferAnchor;
   /** Rewind, fast-forward and goto. Also selects the overflow end. */
   setBufferAnchor: (anchor: BufferAnchor) => void;
+  /**
+   * Drop pause-backlog rows that fall outside `[minTs, maxTs]` and trim the
+   * buffer to that window. Rows that fit stay. While paused, the fitting
+   * backlog is published with the window and leaves the hidden backlog, so a
+   * later resume cannot prepend the rows that did not fit.
+   */
+  retainPausedInWindow: (minTs: number, maxTs: number) => void;
+  /** Publish the buffer even while paused (a goto fill that landed frozen). */
+  publishBuffer: () => void;
   /**
    * Read-direction change without a timestamp. Keeps `ts` when the direction
    * is unchanged; otherwise clears it so the buffer edge is used.
@@ -403,6 +412,11 @@ export function useTelegramCache(
    */
   const [bufferAnchor, setAnchorState] = useState<BufferAnchor>({ direction: 'backward', ts: null });
   const anchorRef = useRef(bufferAnchor);
+  /**
+   * Explicit backward y from a goto. Live (null ts) still follows the newest
+   * telegram; a fixed y does not.
+   */
+  const fixedBackwardRef = useRef(false);
   /** Last minute window announced by the monitor. Forward admission uses it. */
   const rangeMinutesRef = useRef(60);
   const [activeLoads, setActiveLoads] = useState(0);
@@ -990,8 +1004,12 @@ export function useTelegramCache(
     }
   }, [commitPendingStore]);
 
-  /** Backward live: y follows the newest buffered telegram and never moves back. */
+  /**
+   * Backward live edge: y follows the newest buffered telegram and never
+   * moves back. A fixed y (explicit timestamp) stays where the goto put it.
+   */
   const slideBackwardAnchor = useCallback((newest: number) => {
+    if (fixedBackwardRef.current) return;
     const cur = anchorRef.current;
     if (cur.direction !== 'backward') return;
     if (cur.ts != null && newest <= cur.ts) return;
@@ -1003,6 +1021,7 @@ export function useTelegramCache(
   const setBufferAnchor = useCallback((next: BufferAnchor) => {
     const ts = next.ts == null || !Number.isFinite(next.ts) ? null : next.ts;
     const normalized: BufferAnchor = { direction: next.direction, ts };
+    fixedBackwardRef.current = normalized.direction === 'backward' && normalized.ts != null;
     bufferRef.current!.setEvictionMode(evictionFor(normalized.direction));
     const cur = anchorRef.current;
     if (cur.direction === normalized.direction && cur.ts === normalized.ts) return;
@@ -1014,6 +1033,7 @@ export function useTelegramCache(
     bufferRef.current!.setEvictionMode(evictionFor(direction));
     const cur = anchorRef.current;
     if (cur.direction === direction) return;
+    fixedBackwardRef.current = false;
     const next: BufferAnchor = { direction, ts: null };
     anchorRef.current = next;
     setAnchorState(next);
@@ -1039,6 +1059,16 @@ export function useTelegramCache(
         const x = anchor.ts != null ? anchor.ts : buf.oldestTs;
         const inWindow = x == null || (entry.ts >= x && entry.ts <= x + rangeMs);
         if (!inWindow || buf.length >= buf.maxSize) {
+          queueLivePersist(entry, true);
+          return;
+        }
+      }
+      // A goto's fixed y does not grow with the live edge. Rows outside
+      // [y − range, y] stay in IndexedDB and out of the buffer and the backlog.
+      if (fixedBackwardRef.current && anchor.direction === 'backward' && anchor.ts != null) {
+        const rangeMs = rangeMsOf(rangeMinutesRef.current);
+        const y = anchor.ts;
+        if (entry.ts < y - rangeMs || entry.ts > y) {
           queueLivePersist(entry, true);
           return;
         }
@@ -1225,6 +1255,46 @@ export function useTelegramCache(
     else trimToTimeWindow(origin - rangeMs, origin);
   }, [trimToTimeWindow]);
 
+  /** Publish the current buffer. While paused, mark the snapshot diverged. */
+  const publishBuffer = useCallback(() => {
+    if (pausedRef.current) {
+      structuralWhilePausedRef.current = true;
+      pendingDropRef.current = 0;
+    }
+    publishFromBuffer(0);
+  }, [publishFromBuffer]);
+
+  /**
+   * Keep only the pause backlog that fits `[minTs, maxTs]`, and trim the
+   * buffer to the same window. Fitting rows are not dropped. While paused
+   * they are published with the window and removed from the hidden backlog,
+   * so `setPaused(false)` cannot prepend rows that were outside the window.
+   */
+  const retainPausedInWindow = useCallback((minTs: number, maxTs: number) => {
+    const lo = Math.min(minTs, maxTs);
+    const hi = Math.max(minTs, maxTs);
+    const list = pausedBacklogRef.current;
+    const before = list.length;
+    const kept = list.filter(t => {
+      const ts = telegramTs(t);
+      return ts >= lo && ts <= hi;
+    });
+    list.length = 0;
+    list.push(...kept);
+    const removed = bufferRef.current!.trimToWindow(lo, hi);
+    if (removed.length > 0) trackRemoved(removed);
+    if (!pausedRef.current) {
+      if (kept.length !== before) updatePausedCount(kept.length);
+      if (removed.length > 0) publishFromBuffer(0);
+      return;
+    }
+    list.length = 0;
+    updatePausedCount(0);
+    structuralWhilePausedRef.current = true;
+    pendingDropRef.current = 0;
+    publishFromBuffer(0);
+  }, [trackRemoved, publishFromBuffer, updatePausedCount]);
+
   // Appended in place. `pausedCount` is the render signal — copying this array
   // into React state on every telegram is what made the newer pill stall.
   // eslint-disable-next-line react-hooks/refs
@@ -1291,6 +1361,8 @@ export function useTelegramCache(
     setEvictionMode,
     bufferAnchor,
     setBufferAnchor,
+    retainPausedInWindow,
+    publishBuffer,
     adoptAnchorDirection,
     setBufferRangeMinutes,
     trimToTimeWindow,

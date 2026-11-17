@@ -2,6 +2,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { TelegramWhenJump, formatTelegramWhen, telegramEventType } from './TelegramWhenJump';
+import { GotoBufferProvider } from './GotoBufferContext';
 
 describe('formatTelegramWhen', () => {
   it('formats ISO timestamps as yyyy-MM-dd HH:mm:ss', () => {
@@ -50,6 +51,49 @@ describe('TelegramWhenJump', () => {
     render(<TelegramWhenJump timestamp="2026-01-01T10:05:00.000Z" eventType="READ" />);
     expect(screen.queryByRole('button', { name: 'Go to telegram' })).not.toBeInTheDocument();
     expect(screen.getByText('READ')).toBeInTheDocument();
+  });
+
+  it('loads an outside target only on ctrl-click', () => {
+    const onJump = vi.fn();
+    render(
+      <GotoBufferProvider scope="live" oldestMs={1_000} newestMs={2_000}>
+        <TelegramWhenJump timestamp={new Date(5_000).toISOString()} onJump={onJump} />
+      </GotoBufferProvider>,
+    );
+    const jump = screen.getByRole('button', { name: 'Ctrl-Klick lädt nach' });
+    expect(jump).toHaveStyle({ color: 'var(--warning-text)' });
+    fireEvent.click(jump);
+    expect(onJump).not.toHaveBeenCalled();
+    fireEvent.click(jump, { ctrlKey: true });
+    expect(onJump).toHaveBeenCalledWith({ load: true });
+  });
+
+  it('adds an in-buffer jump on ctrl-click and replaces on a plain click', () => {
+    const onJump = vi.fn();
+    render(
+      <GotoBufferProvider scope="live" oldestMs={1_000} newestMs={9_000}>
+        <TelegramWhenJump timestamp={new Date(5_000).toISOString()} onJump={onJump} />
+      </GotoBufferProvider>,
+    );
+    const jump = screen.getByRole('button', { name: 'Go to telegram' });
+    fireEvent.click(jump);
+    expect(onJump).toHaveBeenCalledWith();
+    fireEvent.click(jump, { ctrlKey: true });
+    expect(onJump).toHaveBeenLastCalledWith({ additive: true, range: false });
+  });
+
+  it('shows a missing history target only as a no-op orange icon', () => {
+    const onJump = vi.fn();
+    render(
+      <GotoBufferProvider scope="history" oldestMs={1_000} newestMs={2_000}>
+        <TelegramWhenJump timestamp={new Date(5_000).toISOString()} onJump={onJump} />
+      </GotoBufferProvider>,
+    );
+    const jump = screen.getByRole('button', { name: 'Ziel ausgefiltert/nicht vorhanden' });
+    expect(jump).toHaveClass('tt-goto-missing');
+    expect(jump).toHaveStyle({ color: 'var(--warning-text)' });
+    fireEvent.click(jump, { ctrlKey: true });
+    expect(onJump).not.toHaveBeenCalled();
   });
 
   it('omits event type when not provided', () => {

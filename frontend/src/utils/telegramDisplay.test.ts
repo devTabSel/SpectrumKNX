@@ -369,4 +369,44 @@ describe('status pill x / y rows', () => {
     expect(backlogStatusCount([], [picked], { ...base, lastSelectedKey: anchorKey(picked) }, true)).toBe(1);
     expect(backlogStatusCount([], [picked], base, true)).toBe(0);
   });
+
+  it('counts jump targets in x and y, in the buffer and the backlog', () => {
+    const jump = makeTelegram({
+      timestamp: '2024-01-01T10:00:00.400Z',
+      source_address: '9.9.9',
+      target_name: 'OG Jalousie',
+      raw_hex: '0xjump',
+    });
+    const jumpBacklog = makeTelegram({
+      timestamp: '2024-01-01T10:00:20.000Z',
+      source_address: '9.9.9',
+      target_name: 'Keller',
+      raw_hex: '0xjumpb',
+    });
+    const opts: SelectVisibleOpts = {
+      ...qfOpts,
+      markedKeys: [],
+      flaggedAfterKeys: [anchorKey(match)],
+      jumpTargetKeys: [anchorKey(jump), anchorKey(jumpBacklog)],
+    };
+    const side: SelectVisibleOpts = {
+      ...opts,
+      quickFilterOpen: false,
+      quickFilterEnabled: false,
+      quickPatterns: {},
+    };
+    const shown = selectVisibleTelegrams([match, jump], opts);
+    expect(shown.contextKeys.has(anchorKey(jump))).toBe(true);
+    const pinned = pinnedVisibleKeys(opts);
+    expect(pinned.has(anchorKey(jump))).toBe(true);
+    // x drops the context row unless it is a jump target.
+    expect(statusViewRowCount(shown.items, shown.contextKeys, new Set(), true)).toBe(1);
+    expect(statusViewRowCount(shown.items, shown.contextKeys, pinned, true)).toBe(2);
+    const y = selectVisibleTelegrams([match, jump], side);
+    expect(y.items.map(t => t.raw_hex)).toEqual(['0xmatch', '0xjump']);
+    expect(backlogStatusCount([], [jumpBacklog], opts, true)).toBe(1);
+    expect(backlogStatusCount([match, jump], [jumpBacklog], side, false)).toBe(1);
+    // Context flags are not jump targets.
+    expect(backlogStatusCount([], [jumpBacklog], { ...opts, jumpTargetKeys: [] }, true)).toBe(0);
+  });
 });

@@ -491,17 +491,19 @@ test('clicking a row at the live edge anchors that row, not the top one (#435)',
   expect(onListAnchorKeyChange).toHaveBeenLastCalledWith(rows(container)[3].getAttribute('data-akey'));
 });
 
-test('a goto request selects the telegram when it is in the list and stops live-following', async () => {
+test('a goto request selects the telegram in the buffer without changing follow', async () => {
   const onListFollowChange = vi.fn();
   const onMarkedKeysChange = vi.fn();
   const onMouseSelectedKeysChange = vi.fn();
   const onLastSelectedKeyChange = vi.fn();
+  const onJumpTarget = vi.fn();
   const { container } = renderTable({
     listFollow: true,
     onListFollowChange,
     onMarkedKeysChange,
     onMouseSelectedKeysChange,
     onLastSelectedKeyChange,
+    onJumpTarget,
     gotoRequest: { id: 1, telegram: TELEGRAMS[2] },
   });
 
@@ -509,29 +511,33 @@ test('a goto request selects the telegram when it is in the list and stops live-
   expect(onMarkedKeysChange).not.toHaveBeenCalled();
   expect(onMouseSelectedKeysChange).toHaveBeenCalledWith([key]);
   expect(onLastSelectedKeyChange).toHaveBeenCalledWith(key);
+  expect(onJumpTarget).toHaveBeenCalledWith(key, 'replace');
   expect(latestIdx(container)).toBe(2);
-  // Selection at the live edge pauses follow, the same way a row click does.
-  expect(onListFollowChange).toHaveBeenCalledWith(false);
+  expect(onListFollowChange).not.toHaveBeenCalled();
   await vi.waitFor(() => {
     expect(container.querySelector('.log-row.row-flash')?.getAttribute('data-akey')).toBe(key);
   });
 });
 
-test('a time-only gotoRequest jumps by time without selecting a row', async () => {
+test('a time-only gotoRequest inside the buffer scrolls without selecting or unfollowing', async () => {
   const onListFollowChange = vi.fn();
   const onMouseSelectedKeysChange = vi.fn();
+  const onJumpTarget = vi.fn();
   const oldest = TELEGRAMS[4];
   renderTable({
     listFollow: true,
     onListFollowChange,
     onMouseSelectedKeysChange,
-    gotoRequest: { id: 2, targetMs: new Date(oldest.timestamp).getTime() },
+    onJumpTarget,
+    bufferOldestMs: new Date(oldest.timestamp).getTime(),
+    bufferNewestMs: new Date(TELEGRAMS[0].timestamp).getTime(),
+    gotoRequest: { id: 2, targetMs: new Date(oldest.timestamp).getTime(), preserveFollow: true },
   });
 
-  // gotoTime → gotoIndex stops follow; time-only jumps never select a row.
   await vi.waitFor(() => {
-    expect(onListFollowChange).toHaveBeenCalledWith(false);
+    expect(onJumpTarget).toHaveBeenCalledWith(anchorKey(oldest), 'replace');
   });
+  expect(onListFollowChange).not.toHaveBeenCalled();
   expect(onMouseSelectedKeysChange).not.toHaveBeenCalled();
 });
 
@@ -554,21 +560,25 @@ test('goto older outside buffer asks fill; in-buffer older only navigates', asyn
     expect(onGotoFillOlder).toHaveBeenCalledWith(bufferOldest - 60_000);
   });
 
-  // Filtered view omits oldest row; target still in raw buffer → navigate, no fill.
+  // Filtered view omits oldest row; target still in raw buffer → scroll, no fill, no follow change.
   onGotoFillOlder.mockClear();
   onListFollowChange.mockClear();
+  const onJumpTarget = vi.fn();
   renderTable({
     telegrams: TELEGRAMS.slice(0, 4),
+    forceIncludeFrom: TELEGRAMS,
     listFollow: true,
     onListFollowChange,
+    onJumpTarget,
     bufferOldestMs: bufferOldest,
     bufferNewestMs: bufferNewest,
     onGotoFillOlder,
-    gotoRequest: { id: 11, targetMs: bufferOldest },
+    gotoRequest: { id: 11, targetMs: bufferOldest, preserveFollow: true },
   });
   await vi.waitFor(() => {
-    expect(onListFollowChange).toHaveBeenCalledWith(false);
+    expect(onJumpTarget).toHaveBeenCalled();
   });
+  expect(onListFollowChange).not.toHaveBeenCalled();
   expect(onGotoFillOlder).not.toHaveBeenCalled();
 });
 

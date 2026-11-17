@@ -84,7 +84,7 @@ export function SendToGaHost({
 }: {
   children: React.ReactNode;
   latestTelegram?: Telegram | null;
-  onGotoTelegram?: (telegram: Telegram, mods?: { additive?: boolean; range?: boolean }) => void;
+  onGotoTelegram?: (telegram: Telegram, mods?: { additive?: boolean; range?: boolean; load?: boolean }) => void;
   captureListScroll?: () => ListScrollSnapshot | null;
   restoreListScroll?: (snap: ListScrollSnapshot) => void | Promise<void>;
   linkedStatus?: LinkedRowStatus | null;
@@ -170,7 +170,7 @@ interface Props {
   /** Inline style for the trigger button. */
   buttonStyle?: React.CSSProperties;
   /** Jump the telegram list to the last-seen telegram shown in the popover. */
-  onGotoTelegram?: (telegram: Telegram, mods?: { additive?: boolean; range?: boolean }) => void;
+  onGotoTelegram?: (telegram: Telegram, mods?: { additive?: boolean; range?: boolean; load?: boolean }) => void;
   /** Live bus feed — ends a Read wait when a Response arrives. */
   latestTelegram?: Telegram | null;
   /** Host-owned panel (no trigger); survives virtualized row unmount. */
@@ -1295,7 +1295,7 @@ function SendToGaPopoverPanel({
                 timestamp={last.timestamp}
                 eventType={telegramEventType(last)}
                 onJump={onGotoTelegram ? mods => {
-                  if (mods && (mods.additive || mods.range)) onGotoTelegram(last, mods);
+                  if (mods && (mods.additive || mods.range || mods.load)) onGotoTelegram(last, mods);
                   else onGotoTelegram(last);
                 } : undefined}
               />
@@ -1481,7 +1481,7 @@ function SendToGaPopoverPanel({
             }}
             onJump={mods => {
               if (!statusTg || !onGotoTelegram) return;
-              if (mods && (mods.additive || mods.range)) onGotoTelegram(statusTg, mods);
+              if (mods && (mods.additive || mods.range || mods.load)) onGotoTelegram(statusTg, mods);
               else onGotoTelegram(statusTg);
             }}
           />

@@ -83,6 +83,49 @@ test('Escape closes the popover without submitting', () => {
   expect(onGoto).not.toHaveBeenCalled();
 });
 
+test('an outside time loads on Enter and only on a Ctrl-click of Go', () => {
+  const onGoto = vi.fn();
+  const oldest = new Date('2026-07-20T08:00:00').getTime();
+  const newest = new Date('2026-07-20T12:00:00').getTime();
+  render(
+    <GotoTimeControl seedMs={newest} oldestMs={oldest} newestMs={newest} onGoto={onGoto} />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Go to time' }));
+  const input = screen.getByLabelText('Target time');
+  fireEvent.change(input, { target: { value: '2026-07-20T07:00:00' } });
+  const go = screen.getByRole('button', { name: 'Go' });
+  expect(go).toHaveAttribute('title', 'Ctrl-Klick lädt nach');
+  fireEvent.click(go);
+  expect(onGoto).not.toHaveBeenCalled();
+  fireEvent.click(go, { ctrlKey: true });
+  expect(onGoto).toHaveBeenCalledWith(new Date('2026-07-20T07:00:00').getTime(), { load: true });
+
+  onGoto.mockClear();
+  fireEvent.click(screen.getByRole('button', { name: 'Go to time' }));
+  fireEvent.change(screen.getByLabelText('Target time'), { target: { value: '2026-07-20T13:00:00' } });
+  fireEvent.keyDown(screen.getByLabelText('Target time'), { key: 'Enter' });
+  expect(onGoto).toHaveBeenCalledWith(new Date('2026-07-20T13:00:00').getTime(), { load: true });
+});
+
+test('a history time outside the loaded span does not load', () => {
+  const onGoto = vi.fn();
+  render(
+    <GotoTimeControl
+      seedMs={seed}
+      oldestMs={seed - 60_000}
+      newestMs={seed}
+      scope="history"
+      onGoto={onGoto}
+    />,
+  );
+  fireEvent.click(screen.getByRole('button', { name: 'Go to time' }));
+  fireEvent.change(screen.getByLabelText('Target time'), { target: { value: '2026-07-20T01:00:00' } });
+  const go = screen.getByRole('button', { name: 'Go' });
+  expect(go).toHaveAttribute('title', 'Ziel ausgefiltert/nicht vorhanden');
+  fireEvent.click(go, { ctrlKey: true });
+  expect(onGoto).not.toHaveBeenCalled();
+});
+
 test('Go is disabled when there is no seed time', () => {
   render(<GotoTimeControl seedMs={null} onGoto={() => {}} />);
 

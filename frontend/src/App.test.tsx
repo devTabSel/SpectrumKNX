@@ -123,6 +123,8 @@ vi.mock('./hooks/useTelegramCache', async (importOriginal) => {
         setBufferRangeMinutes: () => {},
         trimToTimeWindow: () => {},
         enforceTimeWindow: () => {},
+        retainPausedInWindow: () => {},
+        publishBuffer: () => {},
       };
     },
   };
@@ -576,6 +578,38 @@ test('the direction chevron does not change the sort', async () => {
   fireEvent.click(await screen.findByRole('button', { name: 'Reading backward' }));
   expect(await screen.findByRole('button', { name: 'Reading forward' })).toBeInTheDocument();
   expect(readSortConfigPref()).toEqual([{ key: 'timestamp', direction: 'desc' }]);
+});
+
+test('fast-forward from forward leaves manual pause behind and goes live', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/api/database/info')) {
+      return {
+        ok: true,
+        json: async () => ({
+          oldest_timestamp: '2020-01-01T00:00:00.000Z',
+          newest_timestamp: '2024-06-01T00:00:00.000Z',
+        }),
+      };
+    }
+    return { ok: true, json: async () => ({}) };
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Playing' }));
+  expect(screen.getByRole('button', { name: 'Paused manually' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Load from oldest telegram in database' }));
+  expect(await screen.findByRole('button', { name: 'Stop' })).toBeDisabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Load up to newest telegram in database' }));
+  expect(await screen.findByRole('button', { name: 'Playing' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reading backward' })).toBeInTheDocument();
+  await waitFor(() => {
+    expect(readMonitorViewPref()).toMatchObject({
+      direction: 'backward',
+      anchorTs: null,
+      follow: true,
+      pauseMode: 'playing',
+    });
+  });
 });
 
 test('rewind and fast-forward change direction without changing the sort', async () => {

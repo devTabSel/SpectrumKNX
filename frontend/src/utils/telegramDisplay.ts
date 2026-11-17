@@ -249,7 +249,8 @@ export function statusPillCount(
  *
  * `filtered` (x) is the row count after the side panel and the quick filter,
  * excluding context rows. Force-visible rows still count, in the buffer and
- * in the backlog. The pill shows `x / y` only while the quick filter is
+ * in the backlog — marks, the mouse selection, the last selected row, and
+ * goto jump targets. The pill shows `x / y` only while the quick filter is
  * effective; otherwise it shows y.
  *
  * `unfiltered` is the raw buffer plus the raw backlog. The range tooltip and
@@ -274,8 +275,9 @@ export interface BufferBacklogCountInput {
  * Status-pill length of one filtered buffer view.
  *
  * With `excludeContext`, rows listed only as Time-Delta context drop out
- * (`contextKeys`). A force-visible row (marked, mouse-selected, or last
- * selected) stays even when that key is also a context key.
+ * (`contextKeys`). A force-visible row (marked, mouse-selected, last
+ * selected, or a goto jump target) stays even when that key is also a
+ * context key.
  */
 export function statusViewRowCount(
   items: readonly Telegram[],

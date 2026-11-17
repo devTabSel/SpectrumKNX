@@ -3,22 +3,38 @@ import { createPortal } from 'react-dom';
 import { format } from 'date-fns';
 import { Clock } from 'lucide-react';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
+import { classifyGotoTarget } from '../utils/gotoTarget';
+import { MISSING_GOTO_TITLE, OUTSIDE_GOTO_TITLE, type GotoScope } from '../utils/gotoBuffer';
 
 // "Quick goto time" control for the telegram list (#282): a clock button that
 // opens a small time-entry popover. Submitting jumps the list to the telegram
 // nearest that time and (via the parent) stops live-following.
 
+export interface GotoTimeMods {
+  /** Ctrl-click outside the buffer: load that window. */
+  load?: boolean;
+  /** Ctrl-click inside the buffer: add a jump target. */
+  additive?: boolean;
+}
+
 interface GotoTimeControlProps {
   /** Newest telegram time (epoch ms) used to seed the input, or null when empty. */
   seedMs: number | null;
   /** Called with the chosen time (epoch ms) when the user submits. */
-  onGoto: (targetMs: number) => void;
+  onGoto: (targetMs: number, mods?: GotoTimeMods) => void;
+  /** Raw-buffer (or loaded history) span. Omitted: every submit is a plain goto. */
+  oldestMs?: number | null;
+  newestMs?: number | null;
+  /** History cannot reload a missing target. Defaults to live. */
+  scope?: GotoScope;
 }
 
 /** date-fns pattern for an <input type="datetime-local" step="1"> value (local time). */
 const INPUT_FMT = "yyyy-MM-dd'T'HH:mm:ss";
 
-export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto }) => {
+export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({
+  seedMs, onGoto, oldestMs = null, newestMs = null, scope = 'live',
+}) => {
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState('');
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -28,12 +44,39 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
   const skipBlur = useRef(false);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
 
-  const submitFrom = (raw: string) => {
-    skipBlur.current = true;
+  const bounded = oldestMs != null && newestMs != null;
+  const submitFrom = (raw: string, via: 'field' | 'icon', ctrl: boolean) => {
     const ms = new Date(raw).getTime();
-    if (raw && !Number.isNaN(ms)) onGoto(ms);
+    if (!raw || Number.isNaN(ms)) {
+      skipBlur.current = true;
+      setOpen(false);
+      return;
+    }
+    const place = bounded ? classifyGotoTarget(ms, oldestMs, newestMs) : 'unknown';
+    if (place === 'unknown' || place === 'inside') {
+      skipBlur.current = true;
+      if (ctrl && place === 'inside') onGoto(ms, { additive: true });
+      else onGoto(ms);
+      setOpen(false);
+      return;
+    }
+    if (scope === 'history') {
+      skipBlur.current = true;
+      setOpen(false);
+      return;
+    }
+    if (via === 'icon' && !ctrl) return;
+    skipBlur.current = true;
+    onGoto(ms, { load: true });
     setOpen(false);
   };
+
+  const draftMs = value ? new Date(value).getTime() : NaN;
+  const draftPlace = bounded && Number.isFinite(draftMs)
+    ? classifyGotoTarget(draftMs, oldestMs, newestMs)
+    : 'unknown';
+  const goOutside = draftPlace === 'older' || draftPlace === 'newer';
+  const goMissing = goOutside && scope === 'history';
 
   const toggle = () => {
     if (open) { setOpen(false); return; }
@@ -105,7 +148,7 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
                 skipBlur.current = false;
                 return;
               }
-              submitFrom(inputRef.current?.value ?? value);
+              submitFrom(inputRef.current?.value ?? value, 'field', false);
             }}
             onKeyDown={e => {
               if (e.key === 'Escape') {
@@ -114,14 +157,22 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({ seedMs, onGoto
               }
               if (e.key !== 'Enter') return;
               e.preventDefault();
-              submitFrom((e.currentTarget as HTMLInputElement).value);
+              submitFrom((e.currentTarget as HTMLInputElement).value, 'field', e.ctrlKey || e.metaKey);
             }}
           />
+          {goMissing ? (
+            <style>{`
+              .goto-time-popover .tt-goto-missing { opacity: 0; }
+              .goto-time-popover:hover .tt-goto-missing { opacity: 1; }
+            `}</style>
+          ) : null}
           <button
-            className="goto-time-go"
+            className={`goto-time-go${goOutside ? ' tt-goto-outside' : ''}${goMissing ? ' tt-goto-missing' : ''}`}
             onMouseDown={e => e.preventDefault()}
-            onClick={() => submitFrom(inputRef.current?.value ?? value)}
+            onClick={e => submitFrom(inputRef.current?.value ?? value, 'icon', e.ctrlKey || e.metaKey)}
             disabled={!value}
+            title={goMissing ? MISSING_GOTO_TITLE : goOutside ? OUTSIDE_GOTO_TITLE : 'Go'}
+            style={goOutside ? { color: 'var(--warning-text)' } : undefined}
           >
             Go
           </button>
