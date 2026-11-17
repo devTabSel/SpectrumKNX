@@ -16,22 +16,28 @@ import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 import { SecondsField } from './SecondsField';
 import { READING_END_LABEL, type ReadingEndCause } from '../utils/telegramDisplay';
 import { classifyGotoTarget } from '../utils/gotoTarget';
+import { parseRangePreset, RANGE_PRESETS } from '../utils/rangeWindow';
 
 const INPUT_FMT = "yyyy-MM-dd'T'HH:mm:ss";
 /** Local datetime-with-seconds display width (YYYY-MM-DDTHH:mm:ss). */
 const DT_WIDTH_CH = INPUT_FMT.length;
 
 export type ReadDirection = 'forward' | 'backward';
-export type RangeUnit = 's' | 'm' | 'h';
+export type RangeUnit = 's' | 'm' | 'h' | 't';
 
-const RANGE_UNITS: RangeUnit[] = ['s', 'm', 'h'];
+const RANGE_UNITS: RangeUnit[] = ['s', 'm', 'h', 't'];
+const RANGE_LIST_ID = 'monitor-range-presets';
 
-/** Format canonical minutes into the active unit for the range field. */
+/** Format canonical minutes into the active unit for the range field. `t` is days. */
 export function formatRangeMinutes(minutes: number, unit: RangeUnit): string {
   if (unit === 's') return String(Math.round(minutes * 60));
   if (unit === 'h') {
     const h = minutes / 60;
     return Number.isInteger(h) ? String(h) : (Math.round(h * 100) / 100).toString();
+  }
+  if (unit === 't') {
+    const d = minutes / (60 * 24);
+    return Number.isInteger(d) ? String(d) : (Math.round(d * 100) / 100).toString();
   }
   return String(Math.round(minutes));
 }
@@ -43,12 +49,14 @@ export function rangeValueToMinutes(raw: string, unit: RangeUnit): number | null
   let minutes = n;
   if (unit === 's') minutes = n / 60;
   else if (unit === 'h') minutes = n * 60;
+  else if (unit === 't') minutes = n * 60 * 24;
   const next = Math.max(1, Math.round(minutes));
   return next;
 }
 
-/** Positive number (optional one decimal) for the range draft. */
+/** Positive number (optional one decimal) for the range draft. Preset labels pass through. */
 export function sanitizeRangeInput(raw: string): string {
+  if (parseRangePreset(raw)) return raw.trim();
   const t = raw.trim().replace(',', '.');
   if (t === '') return '';
   if (!/^(?:[1-9]\d*(?:\.\d*)?|0?\.\d+)$/.test(t)) return '';
@@ -73,6 +81,8 @@ export interface BufferStatusPillProps {
   /** Editable time window in minutes. */
   rangeMinutes: number;
   onRangeMinutesChange: (n: number) => void;
+  /** Editable cap shown after the range as `/ loadLimit`. */
+  onLoadLimitChange?: (n: number) => void;
   /** x: rows after the side panel and the quick filter, without context rows. */
   filteredCount: number;
   /** y: rows the side panel would show with the quick filter off, or the raw total when it is off. */
@@ -167,6 +177,7 @@ export function BufferStatusPill({
   loadLimit,
   rangeMinutes,
   onRangeMinutesChange,
+  onLoadLimitChange,
   filteredCount,
   totalCount,
   unfilteredCount,
@@ -195,9 +206,11 @@ export function BufferStatusPill({
   const [newestDraft, setNewestDraft] = useState(() => msToInput(newestMs));
   const [rangeUnit, setRangeUnit] = useState<RangeUnit>('m');
   const [rangeDraft, setRangeDraft] = useState(() => formatRangeMinutes(rangeMinutes, 'm'));
+  const [limitDraft, setLimitDraft] = useState(() => String(loadLimit));
   const [oldestFocused, setOldestFocused] = useState(false);
   const [newestFocused, setNewestFocused] = useState(false);
   const [rangeFocused, setRangeFocused] = useState(false);
+  const [limitFocused, setLimitFocused] = useState(false);
   const oldestRef = useRef<HTMLInputElement>(null);
   const newestRef = useRef<HTMLInputElement>(null);
   const oldestCancel = useRef(false);
@@ -218,6 +231,11 @@ export function BufferStatusPill({
   if (rangeMinutes !== rangeBaseline) {
     setRangeBaseline(rangeMinutes);
     if (!rangeFocused) setRangeDraft(formatRangeMinutes(rangeMinutes, rangeUnit));
+  }
+  const [limitBaseline, setLimitBaseline] = useState(loadLimit);
+  if (loadLimit !== limitBaseline) {
+    setLimitBaseline(loadLimit);
+    if (!limitFocused) setLimitDraft(String(loadLimit));
   }
 
   const countText = filterActive
@@ -296,22 +314,38 @@ export function BufferStatusPill({
   };
 
   const commitRange = (raw: string = rangeDraft) => {
-    const sanitized = sanitizeRangeInput(raw);
-    const next = rangeValueToMinutes(sanitized, rangeUnit);
+    const preset = parseRangePreset(raw);
+    const unit = preset?.unit ?? rangeUnit;
+    const sanitized = preset ? String(preset.value) : sanitizeRangeInput(raw);
+    const next = rangeValueToMinutes(sanitized, unit);
     if (next == null) {
       setRangeDraft(formatRangeMinutes(rangeMinutes, rangeUnit));
       return;
     }
-    setRangeDraft(formatRangeMinutes(next, rangeUnit));
+    if (preset) setRangeUnit(preset.unit);
+    setRangeDraft(formatRangeMinutes(next, unit));
     if (next !== rangeMinutes) onRangeMinutesChange(next);
+  };
+
+  const commitLimit = (raw: string) => {
+    const n = Number(raw.trim());
+    if (!Number.isFinite(n) || n < 1) {
+      setLimitDraft(String(loadLimit));
+      return;
+    }
+    const next = Math.floor(n);
+    setLimitDraft(String(next));
+    if (next !== loadLimit) onLoadLimitChange?.(next);
   };
 
   const cycleRangeUnit = () => {
     const idx = RANGE_UNITS.indexOf(rangeUnit);
     const nextUnit = RANGE_UNITS[(idx + 1) % RANGE_UNITS.length];
-    // Prefer the last committed duration so a half-typed draft does not jump.
+    // A formatted echo of the committed window cycles without rounding drift
+    // (days of a 1 h window are 0.04). A typed draft converts from that text.
     const fromDraft = rangeValueToMinutes(sanitizeRangeInput(rangeDraft), rangeUnit);
-    const minutes = fromDraft ?? rangeMinutes;
+    const echoing = formatRangeMinutes(rangeMinutes, rangeUnit) === rangeDraft;
+    const minutes = !echoing && fromDraft != null ? fromDraft : rangeMinutes;
     setRangeUnit(nextUnit);
     setRangeDraft(formatRangeMinutes(minutes, nextUnit));
   };
@@ -375,6 +409,9 @@ export function BufferStatusPill({
 
   return (
     <div data-buffer-status-pill="" style={pillStyle}>
+      <datalist id={RANGE_LIST_ID}>
+        {RANGE_PRESETS.map(preset => <option key={preset.label} value={preset.label}>{preset.label}</option>)}
+      </datalist>
       <button
         type="button"
         className="icon-button"
@@ -469,7 +506,8 @@ export function BufferStatusPill({
         alwaysShowUnit
         sanitize={sanitizeRangeInput}
         onUnitClick={cycleRangeUnit}
-        unitTitle="Cycle range unit (s / m / h)"
+        list={RANGE_LIST_ID}
+        unitTitle="Cycle range unit (s / m / h / t)"
         textAlign={rangeIconLeft ? 'right' : 'left'}
         startSlot={rangeIconLeft ? rangeAction : undefined}
         endSlot={rangeIconLeft ? undefined : rangeAction}
@@ -478,6 +516,41 @@ export function BufferStatusPill({
           commitRange(sanitized);
         }}
         onKeyDown={onRangeKeyDown}
+      />
+
+      <span aria-hidden style={{ color: 'var(--text-dim)', flexShrink: 0 }}>/</span>
+      <input
+        aria-label="Load limit"
+        value={limitFocused ? limitDraft : String(loadLimit)}
+        onChange={e => {
+          setLimitFocused(true);
+          setLimitDraft(e.target.value);
+        }}
+        onFocus={() => setLimitFocused(true)}
+        onBlur={e => {
+          setLimitFocused(false);
+          commitLimit(e.currentTarget.value);
+        }}
+        onKeyDown={e => {
+          if (e.key !== 'Enter') return;
+          e.preventDefault();
+          const raw = (e.target as HTMLInputElement).value;
+          commitLimit(raw);
+          (e.target as HTMLInputElement).blur();
+        }}
+        inputMode="numeric"
+        title="Load limit"
+        style={{
+          width: `${Math.max(4, String(loadLimit).length)}ch`,
+          border: 'none',
+          outline: 'none',
+          background: 'transparent',
+          color: 'var(--text-main)',
+          font: 'inherit',
+          fontSize: '0.72rem',
+          padding: 0,
+          flexShrink: 0,
+        }}
       />
 
       {readDirection === 'backward' ? (

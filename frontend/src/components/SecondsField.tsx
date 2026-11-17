@@ -33,6 +33,8 @@ export function SecondsField({
   autoFocus = false,
   onBlur,
   onKeyDown,
+  /** Datalist id for suggested values (range presets). */
+  list,
   sanitize = sanitizeSecondsInput,
   /** When set, the unit suffix is clickable (e.g. cycle s/m/h on the range field). */
   onUnitClick,
@@ -58,6 +60,8 @@ export function SecondsField({
   /** Called after sanitize with the committed value. */
   onBlur?: (sanitized: string) => void;
   onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
+  /** Datalist id for suggested values (range presets). */
+  list?: string;
   /** Override blur sanitize (default: positive integers only). */
   sanitize?: (raw: string) => string;
   onUnitClick?: () => void;
@@ -122,6 +126,7 @@ export function SecondsField({
       value={value}
       disabled={disabled}
       aria-label={ariaLabel}
+      list={list}
       autoFocus={autoFocus}
       onMouseDown={selectAllMouseDown}
       onChange={e => { if (!disabled) onChange(e.target.value); }}

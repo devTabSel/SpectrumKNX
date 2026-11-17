@@ -2,8 +2,14 @@ import React, { useState, useCallback, useRef } from 'react';
 import { X, Clock, Database, AlertCircle, CheckCircle2, Calendar, Search } from 'lucide-react';
 import type { Telegram } from '../hooks/useWebSocket';
 import type { ActiveFilters } from '../types/filters';
-import type { LoaderTimeRange } from './HistorySearch';
 import { loadHistoryTelegrams, type HistoryMetadata, type LoadedRange } from '../utils/historyLoad';
+
+export type LoaderTimeRange = {
+  relValue: number;
+  relUnit: 'seconds' | 'minutes' | 'hours' | 'days';
+  startTime: string;
+  endTime: string;
+};
 
 interface HistoryLoaderProps {
   onClose: () => void;

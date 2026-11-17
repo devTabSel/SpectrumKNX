@@ -310,19 +310,21 @@ describe('status pill x / y rows', () => {
     expect(shown.items).toHaveLength(3);
   });
 
-  it('counts y as the quick filter off, including context, for the buffer and the backlog', () => {
+  it('counts y as the quick filter off, without side-panel context misses', () => {
     const side = selectVisibleTelegrams(buffer, sideOpts);
-    expect(side.items.map(t => t.raw_hex)).toEqual(['0xmatch', '0xmark', '0xctx']);
+    // The context row fails the side panel and the quick filter is off, so it
+    // stays loaded but is not part of y. The marked miss stays.
+    expect(side.items.map(t => t.raw_hex)).toEqual(['0xmatch', '0xmark']);
     const combined = selectVisibleTelegrams(buffer.concat(backlog), sideOpts);
-    expect(backlogRowsIn(combined.items).sort()).toEqual(['0xbdirect', '0xbmark', '0xbnear', '0xbside']);
-    expect(backlogStatusCount(buffer, backlog, sideOpts, false)).toBe(4);
+    expect(backlogRowsIn(combined.items).sort()).toEqual(['0xbdirect', '0xbmark', '0xbside']);
+    expect(backlogStatusCount(buffer, backlog, sideOpts, false)).toBe(3);
     // The published buffer is newest-first. Membership does not depend on that order.
-    expect(backlogStatusCount([...buffer].reverse(), [...backlog].reverse(), sideOpts, false)).toBe(4);
+    expect(backlogStatusCount([...buffer].reverse(), [...backlog].reverse(), sideOpts, false)).toBe(3);
   });
 
   it('counts the backlog with the same rules: x drops context, y keeps the side-panel list', () => {
     expect(backlogStatusCount(buffer, backlog, qfOpts, true)).toBe(2);
-    expect(backlogStatusCount(buffer, backlog, sideOpts, false)).toBe(4);
+    expect(backlogStatusCount(buffer, backlog, sideOpts, false)).toBe(3);
     const pinned = pinnedVisibleKeys(qfOpts);
     const quick = selectVisibleTelegrams(buffer, qfOpts);
     const side = selectVisibleTelegrams(buffer, sideOpts);
@@ -337,8 +339,9 @@ describe('status pill x / y rows', () => {
       quickFilterActive: true,
     });
     // x = (match + marked) + (direct QF hit + marked backlog) = 4
-    // y = (match + marked + context) + (near + direct + side-only + marked) = 7
-    expect(counts).toEqual({ filtered: 4, total: 7, unfiltered: 9 });
+    // y = (match + marked) + (direct + side-only + marked) = 5
+    // The side-panel context miss is out of y; it returns under the quick filter.
+    expect(counts).toEqual({ filtered: 4, total: 5, unfiltered: 9 });
   });
 
   it('shows only y when the side panel is on and the quick filter is off', () => {

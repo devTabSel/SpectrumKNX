@@ -1,43 +1,46 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { TelegramTable, type SortConfig, type SortKey } from './TelegramTable';
 import { GotoBufferProvider } from './GotoBufferContext';
 import { readSortConfigPref, writeSortConfigPref, toggleSortLevel, sortTelegrams } from '../utils/sortConfig';
-import { expandWithDeltaContext } from '../utils/deltaContextExpansion';
-import { activeQuickFilter, type QuickPatterns } from '../utils/quickFilter';
-import { anchorKey } from '../utils/anchorKey';
+import type { QuickPatterns } from '../utils/quickFilter';
 import type { Telegram } from '../hooks/useWebSocket';
-import { History, Download, AlertTriangle, Trash2, SlidersHorizontal, LineChart, RefreshCw } from 'lucide-react';
-import { HistoryLoader } from './HistoryLoader';
+import { History, AlertTriangle, Trash2, SlidersHorizontal, LineChart, RefreshCw } from 'lucide-react';
 import { Visualizer } from './Visualizer';
 import { FilterPanel } from './FilterPanel';
 import { ResizablePane } from './ResizablePane';
-import { loadHistoryTelegrams, type LoadedRange } from '../utils/historyLoad';
+import { HistoryRangeBar } from './HistoryRangeBar';
+import {
+  isAbortError,
+  loadHistoryTelegrams,
+  mergeHistoryWindow,
+  msToLocalInput,
+  rangeToMs,
+  replaceHistoryWindow,
+  retainLoadedJumpTargets,
+  type LoadedRange,
+} from '../utils/historyLoad';
+import { windowFromRange } from '../utils/rangeWindow';
+import {
+  historyCounts,
+  historyDisplayFilters,
+  sidePanelPending,
+} from '../utils/historyView';
+import { selectVisibleTelegrams } from '../utils/selectVisibleTelegrams';
 import { buildViewUrl, type VizViewState } from '../utils/viewUrl';
 import {
   countFilterOptions,
   countSelections,
   enabledFilters,
-  effectiveDeltaContext,
   withoutSelections,
   hasActiveFilters,
-  matchesTelegram,
   type ActiveFilters,
   type FilterOptions,
 } from '../types/filters';
 
-// Stable identity so passing "no flags" doesn't churn memo deps (#319).
-const EMPTY_FLAG_SET: ReadonlySet<string> = new Set();
-
-export type LoaderTimeRange = {
-  relValue: number;
-  relUnit: 'seconds' | 'minutes' | 'hours' | 'days';
-  startTime: string;
-  endTime: string;
-};
-
 interface HistorySearchProps {
   visibleColumns: { [key: string]: boolean };
   loadLimit: number;
+  onLoadLimitChange?: (n: number) => void;
   filterOptions: FilterOptions;
   activeFilters: ActiveFilters;
   onFiltersChange: (f: ActiveFilters) => void;
@@ -54,56 +57,137 @@ interface HistorySearchProps {
   viewChangeToken?: number;
 }
 
+const DEFAULT_RANGE_MS = 3_600_000;
+
 export const HistorySearch: React.FC<HistorySearchProps> = ({
-  visibleColumns, loadLimit, filterOptions, activeFilters, onFiltersChange, onOpenSettings,
+  visibleColumns, loadLimit, onLoadLimitChange, filterOptions, activeFilters, onFiltersChange, onOpenSettings,
   projectLoaded, selectedVisualizationTargets, onVisualizationTargetsChange, initialView,
   filtersEnabled = true, onFiltersEnabledChange, viewChangeToken,
 }) => {
   const [telegrams, setTelegrams] = useState<Telegram[]>([]);
-  const [isLoaderOpen, setIsLoaderOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [metadata, setMetadata] = useState<{ total_count: number; limit_reached: boolean } | null>(null);
   const [sortConfig, setSortConfig] = useState<SortConfig>(readSortConfigPref);
-  // Per-side Time-Delta-Context flags — local to this view, like marks.
   const [flaggedBeforeKeys, setFlaggedBeforeKeys] = useState<string[]>([]);
   const [flaggedAfterKeys, setFlaggedAfterKeys] = useState<string[]>([]);
   const [markedKeys, setMarkedKeys] = useState<string[]>([]);
   const [mouseSelectedKeys, setMouseSelectedKeys] = useState<string[]>([]);
   const [lastSelectedKey, setLastSelectedKey] = useState<string | null>(null);
   const [jumpTargetKeys, setJumpTargetKeys] = useState<string[]>([]);
-  // Quick filter bar state, lifted so its matches anchor the context (#520).
   const [quickFilterOpen, setQuickFilterOpen] = useState(false);
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(false);
   const [quickPatterns, setQuickPatterns] = useState<QuickPatterns>({});
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [isVisualizerOpen, setIsVisualizerOpen] = useState(false);
 
-  // Persisted time range — survives HistoryLoader open/close cycles
-  const [timeRange, setTimeRange] = useState<LoaderTimeRange>({
-    relValue: 1, relUnit: 'hours', startTime: '', endTime: '',
-  });
+  // Backward anchor (newest). History has no direction icons; range edits keep newest.
+  const [endMs, setEndMs] = useState(() => Date.now());
+  const [startMs, setStartMs] = useState(() => Date.now() - DEFAULT_RANGE_MS);
 
-  // Snapshot of filters at the time of the last load — used to detect stale results
+  // Side panel that the loaded rows were fetched with. Live edits stay pending.
   const [filtersAtLoad, setFiltersAtLoad] = useState<ActiveFilters | null>(null);
-
-  // The time window of the last load — basis for shareable links (#150)
   const [loadedRange, setLoadedRange] = useState<LoadedRange | null>(null);
 
-  // Auto-load a view shared via URL exactly once on mount (#150)
+  const loadGen = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+  const telegramsRef = useRef(telegrams);
+  const boundsRef = useRef({ startMs, endMs });
+  useEffect(() => { telegramsRef.current = telegrams; }, [telegrams]);
+  useEffect(() => { boundsRef.current = { startMs, endMs }; }, [startMs, endMs]);
+
   const initialViewLoaded = useRef(false);
   useEffect(() => {
     if (!initialView || initialViewLoaded.current) return;
     initialViewLoaded.current = true;
+    const bounds = rangeToMs(initialView.range);
+    setStartMs(bounds.startMs);
+    setEndMs(bounds.endMs);
+    const gen = ++loadGen.current;
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setLoading(true);
     const limit = initialView.limit ?? loadLimit;
-    loadHistoryTelegrams(initialView.range, limit, initialView.filters)
+    loadHistoryTelegrams(initialView.range, limit, initialView.filters, ctrl.signal)
       .then(({ telegrams: loaded, metadata: meta }) => {
-        setTelegrams(loaded);
+        if (gen !== loadGen.current) return;
+        const next = replaceHistoryWindow(loaded, limit, 'backward');
+        telegramsRef.current = next;
+        setTelegrams(next);
         setMetadata(meta);
         setFiltersAtLoad(initialView.filters);
         setLoadedRange(initialView.range);
+        setJumpTargetKeys(prev => retainLoadedJumpTargets(prev, next));
         setIsVisualizerOpen(true);
       })
-      .catch(err => console.error('Failed to load shared view:', err));
+      .catch(err => {
+        if (isAbortError(err)) return;
+        console.error('Failed to load shared view:', err);
+      })
+      .finally(() => {
+        if (gen === loadGen.current) setLoading(false);
+      });
   }, [initialView, loadLimit]);
+
+  const effectiveFilters = useMemo(
+    () => (filtersEnabled ? enabledFilters(activeFilters) : withoutSelections(activeFilters)),
+    [filtersEnabled, activeFilters],
+  );
+  const spPending = sidePanelPending(filtersAtLoad, effectiveFilters);
+
+  const runLoad = useCallback(async (
+    bounds: { startMs: number; endMs: number },
+    mode: 'merge' | 'replace',
+    queryFilters: ActiveFilters,
+  ) => {
+    const gen = ++loadGen.current;
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    const prevBounds = boundsRef.current;
+    setStartMs(bounds.startMs);
+    setEndMs(bounds.endMs);
+    setLoading(true);
+    const range: LoadedRange = {
+      kind: 'absolute',
+      startTime: msToLocalInput(bounds.startMs),
+      endTime: msToLocalInput(bounds.endMs),
+    };
+    try {
+      const { telegrams: loaded, metadata: meta } = await loadHistoryTelegrams(
+        range, loadLimit, queryFilters, ctrl.signal,
+      );
+      if (gen !== loadGen.current) return;
+      const next = mode === 'replace'
+        ? replaceHistoryWindow(loaded, loadLimit, 'backward')
+        : mergeHistoryWindow(
+          telegramsRef.current, loaded, bounds.startMs, bounds.endMs, loadLimit, 'backward',
+        );
+      telegramsRef.current = next;
+      setTelegrams(next);
+      setMetadata(meta);
+      setLoadedRange(range);
+      setJumpTargetKeys(prev => retainLoadedJumpTargets(prev, next));
+      if (mode === 'replace') setFiltersAtLoad(queryFilters);
+    } catch (err) {
+      if (isAbortError(err)) {
+        if (gen === loadGen.current) {
+          setStartMs(prevBounds.startMs);
+          setEndMs(prevBounds.endMs);
+        }
+        return;
+      }
+      console.error('Failed to load history:', err);
+    } finally {
+      if (gen === loadGen.current) setLoading(false);
+    }
+  }, [loadLimit]);
+
+  const cancelLoad = () => {
+    abortRef.current?.abort();
+  };
+
+  const queryFiltersForWindow = () => filtersAtLoad ?? effectiveFilters;
 
   const handleSort = (key: SortKey, opts?: { additive?: boolean }) => {
     setSortConfig(prev => {
@@ -131,13 +215,10 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     setIsFilterOpen(false);
   };
 
-  // Time-Delta-Context window, edited from the telegram list's DELTA TIME
-  // quick-filter cell rather than the filter pane (#309, #371).
   const handleDeltaContextChange = (deltaBeforeMs: number, deltaAfterMs: number) => {
     onFiltersChange({ ...activeFilters, deltaBeforeMs, deltaAfterMs });
   };
 
-  // Toggles the window on/off without losing the entered values (#318).
   const handleDeltaContextEnabledChange = (deltaContextEnabled: boolean) => {
     onFiltersChange({ ...activeFilters, deltaContextEnabled });
   };
@@ -147,65 +228,36 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     [telegrams, sortConfig]
   );
 
-  // Master switch off (#436): behave as if no filter were set — for the rows
-  // shown and for what the next load asks the server for — but keep the set.
-  // Entries switched off one by one (#437) are left out as well.
-  const effectiveFilters = useMemo(
-    () => (filtersEnabled ? enabledFilters(activeFilters) : withoutSelections(activeFilters)),
-    [filtersEnabled, activeFilters]
+  // Quick filter applies at once. The side panel stays at the last load until refresh.
+  const displayFilters = useMemo(
+    () => (filtersAtLoad ? historyDisplayFilters(filtersAtLoad, activeFilters) : effectiveFilters),
+    [filtersAtLoad, activeFilters, effectiveFilters],
   );
-  const filtering = hasActiveFilters(effectiveFilters);
-
-  const handleLoad = (loaded: Telegram[], meta?: { total_count: number; limit_reached: boolean }, range?: LoadedRange) => {
-    setTelegrams(prev => {
-      const existingTs = new Set(prev.map(t => t.timestamp));
-      const newUnique = loaded.filter(t => !existingTs.has(t.timestamp));
-      const seenNew = new Set<string>();
-      const deduped = newUnique.filter(t => {
-        if (seenNew.has(t.timestamp)) return false;
-        seenNew.add(t.timestamp);
-        return true;
-      });
-      const next = [...prev, ...deduped];
-      return next.length > loadLimit ? next.slice(0, loadLimit) : next;
-    });
-    setMetadata(meta || null);
-    // Snapshot the filters at load time so we can detect when they diverge
-    setFiltersAtLoad(effectiveFilters);
-    if (range) setLoadedRange(range);
-  };
-
-  // In-memory filter pass — mirrors live view filtering so changing filters
-  // immediately applies to already-loaded data without a re-fetch. Also
-  // applies the Time-Delta-Context window client-side (#309/#319), since
-  // per-message flags are set after the historical load already happened.
-  const deltaExpandedHistory = useMemo(() => {
-    const noFilter = !filtering;
-    const quick = activeQuickFilter(quickFilterOpen, quickFilterEnabled, quickPatterns);
-    const matches = sortedTelegrams.map(t =>
-      (noFilter || matchesTelegram(t, effectiveFilters)) && (!quick || quick(t))
-    );
-    const { before, after } = effectiveDeltaContext(activeFilters);
-    const sideFlags = {
-      before: activeFilters.deltaContextEnabled ? new Set(flaggedBeforeKeys) : EMPTY_FLAG_SET,
-      after: activeFilters.deltaContextEnabled ? new Set(flaggedAfterKeys) : EMPTY_FLAG_SET,
-    };
-    const pinned = new Set(markedKeys);
-    for (const key of mouseSelectedKeys) pinned.add(key);
-    for (const key of jumpTargetKeys) pinned.add(key);
-    if (lastSelectedKey) pinned.add(lastSelectedKey);
-    return expandWithDeltaContext(
-      sortedTelegrams, matches, anchorKey, sideFlags, before, after, {
-        contextEnabled: activeFilters.deltaContextEnabled,
-        pinnedKeys: pinned,
-      },
-    );
-  }, [
-    sortedTelegrams, activeFilters, effectiveFilters, filtering, flaggedBeforeKeys, flaggedAfterKeys,
-    markedKeys, mouseSelectedKeys, lastSelectedKey, jumpTargetKeys,
-    quickFilterOpen, quickFilterEnabled, quickPatterns,
+  const visibleOpts = useMemo(() => ({
+    filters: displayFilters,
+    filtersEnabled: true,
+    quickFilterOpen,
+    quickFilterEnabled,
+    quickPatterns,
+    flaggedBeforeKeys,
+    flaggedAfterKeys,
+    markedKeys,
+    mouseSelectedKeys,
+    lastSelectedKey,
+    jumpTargetKeys,
+  }), [
+    displayFilters, quickFilterOpen, quickFilterEnabled, quickPatterns,
+    flaggedBeforeKeys, flaggedAfterKeys, markedKeys, mouseSelectedKeys,
+    lastSelectedKey, jumpTargetKeys,
   ]);
-  const filteredSortedTelegrams = deltaExpandedHistory.items;
+  const visible = useMemo(
+    () => selectVisibleTelegrams(sortedTelegrams, visibleOpts),
+    [sortedTelegrams, visibleOpts],
+  );
+  const counts = useMemo(
+    () => historyCounts(sortedTelegrams, visibleOpts),
+    [sortedTelegrams, visibleOpts],
+  );
   const loadedSpan = useMemo(() => {
     let oldest: number | null = null;
     let newest: number | null = null;
@@ -217,85 +269,117 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     }
     return { oldest, newest };
   }, [telegrams]);
-  // Keys of rows shown only as unfiltered context around a match/flag (#343).
-  const contextTelegramKeys = deltaExpandedHistory.contextKeys;
-  const contextTelegramParents = deltaExpandedHistory.contextParents;
 
-  // True when current filters are less restrictive than what was used to fetch,
-  // meaning some telegrams may be missing from the loaded set.
-  const filtersLessRestrictive = useMemo(() => {
-    const atLoad = filtersAtLoad;
-    if (!atLoad || telegrams.length === 0) return false;
-    // A category became less restrictive if it had selections at load time
-    // but now has fewer (or none) — data for the removed entries was never fetched.
-    const wasFiltered = (arr: (string | number)[]) => arr.length > 0;
-    const nowHasFewer = (now: (string | number)[], then: (string | number)[]) =>
-      then.some(v => !now.includes(v as never));
-    return (
-      (wasFiltered(atLoad.sources) && nowHasFewer(effectiveFilters.sources, atLoad.sources)) ||
-      (wasFiltered(atLoad.targets) && nowHasFewer(effectiveFilters.targets, atLoad.targets)) ||
-      (wasFiltered(atLoad.types)   && nowHasFewer(effectiveFilters.types,   atLoad.types))   ||
-      (wasFiltered(atLoad.dpts)    && nowHasFewer(effectiveFilters.dpts,    atLoad.dpts))
-    );
-  }, [effectiveFilters, filtersAtLoad, telegrams.length]);
-
-  // Count bubbles for the filter pane (#446), over everything loaded — not just
-  // the rows passing the current filters — so they match the Group Monitor's.
   const filterCounts = useMemo(
     () => (telegrams.length > 0 ? countFilterOptions(telegrams) : undefined),
     [telegrams]
   );
 
   const activeFilterCount = countSelections(enabledFilters(activeFilters));
+  const refreshTitle = loading
+    ? 'Cancel loading'
+    : spPending
+      ? 'Side panel changed — click to reload this range with the current filters'
+      : 'Reload this range with the current side panel';
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* Header / Sub-toolbar */}
       <div style={{
         padding: '0 1.25rem', height: '3.5rem', borderBottom: '1px solid var(--border-color)',
-        display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0,
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexShrink: 0, gap: '0.75rem',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', minWidth: 0 }}>
           {telegrams.length > 0 && (
             <span style={{
               fontSize: '0.75rem', color: 'var(--text-dim)', background: 'var(--bg-tag)',
               padding: '0.2rem 0.6rem', borderRadius: '999px', border: '1px solid var(--border-color)',
+              flexShrink: 0,
             }}>
-              {filtering
-                ? <>{filteredSortedTelegrams.length.toLocaleString()}<span style={{ color: 'var(--text-dim)', fontWeight: 400 }}> / {telegrams.length.toLocaleString()}</span></>
-                : telegrams.length.toLocaleString()
+              {counts.quickActive
+                ? <>{counts.x.toLocaleString()}<span style={{ color: 'var(--text-dim)', fontWeight: 400 }}> / {counts.y.toLocaleString()}</span></>
+                : counts.y.toLocaleString()
               } telegrams
             </span>
           )}
-          {filtersLessRestrictive && (
-            <span
-              style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem', color: 'var(--warning-text)', cursor: 'pointer' }}
-              onClick={() => setIsLoaderOpen(true)}
-              title="Filters were broadened after the last load — some matching telegrams may not be in the loaded set. Click to reload."
-            >
-              <RefreshCw size={13} /> Reload for full results
-            </span>
-          )}
+          <button
+            type="button"
+            className="icon-button"
+            data-sp-pending={spPending ? 'true' : 'false'}
+            aria-label={loading ? 'Cancel loading' : 'Reload history'}
+            title={refreshTitle}
+            onClick={() => {
+              if (loading) {
+                cancelLoad();
+                return;
+              }
+              void runLoad({ startMs, endMs }, 'replace', effectiveFilters);
+            }}
+            style={{
+              position: 'relative',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '0.35rem',
+              border: '1px solid var(--border-color)',
+              borderRadius: '7px',
+              color: spPending && !loading ? 'var(--warning-text)' : 'var(--text-dim)',
+              flexShrink: 0,
+            }}
+          >
+            {loading
+              ? <span className="chip-spinner" style={{ width: 16, height: 16, display: 'inline-block' }} />
+              : <RefreshCw size={16} />}
+            {spPending && !loading && (
+              <span
+                aria-hidden
+                data-sp-pending-dot=""
+                style={{
+                  position: 'absolute',
+                  top: 2,
+                  right: 2,
+                  width: 7,
+                  height: 7,
+                  borderRadius: '50%',
+                  background: 'var(--warning-text)',
+                }}
+              />
+            )}
+          </button>
           {metadata?.limit_reached && (
             <span
-              style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem', color: 'var(--warning-text)', cursor: 'pointer' }}
-              onClick={onOpenSettings}
-              title={`Limit reached (${loadLimit.toLocaleString()}). Click to adjust in settings.`}
+              style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.75rem', color: 'var(--warning-text)' }}
+              title={`Limit reached (${loadLimit.toLocaleString()}). Raise it in the range field.`}
             >
               <AlertTriangle size={13} /> Limit reached
             </span>
           )}
         </div>
 
-        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-          {/* Filter toggle */}
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', minWidth: 0 }}>
+          <HistoryRangeBar
+            startMs={startMs}
+            endMs={endMs}
+            loadLimit={loadLimit}
+            onLoadLimitChange={onLoadLimitChange}
+            onCommitStart={ms => {
+              if (ms >= endMs) return;
+              void runLoad({ startMs: ms, endMs }, 'merge', queryFiltersForWindow());
+            }}
+            onCommitEnd={ms => {
+              const span = Math.max(1000, endMs - startMs);
+              void runLoad(windowFromRange('backward', ms, span), 'merge', queryFiltersForWindow());
+            }}
+            onCommitRange={rangeMs => {
+              void runLoad(windowFromRange('backward', endMs, rangeMs), 'merge', queryFiltersForWindow());
+            }}
+          />
           <button
             className="icon-button"
             onClick={() => setIsFilterOpen(o => { const next = !o; if (next) setIsVisualizerOpen(false); return next; })}
             title="Toggle filter panel"
             style={{
               position: 'relative',
-              color: isFilterOpen || filtering ? 'var(--accent-primary)' : 'var(--text-dim)',
+              color: isFilterOpen || hasActiveFilters(effectiveFilters) ? 'var(--accent-primary)' : 'var(--text-dim)',
             }}
           >
             <SlidersHorizontal size={18} />
@@ -328,28 +412,26 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
           {telegrams.length > 0 && (
             <button
               className="icon-button"
-              onClick={() => { setTelegrams([]); setMetadata(null); }}
+              onClick={() => {
+                loadGen.current += 1;
+                abortRef.current?.abort();
+                setLoading(false);
+                setTelegrams([]);
+                telegramsRef.current = [];
+                setMetadata(null);
+                setJumpTargetKeys([]);
+                setFiltersAtLoad(null);
+              }}
               title="Clear results"
               style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0.85rem', border: '1px solid var(--border-color)', borderRadius: '7px', fontSize: '0.8125rem', color: 'var(--text-dim)' }}
             >
               <Trash2 size={16} /> Clear
             </button>
           )}
-          <button
-            className="icon-button"
-            onClick={() => setIsLoaderOpen(true)}
-            title="Load history"
-            style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.4rem 0.85rem', border: '1px solid var(--border-color)', borderRadius: '7px', fontSize: '0.8125rem', color: 'var(--text-dim)' }}
-          >
-            <Download size={16} />
-            {telegrams.length > 0 ? 'Load more' : 'Load history'}
-          </button>
         </div>
       </div>
 
-      {/* Content row: filter panel + table */}
       <div style={{ flex: 1, overflow: 'hidden', display: 'flex' }}>
-        {/* Filter panel (slide-in) */}
         <ResizablePane open={isFilterOpen} prefKey="filter-pane-width">
             <FilterPanel
               options={filterOptions}
@@ -363,7 +445,6 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
             />
         </ResizablePane>
 
-        {/* Table/Chart area */}
         <div style={{ flex: 1, overflow: 'hidden', position: 'relative', display: 'flex', flexDirection: 'column' }}>
           {isVisualizerOpen && telegrams.length > 0 ? (
             <Visualizer
@@ -373,8 +454,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               onClose={() => setIsVisualizerOpen(false)}
               getShareLink={loadedRange ? () => buildViewUrl({
                 plot: selectedVisualizationTargets,
-                // A shared link carries what is applied, not what is parked.
-                filters: enabledFilters(activeFilters),
+                filters: filtersAtLoad ?? enabledFilters(activeFilters),
                 range: loadedRange,
                 limit: loadLimit,
               }) : undefined}
@@ -385,23 +465,9 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               <div style={{ textAlign: 'center' }}>
                 <div style={{ fontSize: '1.125rem', fontWeight: 600, marginBottom: '0.4rem' }}>No data loaded</div>
                 <div style={{ color: 'var(--text-dim)', fontSize: '0.875rem' }}>
-                  {filtering
-                    ? 'Filters are set — click "Load history" to fetch matching data.'
-                    : 'Select a time range to search historical bus traffic.'}
+                  Choose a time range, then refresh to load it.
                 </div>
               </div>
-              <button
-                onClick={() => setIsLoaderOpen(true)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.75rem',
-                  padding: '0.875rem 2rem', background: 'var(--accent-primary)',
-                  border: 'none', borderRadius: '10px', color: 'white',
-                  fontWeight: 600, fontSize: '1rem', cursor: 'pointer',
-                  boxShadow: '0 0 24px rgba(99,102,241,0.35)', transition: 'filter 0.2s',
-                }}
-              >
-                <Download size={20} /> Load History
-              </button>
             </div>
           ) : (
             <GotoBufferProvider
@@ -410,7 +476,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               newestMs={loadedSpan.newest}
             >
             <TelegramTable
-              telegrams={filteredSortedTelegrams}
+              telegrams={visible.items}
               gotoScope="history"
               bufferOldestMs={loadedSpan.oldest}
               bufferNewestMs={loadedSpan.newest}
@@ -425,6 +491,8 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               sortConfig={sortConfig}
               onSort={handleSort}
               activeFilters={activeFilters}
+              filtersEnabled={filtersEnabled}
+              sidePanelFilters={filtersAtLoad ?? undefined}
               onQuickFilter={handleQuickFilter}
               onQuickVisualize={handleQuickVisualize}
               quickFilterOpen={quickFilterOpen}
@@ -445,25 +513,14 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               onMouseSelectedKeysChange={setMouseSelectedKeys}
               lastSelectedKey={lastSelectedKey}
               onLastSelectedKeyChange={setLastSelectedKey}
-              contextKeys={contextTelegramKeys}
-              contextParents={contextTelegramParents}
+              contextKeys={visible.contextKeys}
+              contextParents={visible.contextParents}
               viewChangeToken={viewChangeToken}
             />
             </GotoBufferProvider>
           )}
         </div>
       </div>
-
-      {isLoaderOpen && (
-        <HistoryLoader
-          onClose={() => setIsLoaderOpen(false)}
-          onLoad={handleLoad}
-          limit={loadLimit}
-          filters={effectiveFilters}
-          timeRange={timeRange}
-          onTimeRangeChange={setTimeRange}
-        />
-      )}
     </div>
   );
 };

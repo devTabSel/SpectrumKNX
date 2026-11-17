@@ -43,8 +43,10 @@ test('formatRangeMinutes / rangeValueToMinutes round-trip s/m/h', () => {
   expect(formatRangeMinutes(60, 's')).toBe('3600');
   expect(formatRangeMinutes(60, 'h')).toBe('1');
   expect(formatRangeMinutes(90, 'h')).toBe('1.5');
+  expect(formatRangeMinutes(1440, 't')).toBe('1');
   expect(rangeValueToMinutes('3600', 's')).toBe(60);
   expect(rangeValueToMinutes('1.5', 'h')).toBe(90);
+  expect(rangeValueToMinutes('1', 't')).toBe(1440);
   expect(rangeValueToMinutes('45', 'm')).toBe(45);
   expect(sanitizeRangeInput('1.5')).toBe('1.5');
   expect(sanitizeRangeInput('0')).toBe('');
@@ -55,11 +57,13 @@ test('renders range like SecondsField with clickable unit; filtered count is x /
   const range = screen.getByLabelText('Buffer range');
   expect(range).toHaveValue('60');
   expect(range.title).toBe('10/1000');
-  expect(screen.getByRole('button', { name: 'Cycle range unit (s / m / h)' })).toHaveTextContent('m');
+  expect(screen.getByRole('button', { name: 'Cycle range unit (s / m / h / t)' })).toHaveTextContent('m');
   const count = screen.getByLabelText('3 quick-filtered of 10');
   expect(count).toHaveTextContent('3 / 10');
   expect(count).toHaveAttribute('title', '3 quick-filtered of 10');
-  expect(screen.queryByLabelText('Load limit')).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Load limit')).toHaveValue('1000');
+  expect(document.getElementById('monitor-range-presets')?.textContent).toContain('15 m');
+  expect(document.getElementById('monitor-range-presets')?.textContent).toContain('1 t');
   expect(screen.queryByText(/History: loading/)).not.toBeInTheDocument();
 });
 
@@ -88,9 +92,9 @@ test('range tooltip stays on the raw buffer and backlog while the count shows y'
   expect(screen.getByRole('button', { name: /Clear \(also wipes/ })).toBeEnabled();
 });
 
-test('clicking range unit cycles s → m → h and keeps duration', () => {
+test('clicking range unit cycles s → m → h → t and keeps duration', () => {
   render(<BufferStatusPill {...baseProps} />);
-  const unit = screen.getByRole('button', { name: 'Cycle range unit (s / m / h)' });
+  const unit = screen.getByRole('button', { name: 'Cycle range unit (s / m / h / t)' });
   const range = screen.getByLabelText('Buffer range');
   expect(unit).toHaveTextContent('m');
   expect(range).toHaveValue('60');
@@ -99,7 +103,11 @@ test('clicking range unit cycles s → m → h and keeps duration', () => {
   expect(unit).toHaveTextContent('h');
   expect(range).toHaveValue('1');
 
-  fireEvent.click(unit); // h → s
+  fireEvent.click(unit); // h → t
+  expect(unit).toHaveTextContent('t');
+  expect(range).toHaveValue('0.04');
+
+  fireEvent.click(unit); // t → s
   expect(unit).toHaveTextContent('s');
   expect(range).toHaveValue('3600');
 
@@ -111,7 +119,7 @@ test('clicking range unit cycles s → m → h and keeps duration', () => {
 test('range commit converts unit to minutes on blur and Enter', () => {
   const onRangeMinutesChange = vi.fn();
   render(<BufferStatusPill {...baseProps} onRangeMinutesChange={onRangeMinutesChange} />);
-  const unit = screen.getByRole('button', { name: 'Cycle range unit (s / m / h)' });
+  const unit = screen.getByRole('button', { name: 'Cycle range unit (s / m / h / t)' });
   fireEvent.click(unit); // → h
   const input = screen.getByLabelText('Buffer range');
   fireEvent.change(input, { target: { value: '2' } });
@@ -136,7 +144,7 @@ test('range: forward = value+unit left / icon right; backward = icon left / valu
   expect(field.firstElementChild).toBe(clear);
   const cluster = field.querySelector('[data-seconds-value-unit]') as HTMLElement;
   expect(cluster.contains(screen.getByLabelText('Buffer range'))).toBe(true);
-  expect(cluster.contains(screen.getByRole('button', { name: 'Cycle range unit (s / m / h)' }))).toBe(true);
+  expect(cluster.contains(screen.getByRole('button', { name: 'Cycle range unit (s / m / h / t)' }))).toBe(true);
   expect(cluster.style.justifyContent).toBe('flex-end');
   expect(field.style.justifyContent).toBe('space-between');
 

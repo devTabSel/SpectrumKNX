@@ -3,7 +3,7 @@ import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
 import { ChevronUp, ChevronDown, Filter, LineChart, X, Clock, Plus, Minus, Download, List, Search } from 'lucide-react';
-import { effectiveDeltaContext, enabledFilters, matchesTelegram, type ActiveFilters } from '../types/filters';
+import { effectiveDeltaContext, enabledFilters, hasActiveFilters, matchesTelegram, type ActiveFilters } from '../types/filters';
 import {
   contextRailSigns,
   expandWithDeltaContext,
@@ -183,6 +183,12 @@ interface TelegramTableProps {
   isManualPause?: boolean;
   /** Master filter toggle. Backlog rows are matched against `activeFilters` only while this is on. */
   filtersEnabled?: boolean;
+  /**
+   * Side panel the loaded rows were fetched with. History passes the snapshot
+   * from the last refresh so a pending edit does not change the jump icon.
+   * Omitted uses `activeFilters` (the monitor applies the panel immediately).
+   */
+  sidePanelFilters?: ActiveFilters;
   /** Telegrams ingested since the buffer snapshot was frozen. */
   pausedCount?: number;
   /**
@@ -630,7 +636,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   listFollow, onListFollowChange, liveFollow = true, readDirection, directionGesture = 'rebuild',
   covered, bufferAnchorTs = null, readingEnd,
   listAnchorKey, onListAnchorKeyChange,
-  isPaused = false, isManualPause = false, filtersEnabled = true, pausedCount = 0,
+  isPaused = false, isManualPause = false, filtersEnabled = true, sidePanelFilters, pausedCount = 0,
   pausedTelegrams = EMPTY_PAUSED,
   onPauseFlush, onPauseReveal, onJumpToLive,
   markedKeys: markedKeysProp, onMarkedKeysChange,
@@ -1243,6 +1249,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     () => activeQuickFilter(quickOpen, quickEnabled, currentPatterns, quickColumnEnabled),
     [quickOpen, quickEnabled, currentPatterns, quickColumnEnabled],
   );
+  const responseFailsSidePanel = useCallback((row: Telegram) => {
+    if (sidePanelFilters) {
+      return hasActiveFilters(sidePanelFilters) && !matchesTelegram(row, sidePanelFilters);
+    }
+    return !noMainFilter && !matchesTelegram(row, pillFilters);
+  }, [sidePanelFilters, noMainFilter, pillFilters]);
   const focusAddressSet = useMemo(
     () => (focusFilteringActive ? new Set(focusListAddresses) : null),
     [focusFilteringActive, focusListAddresses],
@@ -4258,19 +4270,23 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         const loadedFollowed = gotoScope === 'history' && isGroupRead(t)
           ? historyLoadedByRead?.get(readFollowKey(t))
           : undefined;
-        const responseShown = loadedFollowed != null && shownKeySet.has(anchorKey(loadedFollowed));
-        // Loaded, but the quick filter — not the scrollport — is why it is absent.
+        const candidate = gotoScope === 'history' ? loadedFollowed : followed;
+        const responseShown = candidate != null && shownKeySet.has(anchorKey(candidate));
+        // Side panel hid the target: no icon, same as a response that was never loaded.
+        // READ stays answered (orange). The quick-filter case below is unchanged.
+        const spHidden = candidate != null && !responseShown && responseFailsSidePanel(candidate);
         const quickHidden = gotoScope === 'history'
           && loadedFollowed != null
           && !responseShown
+          && !spHidden
           && pillQuick != null
           && !pillQuick(loadedFollowed);
-        const answered = quickHidden
+        const answered = quickHidden || spHidden
           ? true
           : Boolean(
             followed && (!isTimeSort || readAnsweredByNewestVisible(followed, viewportTelegrams)),
           );
-        const readyTarget = quickHidden
+        const readyTarget = quickHidden || spHidden
           ? undefined
           : (followed ?? (responseShown ? loadedFollowed : undefined));
         const showReadyJump = readyTarget != null;
@@ -4610,7 +4626,16 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         if (t?.closest('input, textarea, select, button, [contenteditable="true"]')) return;
         tableRootRef.current?.focus({ preventScroll: true });
       }}
-      style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', outline: 'none' }}
+      className={noMainFilter ? undefined : 'tt-sp-active'}
+      data-sp-active={noMainFilter ? 'false' : 'true'}
+      style={{
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        outline: 'none',
+        boxShadow: noMainFilter ? undefined : 'inset 3px 0 0 var(--warning, #f59e0b)',
+      }}
     >
       {/* Quick info bar (#311): same column grid as the quick filter — two rows
           per column (oldest/newest, min/max Δt, counts, …). */}
@@ -5886,6 +5911,11 @@ style.textContent = `
   .marks-pill button[aria-disabled="true"] {
     opacity: 0.4;
     cursor: default;
+  }
+
+  /* Active side panel: vertical orange bar on the left. QF keeps its bottom edge. */
+  .tt-sp-active {
+    box-shadow: inset 3px 0 0 var(--warning, #f59e0b);
   }
 
   /* Status line under the open QF: inactive → dark, idle → gray, filtering → orange. */

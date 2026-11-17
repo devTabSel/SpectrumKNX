@@ -41,6 +41,7 @@ import { classifyGotoTarget, enterForward, gotoWindow, nextJumpTargets, parkOnFi
 import { GotoBufferProvider } from './components/GotoBufferContext';
 import { LayoutDashboard, History, Settings, SlidersHorizontal, LineChart, BarChart2, Building2, Database, ChevronDown, Sun, Moon, Monitor, FolderInput, Send, Sparkles, Clock, List } from 'lucide-react';
 import { getPref, setPref } from './utils/prefs';
+import { HISTORY_LOAD_LIMIT_PREF, MONITOR_LOAD_LIMIT_PREF, readLoadLimit } from './utils/loadLimitPref';
 import { getLabel, getFileName } from './utils/labels';
 import { useTheme } from './hooks/useTheme';
 import { apiUrl, wsUrl } from './utils/basePath';
@@ -371,7 +372,8 @@ function App() {
   const [serverConfig, setServerConfig] = useState<any>(null);
 
   // ── Settings & Persistence ──────────────────────────────────────────────────
-  const [loadLimit, setLoadLimit] = useState(Number(getPref('loadLimit') || 100000));
+  const [monitorLoadLimit, setMonitorLoadLimit] = useState(() => readLoadLimit(MONITOR_LOAD_LIMIT_PREF));
+  const [historyLoadLimit, setHistoryLoadLimit] = useState(() => readLoadLimit(HISTORY_LOAD_LIMIT_PREF));
   const [monitorPageSize, setMonitorPageSize] = useState(() => {
     const raw = getPref('monitorPageSize');
     if (raw == null || raw.trim() === '') return MONITOR_PAGE_SIZE_DEFAULT;
@@ -433,7 +435,7 @@ function App() {
     covered: coveredIntervals,
     readingEnd,
   } = useTelegramCache(
-    loadLimit,
+    monitorLoadLimit,
     // An explicit anchor loads through fillAnchorWindow instead of the
     // newest-first startup restore. The hook reads this flag once.
     restoreOnStartup && initialMonitor.view.anchorTs == null,
@@ -632,13 +634,14 @@ function App() {
 
   // ── Persist settings ────────────────────────────────────────────────────────
   useEffect(() => {
-    setPref('loadLimit', loadLimit.toString());
+    setPref(MONITOR_LOAD_LIMIT_PREF, monitorLoadLimit.toString());
+    setPref(HISTORY_LOAD_LIMIT_PREF, historyLoadLimit.toString());
     setPref('monitorPageSize', String(monitorPageSize));
     setPref('bufferRangeMinutes', String(bufferRangeMinutes));
     setPref('visibleColumns', JSON.stringify(visibleColumns));
     setPref('rateMode', rateMode);
     setPref('restoreOnStartup', String(restoreOnStartup));
-  }, [loadLimit, monitorPageSize, bufferRangeMinutes, visibleColumns, rateMode, restoreOnStartup]);
+  }, [monitorLoadLimit, historyLoadLimit, monitorPageSize, bufferRangeMinutes, visibleColumns, rateMode, restoreOnStartup]);
 
   useEffect(() => {
     // Disk matches the forward form even when a timestamped switch left a
@@ -1538,7 +1541,8 @@ function App() {
                       await fillAnchorWindow(dir, edgeTs);
                     }, true);
                   }}
-                  loadLimit={loadLimit}
+                  loadLimit={monitorLoadLimit}
+                  onLoadLimitChange={setMonitorLoadLimit}
                   rangeMinutes={bufferRangeMinutes}
                   onRangeMinutesChange={n => { void applyBufferRange(n); }}
                   filteredCount={pillCounts.filtered}
@@ -1756,20 +1760,6 @@ function App() {
                     <span style={{ fontSize: '0.85rem' }}>{col === 'dpt' ? 'DPT' : col.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase())}</span>
                   </button>
                 ))}
-              </div>
-
-              <h3 style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: '0.75rem', letterSpacing: '0.05em' }}>
-                Loading Limit
-              </h3>
-              <div className="input-group">
-                <input
-                  type="number"
-                  step="1000"
-                  className="glass-input"
-                  style={{ width: '100%', padding: '0.75rem', fontSize: '0.85rem' }}
-                  value={loadLimit}
-                  onChange={e => setLoadLimit(Number(e.target.value))}
-                />
               </div>
 
               <h3 style={{ fontSize: '0.75rem', color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: '0.75rem', letterSpacing: '0.05em', marginTop: '1.5rem' }}>
@@ -2231,7 +2221,8 @@ function App() {
         ) : (
           <HistorySearch
             visibleColumns={visibleColumns}
-            loadLimit={loadLimit}
+            loadLimit={historyLoadLimit}
+            onLoadLimitChange={setHistoryLoadLimit}
             filterOptions={filterOptions}
             activeFilters={activeFilters}
             onFiltersChange={handleFiltersChange}
@@ -2256,7 +2247,7 @@ function App() {
             const { startMs, endMs } = rangeToMs(range);
             void loadRange(startMs, endMs);
           }}
-          limit={loadLimit}
+          limit={monitorLoadLimit}
           mode="monitor"
         />
       )}

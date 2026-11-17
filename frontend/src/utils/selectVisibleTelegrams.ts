@@ -6,6 +6,7 @@ import { addKeys } from './markReasons';
 import { activeQuickFilter, type QuickFilterColumnEnabled, type QuickPatterns } from './quickFilter';
 import {
   effectiveDeltaContext,
+  hasActiveFilters,
   matchesTelegram,
   type ActiveFilters,
 } from '../types/filters';
@@ -94,9 +95,47 @@ export function matchVisibleTelegram(opts: SelectVisibleOpts): (t: Telegram) => 
   return (t) => (noFilter || matchesTelegram(t, f)) && (!quick || quick(t));
 }
 
+function passesSidePanel(t: Telegram, opts: SelectVisibleOpts): boolean {
+  return noMainFilter(opts) || matchesTelegram(t, opts.filters);
+}
+
+/**
+ * A row that fails the side panel stays visible only as a quick-filter context
+ * row: the quick filter is on, the delta window is on, and a quick-filter
+ * match (that itself passes the side panel) pulls it in. Marked rows, the
+ * mouse selection, the last selected row, and jump targets stay anyway.
+ * Rows that pass the side panel keep the previous quick-filter behaviour.
+ */
+function keepDespiteSidePanel(
+  t: Telegram,
+  opts: SelectVisibleOpts,
+  pinned: ReadonlySet<string>,
+  quick: ((row: Telegram) => boolean) | null,
+  contextParents: ReadonlyMap<string, readonly string[]>,
+  byKey: ReadonlyMap<string, Telegram>,
+  contextWindowOn: boolean,
+): boolean {
+  if (passesSidePanel(t, opts)) return true;
+  const key = anchorKey(t);
+  if (pinned.has(key)) return true;
+  if (!quick || !contextWindowOn) return false;
+  const parents = contextParents.get(key);
+  if (!parents) return false;
+  for (const parent of parents) {
+    const row = byKey.get(parent);
+    if (row && passesSidePanel(row, opts) && quick(row)) return true;
+  }
+  return false;
+}
+
 /**
  * Main-filter + QF-anchor + Time-Delta-Context expand + force-include of
- * marked, mouse-selected, and last-selected rows. `sorted` must already be in display sort order.
+ * marked, mouse-selected, last-selected, and jump-target rows.
+ * `sorted` must already be in display sort order.
+ *
+ * A row that fails the side panel is not shown as side-panel context. It
+ * stays only when it is force-visible, or when it sits in the quick filter's
+ * context window. The caller keeps the underlying row (server context is stock).
  */
 export function selectVisibleTelegrams(
   sorted: readonly Telegram[],
@@ -128,9 +167,28 @@ export function selectVisibleTelegrams(
       pinnedKeys: pinned,
     },
   );
-  return {
-    items: forceIncludeKeys(sorted, expanded.items, anchorKey, pinned),
-    contextKeys: expanded.contextKeys,
-    contextParents: expanded.contextParents,
-  };
+  const withPins = forceIncludeKeys(sorted, expanded.items, anchorKey, pinned);
+  // Side panel off: every row passes it, so context and pins stay as before.
+  if (noFilter || !hasActiveFilters(f)) {
+    return {
+      items: withPins,
+      contextKeys: expanded.contextKeys,
+      contextParents: expanded.contextParents,
+    };
+  }
+
+  const contextWindowOn = (before > 0 || after > 0);
+  const byKey = new Map<string, Telegram>();
+  for (const row of sorted) byKey.set(anchorKey(row), row);
+  const items = withPins.filter(t => keepDespiteSidePanel(
+    t, opts, pinned, quick, expanded.contextParents, byKey, contextWindowOn,
+  ));
+  const kept = new Set(items.map(anchorKey));
+  const contextKeys = new Set<string>();
+  for (const key of expanded.contextKeys) if (kept.has(key)) contextKeys.add(key);
+  const contextParents = new Map<string, readonly string[]>();
+  for (const [key, parents] of expanded.contextParents) {
+    if (kept.has(key)) contextParents.set(key, parents);
+  }
+  return { items, contextKeys, contextParents };
 }

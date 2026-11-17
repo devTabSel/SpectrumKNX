@@ -335,6 +335,50 @@ function HistoryReadTable({
 
 const READ_QUICK: QuickPatterns = { type: { top: 'Read', bottom: '' } };
 
+test('an active side panel paints a vertical bar and leaves the quick-filter edge alone', () => {
+  const { container, rerender } = renderTable([historyRead]);
+  expect(container.querySelector('[data-sp-active="false"]')).toBeInTheDocument();
+  rerender(
+    <TelegramTable
+      telegrams={[historyRead]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, sources: ['1.1.1'] }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+    />,
+  );
+  const marked = container.querySelector('[data-sp-active="true"]');
+  expect(marked).toBeInTheDocument();
+  expect(marked).toHaveClass('tt-sp-active');
+});
+
+test('a history response hidden by the side panel has no jump icon and the READ stays answered', () => {
+  const { container } = render(
+    <GotoBufferProvider scope="history" oldestMs={Date.parse(historyRead.timestamp)} newestMs={Date.parse(historyResponse.timestamp)}>
+      <TelegramTable
+        telegrams={[historyRead]}
+        forceIncludeFrom={[historyResponse, historyRead]}
+        gotoScope="history"
+        bufferOldestMs={Date.parse(historyRead.timestamp)}
+        bufferNewestMs={Date.parse(historyResponse.timestamp)}
+        visibleColumns={visibleColumns}
+        sortConfig={sortConfig}
+        onSort={vi.fn()}
+        activeFilters={{ ...DEFAULT_FILTERS, sources: ['1.1.1'] }}
+        sidePanelFilters={{ ...DEFAULT_FILTERS, sources: ['1.1.1'] }}
+        onQuickFilter={vi.fn()}
+        onQuickVisualize={vi.fn()}
+      />
+    </GotoBufferProvider>,
+  );
+  expect(container.querySelector('.tt-type-read-answered')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Go to response' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: FILTERED_GOTO_TITLE })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: MISSING_GOTO_TITLE })).not.toBeInTheDocument();
+});
+
 test('a history READ with no loaded response has no jump icon', () => {
   const { container } = render(<HistoryReadTable loaded={[historyRead]} />);
   expect(container.querySelector('.tt-type-read')).toBeInTheDocument();
