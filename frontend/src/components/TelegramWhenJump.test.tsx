@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { TelegramWhenJump, formatTelegramWhen, telegramEventType } from './TelegramWhenJump';
 import { GotoBufferProvider } from './GotoBufferContext';
+import { FILTERED_GOTO_TITLE } from '../utils/gotoBuffer';
 
 describe('formatTelegramWhen', () => {
   it('formats ISO timestamps as yyyy-MM-dd HH:mm:ss', () => {
@@ -80,6 +81,25 @@ describe('TelegramWhenJump', () => {
     expect(onJump).toHaveBeenCalledWith();
     fireEvent.click(jump, { ctrlKey: true });
     expect(onJump).toHaveBeenLastCalledWith({ additive: true, range: false });
+  });
+
+  it('shows a quick-filter-hidden target as an orange icon that only ctrl-click adds', () => {
+    const onJump = vi.fn();
+    render(
+      <TelegramWhenJump
+        tone="filtered"
+        timestamp={new Date(5_000).toISOString()}
+        onJump={onJump}
+      />,
+    );
+    const jump = screen.getByRole('button', { name: FILTERED_GOTO_TITLE });
+    expect(jump).toHaveClass('tt-goto-filtered');
+    expect(jump).not.toHaveClass('tt-goto-missing');
+    expect(jump).toHaveStyle({ color: 'var(--warning-text)' });
+    fireEvent.click(jump);
+    expect(onJump).not.toHaveBeenCalled();
+    fireEvent.click(jump, { ctrlKey: true });
+    expect(onJump).toHaveBeenCalledWith({ additive: true, range: false });
   });
 
   it('shows a missing history target only as a no-op orange icon', () => {

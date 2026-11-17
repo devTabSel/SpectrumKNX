@@ -1,10 +1,14 @@
+import { useState } from 'react';
 import { render, fireEvent, createEvent, screen, act } from '@testing-library/react';
 import { expect, test, vi, beforeAll } from 'vitest';
 import { TelegramTable, type SortConfig } from './TelegramTable';
+import { GotoBufferProvider } from './GotoBufferContext';
 import { makeTelegram } from '../test/telegramFactory';
 import type { Telegram } from '../hooks/useWebSocket';
 import { DEFAULT_FILTERS } from '../types/filters';
 import { anchorKey } from '../utils/anchorKey';
+import { FILTERED_GOTO_TITLE, MISSING_GOTO_TITLE } from '../utils/gotoBuffer';
+import { activeQuickFilter, type QuickPatterns } from '../utils/quickFilter';
 
 // jsdom has no layout: give the virtualizer a viewport and rows a rect so it
 // renders items and the anchor logic finds rows. `scrollBlockSize` is the
@@ -243,6 +247,155 @@ test('a visible READ follows a response that is only in the read-phase source', 
   expect(container.querySelector('.tt-type-read-answered')).not.toBeInTheDocument();
   expect(container.querySelector('.tt-type-read')).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Go to response' })).not.toBeInTheDocument();
+});
+
+const historyRead = makeTelegram({
+  timestamp: '2026-01-01T10:00:00.000Z',
+  simplified_type: 'Read',
+  telegram_type: 'GroupValueRead',
+  target_address: '1/2/3',
+  source_address: '1.1.1',
+  raw_hex: '0x00',
+  value_formatted: 'ReadOnly',
+});
+const historyResponse = makeTelegram({
+  timestamp: '2026-01-01T10:00:02.000Z',
+  simplified_type: 'Response',
+  telegram_type: 'GroupValueResponse',
+  target_address: '1/2/3',
+  source_address: '1.1.2',
+  raw_hex: '0x01',
+  value_formatted: 'FromResponse',
+});
+const historyPinnedWrite = makeTelegram({
+  timestamp: '2026-01-01T10:00:03.000Z',
+  simplified_type: 'Write',
+  telegram_type: 'GroupValueWrite',
+  target_address: '9/9/9',
+  source_address: '1.1.3',
+  raw_hex: '0x02',
+  value_formatted: 'PinnedWrite',
+});
+
+/** History parent: quick-filter misses stay out unless they are jump targets. */
+function HistoryReadTable({
+  loaded,
+  quickPatterns,
+  initialJumpKeys = [],
+  onJumpTarget = () => {},
+  onGotoTelegram,
+}: {
+  loaded: Telegram[];
+  quickPatterns?: QuickPatterns;
+  initialJumpKeys?: string[];
+  onJumpTarget?: (key: string, mode: 'replace' | 'add') => void;
+  onGotoTelegram?: (telegram: Telegram, mods?: { additive?: boolean; range?: boolean; load?: boolean }) => void;
+}) {
+  const [jumpKeys, setJumpKeys] = useState(initialJumpKeys);
+  const predicate = quickPatterns ? activeQuickFilter(true, true, quickPatterns) : null;
+  const telegrams = loaded.filter(t =>
+    jumpKeys.includes(anchorKey(t)) || !predicate || predicate(t),
+  );
+  let oldest = Infinity;
+  let newest = -Infinity;
+  for (const t of loaded) {
+    const ms = Date.parse(t.timestamp);
+    if (ms < oldest) oldest = ms;
+    if (ms > newest) newest = ms;
+  }
+  return (
+    <GotoBufferProvider scope="history" oldestMs={oldest} newestMs={newest}>
+      <TelegramTable
+        telegrams={telegrams}
+        forceIncludeFrom={loaded}
+        gotoScope="history"
+        bufferOldestMs={oldest}
+        bufferNewestMs={newest}
+        jumpTargetKeys={jumpKeys}
+        onJumpTarget={(key, mode) => {
+          onJumpTarget(key, mode);
+          setJumpKeys(prev => (
+            mode === 'add' ? (prev.includes(key) ? prev : [...prev, key]) : [key]
+          ));
+        }}
+        quickFilterOpen={quickPatterns != null}
+        quickFilterEnabled={quickPatterns != null}
+        quickPatterns={quickPatterns}
+        visibleColumns={visibleColumns}
+        sortConfig={sortConfig}
+        onSort={vi.fn()}
+        activeFilters={DEFAULT_FILTERS}
+        onQuickFilter={vi.fn()}
+        onQuickVisualize={vi.fn()}
+        onGotoTelegram={onGotoTelegram}
+      />
+    </GotoBufferProvider>
+  );
+}
+
+const READ_QUICK: QuickPatterns = { type: { top: 'Read', bottom: '' } };
+
+test('a history READ with no loaded response has no jump icon', () => {
+  const { container } = render(<HistoryReadTable loaded={[historyRead]} />);
+  expect(container.querySelector('.tt-type-read')).toBeInTheDocument();
+  expect(container.querySelector('.tt-type-read-answered')).not.toBeInTheDocument();
+  expect(container.querySelector('.tt-goto-missing, .tt-goto-filtered')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Go to response' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: FILTERED_GOTO_TITLE })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: MISSING_GOTO_TITLE })).not.toBeInTheDocument();
+});
+
+test('a history response hidden by the quick filter is an orange ctrl-add jump', () => {
+  const onJumpTarget = vi.fn();
+  const { container } = render(
+    <HistoryReadTable
+      loaded={[historyPinnedWrite, historyResponse, historyRead]}
+      quickPatterns={READ_QUICK}
+      initialJumpKeys={[anchorKey(historyPinnedWrite)]}
+      onJumpTarget={onJumpTarget}
+    />,
+  );
+  const rowKeys = () => [...container.querySelectorAll('.log-row')].map(row => row.getAttribute('data-akey'));
+  expect(container.querySelector('.tt-type-read-answered')).toBeInTheDocument();
+  expect(rowKeys()).not.toContain(anchorKey(historyResponse));
+  expect(rowKeys()).toContain(anchorKey(historyPinnedWrite));
+  const jump = screen.getByRole('button', { name: FILTERED_GOTO_TITLE });
+  expect(jump).toHaveClass('tt-goto-filtered');
+  expect(jump).not.toHaveClass('tt-goto-missing');
+  expect(jump).toHaveStyle({ color: 'var(--warning-text)' });
+
+  fireEvent.click(jump);
+  expect(onJumpTarget).not.toHaveBeenCalled();
+  expect(rowKeys()).not.toContain(anchorKey(historyResponse));
+
+  fireEvent.click(jump, { ctrlKey: true });
+  expect(onJumpTarget).toHaveBeenCalledTimes(1);
+  expect(onJumpTarget).toHaveBeenCalledWith(anchorKey(historyResponse), 'add');
+  expect(rowKeys()).toContain(anchorKey(historyResponse));
+  expect(rowKeys()).toContain(anchorKey(historyPinnedWrite));
+  expect(screen.queryByRole('button', { name: FILTERED_GOTO_TITLE })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Go to response' })).toBeInTheDocument();
+});
+
+test('a history response that is loaded and visible keeps the ready jump', () => {
+  const onGotoTelegram = vi.fn();
+  const onJumpTarget = vi.fn();
+  const { container } = render(
+    <HistoryReadTable
+      loaded={[historyResponse, historyRead]}
+      onGotoTelegram={onGotoTelegram}
+      onJumpTarget={onJumpTarget}
+    />,
+  );
+  expect(container.querySelector('.tt-type-read-answered')).toBeInTheDocument();
+  const jump = screen.getByRole('button', { name: 'Go to response' });
+  expect(jump).not.toHaveClass('tt-goto-filtered');
+  fireEvent.click(jump);
+  expect(onGotoTelegram).toHaveBeenCalledWith(historyResponse);
+  expect(onJumpTarget).not.toHaveBeenCalled();
+  fireEvent.click(jump, { ctrlKey: true });
+  expect(onGotoTelegram).toHaveBeenLastCalledWith(historyResponse, { additive: true, range: false });
+  expect(onJumpTarget).not.toHaveBeenCalled();
 });
 
 test('a time-sorted Read turns green from the newest visible timestamp', () => {

@@ -55,6 +55,7 @@ import { ttTypeClass } from '../utils/telegramCellStyles';
 import {
   isGroupRead,
   readAnsweredByNewestVisible,
+  readFollowKey,
   responsesFollowingReads,
   rowsIntersectingViewport,
 } from '../utils/groupValueEvents';
@@ -1295,6 +1296,18 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const responseByRead = useMemo(
     () => responsesFollowingReads(readPhaseTelegrams ?? telegrams),
     [readPhaseTelegrams, telegrams],
+  );
+  // History answers a Read from the loaded set, including a Response the quick
+  // filter has dropped from `telegrams`. The live list keeps its own source.
+  const historyLoadedByRead = useMemo(
+    () => (gotoScope === 'history'
+      ? responsesFollowingReads(forceIncludeFrom ?? telegrams)
+      : null),
+    [gotoScope, forceIncludeFrom, telegrams],
+  );
+  const shownKeySet = useMemo(
+    () => new Set(coverageFiltered.map(anchorKey)),
+    [coverageFiltered],
   );
   const [rowCache] = useState(() => ({ source: null as readonly Telegram[] | null, rows: [] as TelegramRow[] }));
   const naturalTelegramRows = useMemo<TelegramRow[]>(() => {
@@ -3562,47 +3575,52 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   // only moves the list to that time.
   const appliedGotoId = useRef<number | null>(null);
   const pendingGotoSelect = useRef<{ key: string; additive: boolean; range: boolean; selected: boolean } | null>(null);
+  // History quick-filter reveal: same goto as a parent request, used only when
+  // the parent did not send one. Ctrl adds the jump target; it does not load.
+  const filteredJumpSeq = useRef(0);
+  const [filteredJump, setFilteredJump] = useState<ListGotoRequest | null>(null);
+  const listGoto = gotoRequest ?? filteredJump;
   useEffect(() => {
-    if (!gotoRequest) return;
+    if (!listGoto) return;
     // Time-only jump (rewind / fill-then-scroll): no telegram identity to select.
     // Wait for rows before marking applied so a post-fill re-render can retry.
-    if (gotoRequest.targetMs != null && !gotoRequest.telegram) {
-      if (appliedGotoId.current === gotoRequest.id) return;
+    if (listGoto.targetMs != null && !listGoto.telegram) {
+      if (appliedGotoId.current === listGoto.id) return;
       if (telegramRows.length === 0) return;
-      appliedGotoId.current = gotoRequest.id;
+      appliedGotoId.current = listGoto.id;
       pendingGotoSelect.current = null;
-      gotoTime(gotoRequest.targetMs, {
-        allowFill: gotoRequest.allowFill !== false,
-        additive: !!gotoRequest.additive,
-        preserveFollow: gotoRequest.preserveFollow,
+      gotoTime(listGoto.targetMs, {
+        allowFill: listGoto.allowFill !== false,
+        additive: !!listGoto.additive,
+        preserveFollow: listGoto.preserveFollow,
       });
       return;
     }
-    if (!gotoRequest.telegram) return;
-    const key = anchorKey(gotoRequest.telegram);
-    if (appliedGotoId.current !== gotoRequest.id) {
+    if (!listGoto.telegram) return;
+    const key = anchorKey(listGoto.telegram);
+    if (appliedGotoId.current !== listGoto.id) {
       const pool = forceIncludeFrom ?? telegrams;
       const inPool = pool.some(t => anchorKey(t) === key);
       if (!inPool) {
-        appliedGotoId.current = gotoRequest.id;
+        appliedGotoId.current = listGoto.id;
         pendingGotoSelect.current = null;
         if (telegramRows.length === 0) return;
-        const ms = new Date(gotoRequest.telegram.timestamp).getTime();
+        const ms = new Date(listGoto.telegram.timestamp).getTime();
         if (!Number.isNaN(ms)) {
           gotoTime(ms, {
-            allowFill: gotoRequest.allowFill !== false && !gotoRequest.preserveFollow,
-            additive: !!gotoRequest.additive,
-            ...(gotoRequest.preserveFollow ? { preserveFollow: true } : {}),
+            allowFill: listGoto.allowFill !== false && !listGoto.preserveFollow,
+            additive: !!listGoto.additive,
+            ...(listGoto.preserveFollow ? { preserveFollow: true } : {}),
           });
         }
         return;
       }
-      appliedGotoId.current = gotoRequest.id;
+      appliedGotoId.current = listGoto.id;
       if (hiddenKeyListRef.current.includes(key)) {
         setHiddenKeyList(prev => removeKeys(prev, [key]));
       }
-      const additive = !!gotoRequest.additive;
-      const range = !!gotoRequest.range;
+      const additive = !!listGoto.additive;
+      const range = !!listGoto.range;
       onJumpTarget?.(key, additive && !range ? 'add' : 'replace');
       const idx = telegramRows.findIndex(t => anchorKey(t) === key);
       if (idx !== -1) {
@@ -3629,7 +3647,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     if (!rowInViewport(pending.key)) gotoIndex(idx, { preserveFollow: true });
     flashRow(pending.key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gotoRequest, telegramRows, telegrams, forceIncludeFrom]);
+  }, [listGoto, telegramRows, telegrams, forceIncludeFrom]);
 
   // React to list updates before paint: follow the live edge, or pin the
   // anchored row by correcting scrollTop by its real pixel shift.
@@ -4235,11 +4253,27 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
       case 'type': {
         const followed = isGroupRead(t)
-          ? responseByRead.get(`${t.timestamp}|${t.target_address}`)
+          ? responseByRead.get(readFollowKey(t))
           : undefined;
-        const answered = Boolean(
-          followed && (!isTimeSort || readAnsweredByNewestVisible(followed, viewportTelegrams)),
-        );
+        const loadedFollowed = gotoScope === 'history' && isGroupRead(t)
+          ? historyLoadedByRead?.get(readFollowKey(t))
+          : undefined;
+        const responseShown = loadedFollowed != null && shownKeySet.has(anchorKey(loadedFollowed));
+        // Loaded, but the quick filter — not the scrollport — is why it is absent.
+        const quickHidden = gotoScope === 'history'
+          && loadedFollowed != null
+          && !responseShown
+          && pillQuick != null
+          && !pillQuick(loadedFollowed);
+        const answered = quickHidden
+          ? true
+          : Boolean(
+            followed && (!isTimeSort || readAnsweredByNewestVisible(followed, viewportTelegrams)),
+          );
+        const readyTarget = quickHidden
+          ? undefined
+          : (followed ?? (responseShown ? loadedFollowed : undefined));
+        const showReadyJump = readyTarget != null;
         return (
           <div style={cellBox} className="tt-cell filterable-cell">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0, overflow: 'hidden' }}>
@@ -4248,26 +4282,39 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                 answered={answered}
                 className={ttTypeClass(t.simplified_type, answered)}
               />
-              {followed && (
+              {showReadyJump && readyTarget && (
                 <span onClick={e => e.stopPropagation()}>
                   <TelegramWhenJump
-                    timestamp={followed.timestamp}
+                    timestamp={readyTarget.timestamp}
                     onJump={mods => {
-                      if (mods) onGotoTelegram?.(followed, mods);
-                      else onGotoTelegram?.(followed);
+                      if (mods) onGotoTelegram?.(readyTarget, mods);
+                      else onGotoTelegram?.(readyTarget);
                     }}
                     jumpLabel="Go to response"
                   />
                 </span>
               )}
-              {gotoScope === 'history' && isGroupRead(t) && !followed && (
+              {quickHidden && loadedFollowed && (
                 <span onClick={e => e.stopPropagation()}>
                   <TelegramWhenJump
-                    tone="missing"
-                    timestamp={t.timestamp}
-                    onJump={() => {}}
+                    tone="filtered"
+                    onJump={mods => {
+                      if (!mods?.additive && !mods?.range) return;
+                      filteredJumpSeq.current += 1;
+                      setFilteredJump({
+                        id: filteredJumpSeq.current,
+                        telegram: loadedFollowed,
+                        additive: !!mods.additive,
+                        range: !!mods.range,
+                        preserveFollow: true,
+                        allowFill: false,
+                      });
+                    }}
                   />
                 </span>
+              )}
+              {gotoScope === 'history' && isGroupRead(t) && !showReadyJump && !quickHidden && (
+                <TelegramWhenJump reserveJump />
               )}
               <button
                 className={`quick-filter-btn ${activeFilters.types.includes(t.simplified_type || t.telegram_type) ? 'active' : ''}`}

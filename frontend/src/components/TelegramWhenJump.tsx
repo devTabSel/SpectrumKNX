@@ -5,6 +5,7 @@ import { Clock } from 'lucide-react';
 import type { Telegram } from '../hooks/useWebSocket';
 import { EventTypeLabel } from './EventTypeLabel';
 import {
+  FILTERED_GOTO_TITLE,
   MISSING_GOTO_TITLE,
   OUTSIDE_GOTO_TITLE,
   gotoIconTone,
@@ -48,8 +49,10 @@ interface Props {
    *  Ctrl/Cmd and Shift are forwarded as selection modifiers. */
   onJump?: (mods?: TelegramJumpMods) => void;
   /**
-   * Overrides the buffer-span tone. History uses `missing` when the target
-   * telegram is not in the loaded set.
+   * Overrides the buffer-span tone.
+   * `missing`: target is outside the loaded history span (hover-only, no click).
+   * `filtered`: target is loaded but hidden by the quick filter. The icon stays
+   * visible; a plain click does nothing and Ctrl/Cmd adds the jump.
    */
   tone?: GotoIconTone;
   /** aria-label / title for the jump button. */
@@ -95,16 +98,28 @@ export function TelegramWhenJump({
   const tone = toneProp ?? gotoIconTone(Number.isFinite(targetMs) ? targetMs : null, buf);
   const missing = tone === 'missing';
   const outside = tone === 'outside';
-  const label = missing ? MISSING_GOTO_TITLE : outside ? OUTSIDE_GOTO_TITLE : jumpLabel;
+  const filtered = tone === 'filtered';
+  const label = missing
+    ? MISSING_GOTO_TITLE
+    : outside
+      ? OUTSIDE_GOTO_TITLE
+      : filtered
+        ? FILTERED_GOTO_TITLE
+        : jumpLabel;
   const jump = onJump ? (
     <button
       type="button"
-      className={`quick-filter-bar-toggle${outside ? ' tt-goto-outside' : ''}${missing ? ' tt-goto-missing' : ''}`}
+      className={`quick-filter-bar-toggle${outside ? ' tt-goto-outside' : ''}${missing ? ' tt-goto-missing' : ''}${filtered ? ' tt-goto-filtered' : ''}`}
       title={label}
       aria-label={label}
       onClick={e => {
         if (missing) return;
         const ctrl = e.ctrlKey || e.metaKey;
+        if (filtered) {
+          if (!ctrl) return;
+          onJump({ additive: true, range: e.shiftKey });
+          return;
+        }
         if (outside) {
           if (!ctrl) return;
           onJump({ load: true });
@@ -118,7 +133,7 @@ export function TelegramWhenJump({
       style={{
         flexShrink: 0,
         margin: 0,
-        color: outside || missing ? 'var(--warning-text)' : undefined,
+        color: outside || missing || filtered ? 'var(--warning-text)' : undefined,
       }}
     >
       <Clock size={13} />

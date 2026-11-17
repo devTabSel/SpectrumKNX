@@ -20,10 +20,12 @@ export function useGotoBuffer(): GotoBufferValue {
 }
 
 /** Icon chrome for a jump whose target time is known. */
-export type GotoIconTone = 'ready' | 'outside' | 'missing';
+export type GotoIconTone = 'ready' | 'outside' | 'missing' | 'filtered';
 
 export const OUTSIDE_GOTO_TITLE = 'Ctrl-Klick lädt nach';
 export const MISSING_GOTO_TITLE = 'Ziel ausgefiltert/nicht vorhanden';
+/** Loaded history response hidden by the quick filter. Ctrl adds it as a jump target. */
+export const FILTERED_GOTO_TITLE = 'Vom Quick-Filter ausgeblendet – Ctrl-Klick springt';
 
 /**
  * Live targets outside the buffer need Ctrl to load. History has no reload:
