@@ -183,9 +183,29 @@ test('shows the five main-panel tabs with Telegram List active by default (#374)
 
 test('play/pause and the filter toggle live with the Telegram List (#374)', async () => {
   render(<App />);
-  // The list panel owns its own header with the filter toggle and play/pause.
-  expect(await screen.findByRole('button', { name: 'Toggle filter panel' })).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Playing' })).toBeInTheDocument();
+  // Both sit in the monitor table toolbar: filter on the left, pill in the center.
+  const playing = await screen.findByRole('button', { name: 'Playing' });
+  const filter = screen.getByRole('button', { name: 'Toggle filter panel' });
+  const bar = playing.closest('[data-tt-header]');
+  expect(bar).toBeTruthy();
+  expect(bar!.closest('[data-telegram-table]')).toBeTruthy();
+  expect(playing.closest('[data-tt-header-center]')).toBe(bar!.querySelector('[data-tt-header-center]'));
+  expect(filter.closest('[data-tt-header-leading]')).toBe(bar!.querySelector('[data-tt-header-leading]'));
+  expect(document.querySelector('[data-app-header]')!.contains(playing)).toBe(false);
+  expect(document.querySelector('[data-app-header]')!.querySelector('[data-buffer-status-pill]')).toBeNull();
+});
+
+test('history tab keeps its range bar and does not show the monitor buffer pill', async () => {
+  render(<App />);
+  expect(await screen.findByRole('button', { name: 'Playing' })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Group Monitor' }));
+  fireEvent.click(screen.getByRole('button', { name: 'History Search' }));
+  expect(await screen.findByLabelText('History range')).toBeInTheDocument();
+  expect(screen.getByLabelText('History load limit')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reload history' })).toBeInTheDocument();
+  expect(screen.queryByLabelText('Buffer range')).not.toBeInTheDocument();
+  expect(document.querySelector('[data-buffer-status-pill]')).toBeNull();
+  expect(document.querySelector('[data-tt-header]')).toBeNull();
 });
 
 test('manual pause latches as Paused manually', async () => {

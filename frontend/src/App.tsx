@@ -1493,7 +1493,7 @@ function App() {
         {legacyTimestamps && <LegacyTimestampBanner />}
 
         {/* === GLOBAL HEADER === */}
-        <div style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', flexShrink: 0, background: 'var(--bg-inset)' }}>
+        <div data-app-header="" style={{ padding: '1rem 1.25rem', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', flexShrink: 0, background: 'var(--bg-inset)' }}>
           {/* Left: App Section Dropdown */}
           <div style={{ display: 'flex', alignItems: 'center', flexShrink: 0, zIndex: 50 }}>
             <NavDropdown
@@ -1530,150 +1530,6 @@ function App() {
           <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexShrink: 0 }}>
             {activeTab === 'live' && !isSettingsOpen && (
               <>
-                <BufferStatusPill
-                  oldestMs={bufferOldestTs}
-                  newestMs={bufferNewestTs}
-                  readDirection={readDirection}
-                  onReadDirectionChange={dir => {
-                    void changeReadDirection(dir, async () => {
-                      // No timestamp: the anchor is the buffer edge (oldest
-                      // forward, newest backward), then trim and fill.
-                      // Forward → backward does not go live (auto, follow off).
-                      const edgeTs = dir === 'forward' ? bufferOldestTs : bufferNewestTs;
-                      if (edgeTs == null) return;
-                      await fillAnchorWindow(dir, edgeTs);
-                    }, true);
-                  }}
-                  loadLimit={monitorLoadLimit}
-                  onLoadLimitChange={setMonitorLoadLimit}
-                  rangeMinutes={bufferRangeMinutes}
-                  onRangeMinutesChange={n => { void applyBufferRange(n); }}
-                  filteredCount={pillCounts.filtered}
-                  totalCount={pillCounts.total}
-                  unfilteredCount={pillCounts.unfiltered}
-                  filterActive={quickFilterActive}
-                  readingEnd={readingEnd}
-                  onClear={() => {
-                    setMonitorView(v => ({
-                      ...v,
-                      follow: false,
-                      anchorTs: null,
-                    }));
-                    // Real wipe. clear() also drops the anchor timestamp.
-                    void clearTelegrams();
-                  }}
-                  onCancelLoad={cancelLoad}
-                  pauseTitle={pauseTitle}
-                  pauseColor={pauseColor}
-                  pauseMode={pauseMode === 'off' ? 'auto' : pauseMode}
-                  pauseDisabled={bufferEmpty}
-                  onTogglePause={togglePause}
-                  busRate={busRate}
-                  rateMode={rateMode}
-                  onCycleRateMode={() => setRateMode(m => (m === 's' ? 'm' : m === 'm' ? 'h' : 's'))}
-                  wsConnected={isConnected}
-                  isHistoryLoading={isHistoryLoading}
-                  fixedAnchor={readDirection === 'backward' && monitorView.anchorTs != null}
-                  historyLoadError={historyLoadError}
-                  onScrollToTime={ms => {
-                    listGotoSeq.current += 1;
-                    setListGoto({
-                      id: listGotoSeq.current,
-                      targetMs: ms,
-                      preserveFollow: true,
-                      allowFill: false,
-                    });
-                    setActivePanel('list');
-                  }}
-                  onCommitOutside={ms => {
-                    void (async () => {
-                      await loadOutsideGoto(ms);
-                      listGotoSeq.current += 1;
-                      setListGoto({
-                        id: listGotoSeq.current,
-                        targetMs: ms,
-                        allowFill: false,
-                      });
-                      setActivePanel('list');
-                    })();
-                  }}
-                  onLoadFromDbOldest={() => {
-                    void (async () => {
-                      try {
-                        const res = await fetch(apiUrl('/api/database/info'));
-                        if (!res.ok) return;
-                        const info = await res.json() as { oldest_timestamp?: string | null };
-                        const raw = info.oldest_timestamp;
-                        if (!raw) return;
-                        const ms = new Date(raw).getTime();
-                        if (Number.isNaN(ms)) return;
-                        await changeReadDirection('forward', async () => {
-                          placeAnchor('forward', ms);
-                          await fillAnchorWindow('forward', ms);
-                        });
-                        setMonitorView(v => enterForward({ ...v, direction: 'forward', anchorTs: ms }));
-                        setActivePanel('list');
-                        listGotoSeq.current += 1;
-                        setListGoto({ id: listGotoSeq.current, targetMs: ms });
-                      } catch {
-                        // spinner / loadError cover failures
-                      }
-                    })();
-                  }}
-                  onLoadFromDbNewest={() => {
-                    // Capture before the awaits: changeReadDirection may park a
-                    // forward view on auto, and that must not hide what FF was
-                    // asked to do. Only FF turns live on from a non-live state.
-                    const priorPause = pauseMode;
-                    void (async () => {
-                      try {
-                        const res = await fetch(apiUrl('/api/database/info'));
-                        if (!res.ok) return;
-                        const info = await res.json() as { newest_timestamp?: string | null };
-                        const raw = info.newest_timestamp;
-                        if (!raw) return;
-                        const ms = new Date(raw).getTime();
-                        if (Number.isNaN(ms)) return;
-                        await changeReadDirection('backward', async () => {
-                          placeAnchor('backward', ms);
-                          await fillAnchorWindow('backward', ms);
-                        });
-                        setActivePanel('list');
-                        if (priorPause === 'manual') {
-                          // Stay paused on the newest telegram. No follow.
-                          setMonitorView(v => ({
-                            ...v,
-                            direction: 'backward',
-                            anchorTs: ms,
-                            follow: false,
-                            pauseMode: 'manual',
-                          }));
-                          setBufferAnchor({ direction: 'backward', ts: ms });
-                          applyCachePause(true);
-                          listGotoSeq.current += 1;
-                          setListGoto({ id: listGotoSeq.current, targetMs: ms });
-                        } else {
-                          // Auto, off, or already playing: live edge, follow on.
-                          // Playing simply continues; auto and off enter live here.
-                          // No list-goto: that jump unfollows and pins the anchor
-                          // again, which would leave live. Follow sits on the edge.
-                          setMonitorView(v => ({
-                            ...v,
-                            direction: 'backward',
-                            anchorTs: null,
-                            follow: true,
-                            pauseMode: 'playing',
-                          }));
-                          setBufferAnchor({ direction: 'backward', ts: null });
-                          applyCachePause(false);
-                        }
-                      } catch {
-                        // spinner / loadError cover failures
-                      }
-                    })();
-                  }}
-                />
-
                 {/* Main-panel switch (#374): the five panels close back to the
                     list; the Building opener also clears any drilled-in device. */}
                 <PanelSwitch
@@ -2099,14 +1955,8 @@ function App() {
                 ) : isDatabaseOpen ? (
                   <DatabaseOverlay onClose={() => setIsDatabaseOpen(false)} />
                 ) : (
-                  <>
-                    {/* Telegram List panel header (#374): its own filter toggle
-                        (top-left) and the live play/pause it governs. */}
-                    <div style={{
-                      display: 'flex', alignItems: 'center', gap: '0.5rem',
-                      padding: '0.4rem 0.75rem', flexShrink: 0,
-                      borderBottom: '1px solid var(--border-color)',
-                    }}>
+                  <TelegramTable
+                    headerLeading={(
                       <button
                         className="icon-button"
                         onClick={() => setIsFilterOpen(o => !o)}
@@ -2127,8 +1977,152 @@ function App() {
                           }}>{activeFilterCount}</span>
                         )}
                       </button>
-                    </div>
-                    <TelegramTable
+                    )}
+                    headerCenter={(
+                      <BufferStatusPill
+                        oldestMs={bufferOldestTs}
+                        newestMs={bufferNewestTs}
+                        readDirection={readDirection}
+                        onReadDirectionChange={dir => {
+                          void changeReadDirection(dir, async () => {
+                            // No timestamp: the anchor is the buffer edge (oldest
+                            // forward, newest backward), then trim and fill.
+                            // Forward → backward does not go live (auto, follow off).
+                            const edgeTs = dir === 'forward' ? bufferOldestTs : bufferNewestTs;
+                            if (edgeTs == null) return;
+                            await fillAnchorWindow(dir, edgeTs);
+                          }, true);
+                        }}
+                        loadLimit={monitorLoadLimit}
+                        onLoadLimitChange={setMonitorLoadLimit}
+                        rangeMinutes={bufferRangeMinutes}
+                        onRangeMinutesChange={n => { void applyBufferRange(n); }}
+                        filteredCount={pillCounts.filtered}
+                        totalCount={pillCounts.total}
+                        unfilteredCount={pillCounts.unfiltered}
+                        filterActive={quickFilterActive}
+                        readingEnd={readingEnd}
+                        onClear={() => {
+                          setMonitorView(v => ({
+                            ...v,
+                            follow: false,
+                            anchorTs: null,
+                          }));
+                          // Real wipe. clear() also drops the anchor timestamp.
+                          void clearTelegrams();
+                        }}
+                        onCancelLoad={cancelLoad}
+                        pauseTitle={pauseTitle}
+                        pauseColor={pauseColor}
+                        pauseMode={pauseMode === 'off' ? 'auto' : pauseMode}
+                        pauseDisabled={bufferEmpty}
+                        onTogglePause={togglePause}
+                        busRate={busRate}
+                        rateMode={rateMode}
+                        onCycleRateMode={() => setRateMode(m => (m === 's' ? 'm' : m === 'm' ? 'h' : 's'))}
+                        wsConnected={isConnected}
+                        isHistoryLoading={isHistoryLoading}
+                        fixedAnchor={readDirection === 'backward' && monitorView.anchorTs != null}
+                        historyLoadError={historyLoadError}
+                        onScrollToTime={ms => {
+                          listGotoSeq.current += 1;
+                          setListGoto({
+                            id: listGotoSeq.current,
+                            targetMs: ms,
+                            preserveFollow: true,
+                            allowFill: false,
+                          });
+                          setActivePanel('list');
+                        }}
+                        onCommitOutside={ms => {
+                          void (async () => {
+                            await loadOutsideGoto(ms);
+                            listGotoSeq.current += 1;
+                            setListGoto({
+                              id: listGotoSeq.current,
+                              targetMs: ms,
+                              allowFill: false,
+                            });
+                            setActivePanel('list');
+                          })();
+                        }}
+                        onLoadFromDbOldest={() => {
+                          void (async () => {
+                            try {
+                              const res = await fetch(apiUrl('/api/database/info'));
+                              if (!res.ok) return;
+                              const info = await res.json() as { oldest_timestamp?: string | null };
+                              const raw = info.oldest_timestamp;
+                              if (!raw) return;
+                              const ms = new Date(raw).getTime();
+                              if (Number.isNaN(ms)) return;
+                              await changeReadDirection('forward', async () => {
+                                placeAnchor('forward', ms);
+                                await fillAnchorWindow('forward', ms);
+                              });
+                              setMonitorView(v => enterForward({ ...v, direction: 'forward', anchorTs: ms }));
+                              setActivePanel('list');
+                              listGotoSeq.current += 1;
+                              setListGoto({ id: listGotoSeq.current, targetMs: ms });
+                            } catch {
+                              // spinner / loadError cover failures
+                            }
+                          })();
+                        }}
+                        onLoadFromDbNewest={() => {
+                          // Capture before the awaits: changeReadDirection may park a
+                          // forward view on auto, and that must not hide what FF was
+                          // asked to do. Only FF turns live on from a non-live state.
+                          const priorPause = pauseMode;
+                          void (async () => {
+                            try {
+                              const res = await fetch(apiUrl('/api/database/info'));
+                              if (!res.ok) return;
+                              const info = await res.json() as { newest_timestamp?: string | null };
+                              const raw = info.newest_timestamp;
+                              if (!raw) return;
+                              const ms = new Date(raw).getTime();
+                              if (Number.isNaN(ms)) return;
+                              await changeReadDirection('backward', async () => {
+                                placeAnchor('backward', ms);
+                                await fillAnchorWindow('backward', ms);
+                              });
+                              setActivePanel('list');
+                              if (priorPause === 'manual') {
+                                // Stay paused on the newest telegram. No follow.
+                                setMonitorView(v => ({
+                                  ...v,
+                                  direction: 'backward',
+                                  anchorTs: ms,
+                                  follow: false,
+                                  pauseMode: 'manual',
+                                }));
+                                setBufferAnchor({ direction: 'backward', ts: ms });
+                                applyCachePause(true);
+                                listGotoSeq.current += 1;
+                                setListGoto({ id: listGotoSeq.current, targetMs: ms });
+                              } else {
+                                // Auto, off, or already playing: live edge, follow on.
+                                // Playing simply continues; auto and off enter live here.
+                                // No list-goto: that jump unfollows and pins the anchor
+                                // again, which would leave live. Follow sits on the edge.
+                                setMonitorView(v => ({
+                                  ...v,
+                                  direction: 'backward',
+                                  anchorTs: null,
+                                  follow: true,
+                                  pauseMode: 'playing',
+                                }));
+                                setBufferAnchor({ direction: 'backward', ts: null });
+                                applyCachePause(false);
+                              }
+                            } catch {
+                              // spinner / loadError cover failures
+                            }
+                          })();
+                        }}
+                      />
+                    )}
                     telegrams={filteredLiveTelegrams}
                     forceIncludeFrom={sortedLiveTelegrams}
                     readPhaseTelegrams={ingestedTelegrams}
@@ -2215,7 +2209,6 @@ function App() {
                     onInfoBarOpenChange={setInfoBarOpen}
                     gotoRequest={listGoto}
                   />
-                  </>
                 )}
               </div>
             </div>

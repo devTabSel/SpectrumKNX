@@ -135,8 +135,12 @@ export interface BufferStatusPillProps {
 const pillStyle: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
+  justifyContent: 'center',
+  flexWrap: 'wrap',
   gap: '0.45rem',
-  marginRight: '1rem',
+  maxWidth: '100%',
+  minWidth: 0,
+  boxSizing: 'border-box',
   background: 'var(--bg-subtle)',
   padding: '0.35rem 0.65rem',
   borderRadius: '8px',
@@ -165,7 +169,7 @@ function parseCommitMs(raw: string): number | null {
 }
 
 /**
- * Live-header buffer status pill: rewind → oldest → goto → direction →
+ * Monitor-table buffer status pill: rewind → oldest → goto → direction →
  * range → clear/spinner → direction → newest → goto → fast-forward →
  * play/pause → WS LED → rate → count → export.
  */

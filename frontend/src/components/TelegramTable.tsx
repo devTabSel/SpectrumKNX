@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
+import React, { useMemo, useRef, useEffect, useLayoutEffect, useState, useCallback, type ReactNode } from 'react';
 import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
@@ -292,6 +292,14 @@ interface TelegramTableProps {
   onTargetFocusOnlyChange?: (enabled: boolean) => void;
   /** Disables the source/target focus filter toggles (Focus panel reset). */
   focusFilterDisabled?: boolean;
+
+  /**
+   * Toolbar above the column headers (not the column-header row).
+   * `headerLeading` stays on the left, `headerCenter` is centered.
+   * Both omitted → no bar, so history is unchanged.
+   */
+  headerLeading?: ReactNode;
+  headerCenter?: ReactNode;
 }
 
 export interface ListGotoRequest {
@@ -673,6 +681,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   targetFocusOnly: targetFocusOnlyProp,
   onTargetFocusOnlyChange,
   focusFilterDisabled = false,
+  headerLeading,
+  headerCenter,
 }) => {
   const parentRef = useRef<HTMLDivElement>(null);
   /** Inner virtualizer canvas — used for clamped-pin settle transforms. */
@@ -4535,7 +4545,9 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const tableRootRef = useRef<HTMLDivElement>(null);
   const handleTableKeyDown = (e: React.KeyboardEvent) => {
     const target = e.target as HTMLElement | null;
-    if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+    // The toolbar (buffer pill, filter toggle) keeps its own keys. Escape and
+    // ctrl/cmd-A must not clear or select table rows from those controls.
+    if (target?.closest('[data-tt-header], input, textarea, select, [contenteditable="true"]')) return;
 
     if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'a') {
       const ae = document.activeElement as HTMLElement | null;
@@ -4680,6 +4692,55 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         boxShadow: noMainFilter ? undefined : 'inset 3px 0 0 var(--warning, #f59e0b)',
       }}
     >
+      {(headerLeading != null || headerCenter != null) && (
+        <div
+          data-tt-header=""
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '0.5rem',
+            padding: '0.4rem 0.75rem',
+            flexShrink: 0,
+            minWidth: 0,
+            width: '100%',
+            maxWidth: '100%',
+            boxSizing: 'border-box',
+            borderBottom: '1px solid var(--border-color)',
+          }}
+        >
+          {/* Equal flex sides keep headerCenter on the bar's midpoint.
+              min-content on the leading side stops the filter toggle from collapsing;
+              a narrow bar wraps the center onto its own row instead of overlapping. */}
+          <div
+            data-tt-header-leading=""
+            style={{
+              flex: '1 1 0',
+              minWidth: headerLeading != null ? 'min-content' : 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'flex-start',
+            }}
+          >
+            {headerLeading}
+          </div>
+          <div
+            data-tt-header-center=""
+            style={{
+              flex: '0 1 auto',
+              minWidth: 0,
+              maxWidth: '100%',
+              display: 'flex',
+              justifyContent: 'center',
+              flexWrap: 'wrap',
+            }}
+          >
+            {headerCenter}
+          </div>
+          <div data-tt-header-trailing="" style={{ flex: '1 1 0', minWidth: 0 }} />
+        </div>
+      )}
       {/* Quick info bar (#311): same column grid as the quick filter — two rows
           per column (oldest/newest, min/max Δt, counts, …). */}
       {infoOpen && infoMetrics && (

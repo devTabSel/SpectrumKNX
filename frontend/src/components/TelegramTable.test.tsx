@@ -4177,3 +4177,37 @@ test('edge pill says newer and sits at top for desc, bottom for asc', () => {
   expect(ascPill).toHaveAttribute('data-edge', 'bottom');
   expect(ascPill).toHaveAttribute('data-edge-kind', 'newer');
 });
+
+test('headerCenter is a bar above the column headers and is omitted by default', () => {
+  const { container, rerender } = renderTable([]);
+  expect(container.querySelector('[data-tt-header]')).toBeNull();
+
+  rerender(
+    <TelegramTable
+      telegrams={[]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={DEFAULT_FILTERS}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      headerLeading={<button type="button">Filter slot</button>}
+      headerCenter={<span data-testid="tt-header-center-slot">pill-slot</span>}
+    />,
+  );
+
+  const bar = container.querySelector('[data-tt-header]') as HTMLElement;
+  const center = container.querySelector('[data-tt-header-center]') as HTMLElement;
+  const leading = container.querySelector('[data-tt-header-leading]') as HTMLElement;
+  expect(bar.style.display).toBe('flex');
+  expect(bar.style.justifyContent).toBe('center');
+  expect(bar.style.flexWrap).toBe('wrap');
+  expect(center.style.justifyContent).toBe('center');
+  expect(center.style.maxWidth).toBe('100%');
+  expect(center.contains(screen.getByTestId('tt-header-center-slot'))).toBe(true);
+  expect(leading.contains(screen.getByRole('button', { name: 'Filter slot' }))).toBe(true);
+
+  const time = screen.getByRole('button', { name: /^TIME/ });
+  expect(time.closest('[data-tt-header]')).toBeNull();
+  expect(bar.compareDocumentPosition(time) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+});

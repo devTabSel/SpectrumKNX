@@ -132,6 +132,17 @@ test('history range controls show the monitor reading-direction icons', async ()
   expect(screen.queryByRole('button', { name: 'Load history' })).not.toBeInTheDocument();
 });
 
+test('a loaded history table does not host the monitor buffer pill', async () => {
+  const { container } = renderSearch();
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Visualize' })).toBeInTheDocument());
+  fireEvent.click(screen.getByRole('button', { name: 'Visualize' }));
+  await waitFor(() => expect(container.querySelector('[data-telegram-table]')).toBeTruthy());
+  expect(container.querySelector('[data-tt-header]')).toBeNull();
+  expect(container.querySelector('[data-buffer-status-pill]')).toBeNull();
+  expect(screen.getByLabelText('History range')).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reload history' })).toBeInTheDocument();
+});
+
 test('reading direction reloads from that anchor, and a range edit keeps it', async () => {
   renderSearch();
   await waitFor(() => expect(screen.getByText(/telegrams$/)).toBeInTheDocument());
