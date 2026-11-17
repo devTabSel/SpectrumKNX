@@ -529,6 +529,57 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
       {/* Scrollable options */}
       <div style={{ flex: 1, overflowY: 'auto' }}>
 
+        {/* Context window is part of the side panel. Quick-filter bounds cannot exceed it. */}
+        <Section title="Time-Delta Context" defaultOpen={false}>
+          <div style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginBottom: '0.65rem', lineHeight: 1.45 }}>
+            How far around a match the list may show context. Applied with the other filters.
+          </div>
+          <label style={{ display: 'block', fontSize: '0.65rem', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.3rem' }}>
+            Before (ms)
+          </label>
+          <input
+            aria-label="Side-panel context before (ms)"
+            type="number"
+            min={0}
+            value={activeFilters.deltaBeforeMs > 0 ? String(activeFilters.deltaBeforeMs) : ''}
+            placeholder="0 = off"
+            onChange={e => {
+              const raw = e.target.value.trim();
+              const n = raw === '' ? 0 : Math.floor(Number(raw));
+              if (!Number.isFinite(n) || n < 0) return;
+              update({ deltaBeforeMs: n });
+            }}
+            style={{
+              width: '100%', boxSizing: 'border-box', marginBottom: '0.65rem',
+              background: 'var(--bg-tag)', border: '1px solid var(--border-color)',
+              borderRadius: '7px', padding: '0.4rem 0.55rem', color: 'var(--text-main)',
+              fontSize: '0.8125rem', fontFamily: 'inherit',
+            }}
+          />
+          <label style={{ display: 'block', fontSize: '0.65rem', color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.3rem' }}>
+            After (ms)
+          </label>
+          <input
+            aria-label="Side-panel context after (ms)"
+            type="number"
+            min={0}
+            value={activeFilters.deltaAfterMs > 0 ? String(activeFilters.deltaAfterMs) : ''}
+            placeholder="0 = off"
+            onChange={e => {
+              const raw = e.target.value.trim();
+              const n = raw === '' ? 0 : Math.floor(Number(raw));
+              if (!Number.isFinite(n) || n < 0) return;
+              update({ deltaAfterMs: n });
+            }}
+            style={{
+              width: '100%', boxSizing: 'border-box',
+              background: 'var(--bg-tag)', border: '1px solid var(--border-color)',
+              borderRadius: '7px', padding: '0.4rem 0.55rem', color: 'var(--text-main)',
+              fontSize: '0.8125rem', fontFamily: 'inherit',
+            }}
+          />
+        </Section>
+
         {/* No-project notice — source/target/DPT filters need an ETS project */}
         {showNoProjectNotice && (
           <div style={{

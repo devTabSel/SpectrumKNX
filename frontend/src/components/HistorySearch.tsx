@@ -20,6 +20,7 @@ import {
   type LoadedRange,
 } from '../utils/historyLoad';
 import { windowFromRange } from '../utils/rangeWindow';
+import { filtersWithQfContext, type ContextBounds } from '../utils/contextWindow';
 import {
   historyCounts,
   historyDisplayFilters,
@@ -77,10 +78,13 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   const [quickFilterOpen, setQuickFilterOpen] = useState(false);
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(false);
   const [quickPatterns, setQuickPatterns] = useState<QuickPatterns>({});
+  /** Explicit quick-filter context. Null follows the applied side-panel window. */
+  const [qfContext, setQfContext] = useState<ContextBounds | null>(null);
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [isVisualizerOpen, setIsVisualizerOpen] = useState(false);
 
-  // Backward anchor (newest). History has no direction icons; range edits keep newest.
+  // Backward keeps newest, forward keeps oldest. Range edits use that anchor.
+  const [readDirection, setReadDirection] = useState<'forward' | 'backward'>('backward');
   const [endMs, setEndMs] = useState(() => Date.now());
   const [startMs, setStartMs] = useState(() => Date.now() - DEFAULT_RANGE_MS);
 
@@ -92,8 +96,10 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
   const abortRef = useRef<AbortController | null>(null);
   const telegramsRef = useRef(telegrams);
   const boundsRef = useRef({ startMs, endMs });
+  const directionRef = useRef(readDirection);
   useEffect(() => { telegramsRef.current = telegrams; }, [telegrams]);
   useEffect(() => { boundsRef.current = { startMs, endMs }; }, [startMs, endMs]);
+  useEffect(() => { directionRef.current = readDirection; }, [readDirection]);
 
   const initialViewLoaded = useRef(false);
   useEffect(() => {
@@ -108,7 +114,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     abortRef.current = ctrl;
     setLoading(true);
     const limit = initialView.limit ?? loadLimit;
-    loadHistoryTelegrams(initialView.range, limit, initialView.filters, ctrl.signal)
+    loadHistoryTelegrams(initialView.range, limit, initialView.filters, ctrl.signal, 'desc')
       .then(({ telegrams: loaded, metadata: meta }) => {
         if (gen !== loadGen.current) return;
         const next = replaceHistoryWindow(loaded, limit, 'backward');
@@ -139,12 +145,16 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     bounds: { startMs: number; endMs: number },
     mode: 'merge' | 'replace',
     queryFilters: ActiveFilters,
+    direction: 'forward' | 'backward',
   ) => {
     const gen = ++loadGen.current;
     abortRef.current?.abort();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const prevBounds = boundsRef.current;
+    const prevDirection = directionRef.current;
+    directionRef.current = direction;
+    setReadDirection(direction);
     setStartMs(bounds.startMs);
     setEndMs(bounds.endMs);
     setLoading(true);
@@ -153,15 +163,16 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
       startTime: msToLocalInput(bounds.startMs),
       endTime: msToLocalInput(bounds.endMs),
     };
+    const order = direction === 'forward' ? 'asc' : 'desc';
     try {
       const { telegrams: loaded, metadata: meta } = await loadHistoryTelegrams(
-        range, loadLimit, queryFilters, ctrl.signal,
+        range, loadLimit, queryFilters, ctrl.signal, order,
       );
       if (gen !== loadGen.current) return;
       const next = mode === 'replace'
-        ? replaceHistoryWindow(loaded, loadLimit, 'backward')
+        ? replaceHistoryWindow(loaded, loadLimit, direction)
         : mergeHistoryWindow(
-          telegramsRef.current, loaded, bounds.startMs, bounds.endMs, loadLimit, 'backward',
+          telegramsRef.current, loaded, bounds.startMs, bounds.endMs, loadLimit, direction,
         );
       telegramsRef.current = next;
       setTelegrams(next);
@@ -172,6 +183,8 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     } catch (err) {
       if (isAbortError(err)) {
         if (gen === loadGen.current) {
+          directionRef.current = prevDirection;
+          setReadDirection(prevDirection);
           setStartMs(prevBounds.startMs);
           setEndMs(prevBounds.endMs);
         }
@@ -215,10 +228,6 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     setIsFilterOpen(false);
   };
 
-  const handleDeltaContextChange = (deltaBeforeMs: number, deltaAfterMs: number) => {
-    onFiltersChange({ ...activeFilters, deltaBeforeMs, deltaAfterMs });
-  };
-
   const handleDeltaContextEnabledChange = (deltaContextEnabled: boolean) => {
     onFiltersChange({ ...activeFilters, deltaContextEnabled });
   };
@@ -228,13 +237,18 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     [telegrams, sortConfig]
   );
 
-  // Quick filter applies at once. The side panel stays at the last load until refresh.
+  // Quick filter applies at once, capped to the context window from the last load.
+  // The side panel, including that window, stays at the last load until refresh.
   const displayFilters = useMemo(
-    () => (filtersAtLoad ? historyDisplayFilters(filtersAtLoad, activeFilters) : effectiveFilters),
-    [filtersAtLoad, activeFilters, effectiveFilters],
+    () => (filtersAtLoad ? historyDisplayFilters(filtersAtLoad) : effectiveFilters),
+    [filtersAtLoad, effectiveFilters],
+  );
+  const visibleFilters = useMemo(
+    () => filtersWithQfContext(displayFilters, qfContext),
+    [displayFilters, qfContext],
   );
   const visibleOpts = useMemo(() => ({
-    filters: displayFilters,
+    filters: visibleFilters,
     filtersEnabled: true,
     quickFilterOpen,
     quickFilterEnabled,
@@ -246,7 +260,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
     lastSelectedKey,
     jumpTargetKeys,
   }), [
-    displayFilters, quickFilterOpen, quickFilterEnabled, quickPatterns,
+    visibleFilters, quickFilterOpen, quickFilterEnabled, quickPatterns,
     flaggedBeforeKeys, flaggedAfterKeys, markedKeys, mouseSelectedKeys,
     lastSelectedKey, jumpTargetKeys,
   ]);
@@ -312,7 +326,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
                 cancelLoad();
                 return;
               }
-              void runLoad({ startMs, endMs }, 'replace', effectiveFilters);
+              void runLoad({ startMs, endMs }, 'replace', effectiveFilters, readDirection);
             }}
             style={{
               position: 'relative',
@@ -361,16 +375,33 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
             endMs={endMs}
             loadLimit={loadLimit}
             onLoadLimitChange={onLoadLimitChange}
+            readDirection={readDirection}
+            onReadDirectionChange={dir => {
+              const span = Math.max(0, endMs - startMs);
+              const anchor = dir === 'forward' ? startMs : endMs;
+              void runLoad(
+                windowFromRange(dir, anchor, span),
+                'replace',
+                queryFiltersForWindow(),
+                dir,
+              );
+            }}
             onCommitStart={ms => {
               if (ms >= endMs) return;
-              void runLoad({ startMs: ms, endMs }, 'merge', queryFiltersForWindow());
+              void runLoad({ startMs: ms, endMs }, 'merge', queryFiltersForWindow(), readDirection);
             }}
             onCommitEnd={ms => {
               const span = Math.max(1000, endMs - startMs);
-              void runLoad(windowFromRange('backward', ms, span), 'merge', queryFiltersForWindow());
+              void runLoad(windowFromRange('backward', ms, span), 'merge', queryFiltersForWindow(), readDirection);
             }}
             onCommitRange={rangeMs => {
-              void runLoad(windowFromRange('backward', endMs, rangeMs), 'merge', queryFiltersForWindow());
+              const anchor = readDirection === 'forward' ? startMs : endMs;
+              void runLoad(
+                windowFromRange(readDirection, anchor, rangeMs),
+                'merge',
+                queryFiltersForWindow(),
+                readDirection,
+              );
             }}
           />
           <button
@@ -501,7 +532,8 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               onQuickFilterEnabledChange={setQuickFilterEnabled}
               quickPatterns={quickPatterns}
               onQuickPatternsChange={setQuickPatterns}
-              onDeltaContextChange={handleDeltaContextChange}
+              qfContext={qfContext}
+              onQfContextChange={setQfContext}
               onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
               flaggedBeforeKeys={flaggedBeforeKeys}
               onFlaggedBeforeKeysChange={setFlaggedBeforeKeys}

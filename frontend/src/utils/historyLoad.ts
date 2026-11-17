@@ -43,9 +43,14 @@ function localToEpochMs(localStr: string, fallback: number): number {
 }
 
 /** Builds the /api/telegrams URL for a range. Times use the loader's
- * datetime-local format ("YYYY-MM-DDTHH:MM", interpreted in the local timezone). */
-export function buildHistoryUrl(range: LoadedRange, limit: number): string {
-  let url = apiUrl(`/api/telegrams?limit=${limit}`);
+ * datetime-local format ("YYYY-MM-DDTHH:MM", interpreted in the local timezone).
+ * Backward reads newest-first (`order=desc`); forward reads oldest-first (`order=asc`). */
+export function buildHistoryUrl(
+  range: LoadedRange,
+  limit: number,
+  order: 'asc' | 'desc' = 'desc',
+): string {
+  let url = apiUrl(`/api/telegrams?limit=${limit}&order=${order}`);
   if (range.kind === 'relative') {
     const start = new Date(Date.now() - range.seconds * 1000).toISOString();
     url += `&start_time=${encodeURIComponent(start)}`;
@@ -154,8 +159,9 @@ export async function loadHistoryTelegrams(
   limit: number,
   filters?: ActiveFilters,
   signal?: AbortSignal,
+  order: 'asc' | 'desc' = 'desc',
 ): Promise<{ telegrams: Telegram[]; metadata: HistoryMetadata }> {
-  const baseUrl = buildHistoryUrl(range, limit);
+  const baseUrl = buildHistoryUrl(range, limit, order);
   const res = await fetch(applyFilterParams(baseUrl, filters), { signal });
   if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
   if (!res.ok) throw new Error(`Server error: ${res.status}`);

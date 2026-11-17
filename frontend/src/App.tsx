@@ -36,6 +36,7 @@ import {
 import { deriveLiveTelegramView, type LiveTelegramView } from './utils/liveTelegramView';
 import { pinnedVisibleKeys } from './utils/selectVisibleTelegrams';
 import { activeQuickFilter } from './utils/quickFilter';
+import { filtersWithQfContext, type ContextBounds } from './utils/contextWindow';
 import { backlogStatusCount, bufferBacklogCounts, statusViewRowCount } from './utils/telegramDisplay';
 import { classifyGotoTarget, enterForward, gotoWindow, nextJumpTargets, parkOnFixedY } from './utils/gotoTarget';
 import { GotoBufferProvider } from './components/GotoBufferContext';
@@ -293,6 +294,8 @@ function App() {
   const [quickFilterEnabled, setQuickFilterEnabled] = useState(initialUiState.quickFilter.enabled);
   const [quickPatterns, setQuickPatterns] = useState(initialUiState.quickFilter.patterns);
   const [quickColumnEnabled, setQuickColumnEnabled] = useState(initialUiState.quickFilter.columnEnabled);
+  /** Explicit quick-filter context. Null follows the applied side-panel window. */
+  const [qfContext, setQfContext] = useState<ContextBounds | null>(null);
   const [listAnchorKey, setListAnchorKey] = useState<string | null>(initialUiState.listAnchorKey);
   const [infoBarOpen, setInfoBarOpen] = useState(initialUiState.infoBarOpen);
   const [zoomRange, setZoomRange] = useState<[number, number] | null>(initialUiState.zoomRange);
@@ -502,7 +505,12 @@ function App() {
     noteTtViewChange();
   }, [noteTtViewChange]);
   // The filters in effect: selections minus the ones switched off (#437).
+  // The monitor applies the side panel as it is edited, including the context window.
   const appliedFilters = useMemo(() => enabledFilters(activeFilters), [activeFilters]);
+  const contextFilters = useMemo(
+    () => filtersWithQfContext(appliedFilters, qfContext),
+    [appliedFilters, qfContext],
+  );
   liveTrimRef.current.filters = activeFilters;
   liveTrimRef.current.filtersEnabled = filtersEnabled;
 
@@ -1175,20 +1183,15 @@ function App() {
     setActivePanel('list');
   }, [handleFilterGAs, handleListFollowChange]);
 
-  // Time-Delta-Context window, now edited from the telegram list's DELTA TIME
-  // quick-filter cell rather than the filter pane (#309, #371).
-  const handleDeltaContextChange = useCallback((deltaBeforeMs: number, deltaAfterMs: number) => {
-    handleFiltersChange(prev => ({ ...prev, deltaBeforeMs, deltaAfterMs }));
-  }, [handleFiltersChange]);
-
-  // Toggles the window on/off without losing the entered values (#318).
+  // Toggles the context window on/off without losing the entered values (#318).
+  // The before/after width itself is a side-panel field.
   const handleDeltaContextEnabledChange = useCallback((deltaContextEnabled: boolean) => {
     handleFiltersChange(prev => ({ ...prev, deltaContextEnabled }));
   }, [handleFiltersChange]);
 
   // ── In-memory filtering (live view) ────────────────────────────────────────
   const visibleOpts = useMemo(() => ({
-    filters: appliedFilters,
+    filters: contextFilters,
     filtersEnabled,
     quickFilterOpen,
     quickFilterEnabled,
@@ -1201,7 +1204,7 @@ function App() {
     lastSelectedKey: lastSelectedTelegramKey,
     jumpTargetKeys,
   }), [
-    appliedFilters, filtersEnabled, quickFilterOpen, quickFilterEnabled, quickPatterns, quickColumnEnabled,
+    contextFilters, filtersEnabled, quickFilterOpen, quickFilterEnabled, quickPatterns, quickColumnEnabled,
     flaggedBeforeKeys, flaggedAfterKeys, telegramMarkedKeys, telegramMouseSelectedKeys,
     lastSelectedTelegramKey, jumpTargetKeys,
   ]);
@@ -1210,7 +1213,7 @@ function App() {
   // pattern edit does not rebuild this list; the published view still uses
   // visibleOpts.
   const sidePanelOpts = useMemo(() => ({
-    filters: appliedFilters,
+    filters: contextFilters,
     filtersEnabled,
     quickFilterOpen: false,
     quickFilterEnabled: false,
@@ -1222,7 +1225,7 @@ function App() {
     lastSelectedKey: lastSelectedTelegramKey,
     jumpTargetKeys,
   }), [
-    appliedFilters, filtersEnabled,
+    contextFilters, filtersEnabled,
     flaggedBeforeKeys, flaggedAfterKeys, telegramMarkedKeys,
     telegramMouseSelectedKeys, lastSelectedTelegramKey, jumpTargetKeys,
   ]);
@@ -2160,7 +2163,8 @@ function App() {
                     onQuickPatternsChange={setQuickPatterns}
                     quickColumnEnabled={quickColumnEnabled}
                     onQuickColumnEnabledChange={setQuickColumnEnabled}
-                    onDeltaContextChange={handleDeltaContextChange}
+                    qfContext={qfContext}
+                    onQfContextChange={setQfContext}
                     onDeltaContextEnabledChange={handleDeltaContextEnabledChange}
                     listFollow={readDirection === 'backward' && listFollow}
                     liveFollow={readDirection === 'backward'}

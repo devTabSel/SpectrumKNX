@@ -1,5 +1,6 @@
 import { useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { format } from 'date-fns';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 import { SecondsField } from './SecondsField';
 import {
@@ -55,13 +56,17 @@ export interface HistoryRangeBarProps {
   onCommitEnd: (ms: number) => void;
   /** Range field commit, in milliseconds. */
   onCommitRange: (rangeMs: number) => void;
+  /** Backward anchors newest; forward anchors oldest. Same control as the monitor pill. */
+  readDirection: 'forward' | 'backward';
+  onReadDirectionChange: (dir: 'forward' | 'backward') => void;
   loadLimit: number;
   onLoadLimitChange?: (n: number) => void;
 }
 
 /**
- * History time window: oldest, range (s/m/h/t + presets), load limit, newest.
- * No reading-direction icons — the parent anchors range edits on newest.
+ * History time window: oldest, direction, range (s/m/h/t + presets), load limit, newest.
+ * The direction icon sits where the monitor pill puts it: left of the range when
+ * reading forward, right of the load limit when reading backward.
  */
 export function HistoryRangeBar({
   startMs,
@@ -69,6 +74,8 @@ export function HistoryRangeBar({
   onCommitStart,
   onCommitEnd,
   onCommitRange,
+  readDirection,
+  onReadDirectionChange,
   loadLimit,
   onLoadLimitChange,
 }: HistoryRangeBarProps) {
@@ -203,6 +210,18 @@ export function HistoryRangeBar({
           (e.target as HTMLInputElement).blur();
         }}
       />
+      {readDirection === 'forward' ? (
+        <button
+          type="button"
+          className="icon-button"
+          title="Reading forward — click for backward"
+          aria-label="Reading forward"
+          onClick={() => onReadDirectionChange('backward')}
+          style={{ color: 'var(--accent-primary)', padding: '0.15rem', flexShrink: 0 }}
+        >
+          <ChevronRight size={14} />
+        </button>
+      ) : null}
       <SecondsField
         value={rangeDraft}
         onChange={v => {
@@ -218,7 +237,7 @@ export function HistoryRangeBar({
         sanitize={sanitizeHistoryRangeInput}
         onUnitClick={cycleUnit}
         unitTitle="Cycle range unit (s / m / h / t)"
-        textAlign="left"
+        textAlign={readDirection === 'backward' ? 'right' : 'left'}
         onBlur={sanitized => {
           setRangeFocused(false);
           commitRange(sanitized);
@@ -258,6 +277,18 @@ export function HistoryRangeBar({
           flexShrink: 0,
         }}
       />
+      {readDirection === 'backward' ? (
+        <button
+          type="button"
+          className="icon-button"
+          title="Reading backward — click for forward"
+          aria-label="Reading backward"
+          onClick={() => onReadDirectionChange('forward')}
+          style={{ color: 'var(--accent-primary)', padding: '0.15rem', flexShrink: 0 }}
+        >
+          <ChevronLeft size={14} />
+        </button>
+      ) : null}
       <ThemedDatetimePicker
         value={endFocused ? endDraft : msToInput(endMs)}
         onChange={v => {

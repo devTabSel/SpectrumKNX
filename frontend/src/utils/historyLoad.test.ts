@@ -31,7 +31,9 @@ test('applyFilterParams omits the window while disabled, even with stored values
 test('buildHistoryUrl handles relative ranges correctly', () => {
   const url = buildHistoryUrl({ kind: 'relative', seconds: 3600 }, 100);
   expect(url).toContain('limit=100');
+  expect(url).toContain('order=desc');
   expect(url).toContain('start_time=');
+  expect(buildHistoryUrl({ kind: 'relative', seconds: 60 }, 10, 'asc')).toContain('order=asc');
 });
 
 test('buildHistoryUrl parses absolute local datetimes as local time and formats to UTC ISO', () => {

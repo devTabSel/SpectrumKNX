@@ -37,6 +37,23 @@ test('hides the notice while project status is unknown', () => {
   expect(screen.queryByText(/No ETS project loaded/i)).not.toBeInTheDocument();
 });
 
+test('the context window is edited in the side panel', () => {
+  const onFiltersChange = vi.fn();
+  render(
+    <FilterPanel
+      options={EMPTY_OPTIONS}
+      activeFilters={DEFAULT_FILTERS}
+      onFiltersChange={onFiltersChange}
+      projectLoaded={true}
+    />,
+  );
+  fireEvent.click(screen.getByText('Time-Delta Context'));
+  fireEvent.change(screen.getByLabelText('Side-panel context before (ms)'), { target: { value: '400' } });
+  expect(onFiltersChange).toHaveBeenCalledWith({ ...DEFAULT_FILTERS, deltaBeforeMs: 400 });
+  fireEvent.change(screen.getByLabelText('Side-panel context after (ms)'), { target: { value: '80' } });
+  expect(onFiltersChange).toHaveBeenLastCalledWith({ ...DEFAULT_FILTERS, deltaAfterMs: 80 });
+});
+
 test('toggles the direction filter (#194)', () => {
   const onFiltersChange = vi.fn();
   render(

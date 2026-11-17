@@ -118,10 +118,79 @@ test('cancelling a reload keeps the previous list', async () => {
   expect(screen.getByText(/telegrams$/).textContent).toBe('3 telegrams');
 });
 
-test('history range controls have no reading-direction icons', async () => {
+const timeInput = (label: 'Oldest telegram in history' | 'Newest telegram in history') =>
+  screen.getByLabelText(label) as HTMLInputElement;
+
+const parsedInput = (label: 'Oldest telegram in history' | 'Newest telegram in history') =>
+  new Date(timeInput(label).value).getTime();
+
+test('history range controls show the monitor reading-direction icons', async () => {
   renderSearch();
   await waitFor(() => expect(screen.getByLabelText('History range')).toBeInTheDocument());
-  expect(screen.queryByRole('button', { name: /Reading backward|Reading forward/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reading backward' })).toBeInTheDocument();
   expect(screen.getByLabelText('History load limit')).toHaveValue('1000');
   expect(screen.queryByRole('button', { name: 'Load history' })).not.toBeInTheDocument();
+});
+
+test('reading direction reloads from that anchor, and a range edit keeps it', async () => {
+  renderSearch();
+  await waitFor(() => expect(screen.getByText(/telegrams$/)).toBeInTheDocument());
+  const oldestBefore = timeInput('Oldest telegram in history').value;
+  const newestBefore = timeInput('Newest telegram in history').value;
+
+  fireEvent.click(screen.getByRole('button', { name: 'Reading backward' }));
+  await waitFor(() => expect(vi.mocked(loadHistoryTelegrams).mock.calls.length).toBeGreaterThan(1));
+  const forward = vi.mocked(loadHistoryTelegrams).mock.calls.at(-1)!;
+  expect(forward[4]).toBe('asc');
+  expect(screen.getByRole('button', { name: 'Reading forward' })).toBeInTheDocument();
+  // Forward keeps the oldest edge, so the same span does not move the window.
+  expect(timeInput('Oldest telegram in history').value).toBe(oldestBefore);
+  expect(timeInput('Newest telegram in history').value).toBe(newestBefore);
+
+  const oldestHeld = parsedInput('Oldest telegram in history');
+  fireEvent.change(screen.getByLabelText('History range'), { target: { value: '15' } });
+  fireEvent.blur(screen.getByLabelText('History range'));
+  await waitFor(() => expect(vi.mocked(loadHistoryTelegrams).mock.calls.length).toBeGreaterThan(2));
+  const widened = vi.mocked(loadHistoryTelegrams).mock.calls.at(-1)!;
+  expect(widened[4]).toBe('asc');
+  expect(parsedInput('Oldest telegram in history')).toBe(oldestHeld);
+  expect(parsedInput('Newest telegram in history') - parsedInput('Oldest telegram in history')).toBe(15 * 60_000);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Reading forward' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Reading backward' })).toBeInTheDocument());
+  const back = vi.mocked(loadHistoryTelegrams).mock.calls.at(-1)!;
+  expect(back[4]).toBe('desc');
+
+  const newestHeld = parsedInput('Newest telegram in history');
+  fireEvent.change(screen.getByLabelText('History range'), { target: { value: '5' } });
+  fireEvent.blur(screen.getByLabelText('History range'));
+  await waitFor(() => {
+    const last = vi.mocked(loadHistoryTelegrams).mock.calls.at(-1)!;
+    expect(last[4]).toBe('desc');
+    expect(last).not.toBe(back);
+  });
+  expect(parsedInput('Newest telegram in history')).toBe(newestHeld);
+  expect(parsedInput('Newest telegram in history') - parsedInput('Oldest telegram in history')).toBe(5 * 60_000);
+});
+
+test('a context-window edit stays pending until refresh', async () => {
+  const filters = { ...DEFAULT_FILTERS, targets: ['1/2/3'] as string[] };
+  const view = { plot: [], filters, range: { kind: 'relative' as const, seconds: 3600 }, embed: false };
+  const { rerenderWith } = renderSearch({
+    filtersEnabled: true,
+    activeFilters: filters,
+    initialView: view,
+  });
+  await waitFor(() => expect(screen.getByText(/telegrams$/).textContent).toBe('1 telegrams'));
+  const refresh = () => screen.getByRole('button', { name: 'Reload history' });
+  expect(refresh()).toHaveAttribute('data-sp-pending', 'false');
+
+  rerenderWith({
+    filtersEnabled: true,
+    activeFilters: { ...filters, deltaBeforeMs: 400, deltaAfterMs: 100 },
+    initialView: view,
+  });
+  expect(screen.getByText(/telegrams$/).textContent).toBe('1 telegrams');
+  expect(refresh()).toHaveAttribute('data-sp-pending', 'true');
+  expect(refresh()).toHaveAttribute('title', expect.stringMatching(/Side panel changed/));
 });

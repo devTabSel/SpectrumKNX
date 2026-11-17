@@ -1,4 +1,4 @@
-import { render, fireEvent, screen } from '@testing-library/react';
+import { render, fireEvent, screen, waitFor } from '@testing-library/react';
 import { expect, test, vi, beforeAll } from 'vitest';
 import { format } from 'date-fns';
 import { TelegramTable, type SortConfig } from './TelegramTable';
@@ -223,9 +223,54 @@ test('ctrl/cmd-click on the DELTA TIME toggle disables/enables the window withou
   fireEvent.click(toggleBtn, { ctrlKey: true });
   expect(onDeltaContextEnabledChange).toHaveBeenCalledWith(false);
 
-  // Editing a value while enabled still goes through onDeltaContextChange, preserving the other field.
+  // A value inside the applied window is kept. A larger one is cut down to it.
+  fireEvent.change(screen.getByLabelText('Time-Delta-Context before (ms)'), { target: { value: '120' } });
+  expect(onDeltaContextChange).toHaveBeenCalledWith(120, 250);
   fireEvent.change(screen.getByLabelText('Time-Delta-Context before (ms)'), { target: { value: '750' } });
-  expect(onDeltaContextChange).toHaveBeenCalledWith(750, 250);
+  expect(onDeltaContextChange).toHaveBeenLastCalledWith(500, 250);
+  expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveValue('500');
+});
+
+test('quick-filter context is capped on input and when the applied window shrinks', async () => {
+  const onDeltaContextChange = vi.fn();
+  const draft = { ...DEFAULT_FILTERS, deltaBeforeMs: 1000, deltaAfterMs: 250, deltaContextEnabled: true };
+  const applied = { ...draft, deltaBeforeMs: 500 };
+  const { rerender } = renderTable({
+    quickFilterOpen: true,
+    activeFilters: draft,
+    sidePanelFilters: applied,
+    onDeltaContextChange,
+  });
+  const before = screen.getByLabelText('Time-Delta-Context before (ms)');
+  // The field follows the applied window, not the larger uncommitted draft.
+  expect(before).toHaveValue('500');
+
+  fireEvent.change(before, { target: { value: '800' } });
+  fireEvent.blur(before);
+  expect(onDeltaContextChange).toHaveBeenLastCalledWith(500, 250);
+  expect(before).toHaveValue('500');
+
+  fireEvent.change(before, { target: { value: '200' } });
+  fireEvent.blur(before);
+  expect(onDeltaContextChange).toHaveBeenLastCalledWith(200, 250);
+  expect(before).toHaveValue('200');
+
+  rerender(
+    <TelegramTable
+      telegrams={TELEGRAMS}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={draft}
+      sidePanelFilters={{ ...applied, deltaBeforeMs: 80 }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      quickFilterOpen
+      onDeltaContextChange={onDeltaContextChange}
+    />,
+  );
+  await waitFor(() => expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveValue('80'));
+  expect(onDeltaContextChange).toHaveBeenLastCalledWith(80, 250);
 });
 
 const flagButton = (row: Element, side: 'before' | 'after' = 'after') =>

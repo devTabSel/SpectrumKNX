@@ -3,7 +3,8 @@ import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
 import { ChevronUp, ChevronDown, Filter, LineChart, X, Clock, Plus, Minus, Download, List, Search } from 'lucide-react';
-import { effectiveDeltaContext, enabledFilters, hasActiveFilters, matchesTelegram, type ActiveFilters } from '../types/filters';
+import { enabledFilters, hasActiveFilters, matchesTelegram, type ActiveFilters } from '../types/filters';
+import { capContextWindow } from '../utils/contextWindow';
 import {
   contextRailSigns,
   expandWithDeltaContext,
@@ -141,9 +142,14 @@ interface TelegramTableProps {
   /** Per-column quick-filter on/off. Lifted so it survives navigation and reloads. */
   quickColumnEnabled?: QuickFilterColumnEnabled;
   onQuickColumnEnabledChange?: (enabled: QuickFilterColumnEnabled) => void;
-  /** Edits the Time-Delta-Context window (#309, #371) — moved here from the
-   * filter pane; current values come from `activeFilters.deltaBeforeMs/deltaAfterMs`. */
+  /** Edits the Time-Delta-Context window when the quick-filter bounds are not lifted. */
   onDeltaContextChange?: (deltaBeforeMs: number, deltaAfterMs: number) => void;
+  /**
+   * Quick-filter context bounds. `null` follows the applied side-panel window.
+   * A typed value above that window is cut down to it.
+   */
+  qfContext?: { before: number; after: number } | null;
+  onQfContextChange?: (next: { before: number; after: number }) => void;
   /** Toggles the window on/off without losing the entered values (#318). */
   onDeltaContextEnabledChange?: (enabled: boolean) => void;
 
@@ -633,6 +639,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   quickColumnEnabled: quickColumnEnabledProp, onQuickColumnEnabledChange,
   onDeltaContextChange,
   onDeltaContextEnabledChange,
+  qfContext = null,
+  onQfContextChange,
   listFollow, onListFollowChange, liveFollow = true, readDirection, directionGesture = 'rebuild',
   covered, bufferAnchorTs = null, readingEnd,
   listAnchorKey, onListAnchorKeyChange,
@@ -802,14 +810,48 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     onQuickColumnEnabledChange?.(next);
   }, [onQuickColumnEnabledChange]);
 
+  // Applied side-panel window is the ceiling. History passes the last refresh;
+  // the monitor applies the panel immediately, so the live filters are that ceiling.
+  const appliedContext = sidePanelFilters ?? activeFilters;
+  const contextCap = useMemo(
+    () => ({ before: appliedContext.deltaBeforeMs, after: appliedContext.deltaAfterMs }),
+    [appliedContext.deltaBeforeMs, appliedContext.deltaAfterMs],
+  );
+  const contextEnabled = appliedContext.deltaContextEnabled;
+  const [qfInternal, setQfInternal] = useState<{ before: number; after: number } | null>(null);
+  const qfControlled = onQfContextChange != null;
+  const qfExplicit = qfControlled ? qfContext : qfInternal;
+  const qfShown = qfExplicit ? capContextWindow(qfExplicit, contextCap) : contextCap;
+  const qfBeforeMs = qfShown.before;
+  const qfAfterMs = qfShown.after;
+  const deltaBeforeMs = contextEnabled ? qfBeforeMs : 0;
+  const deltaAfterMs = contextEnabled ? qfAfterMs : 0;
+
+  const publishQf = useCallback((before: number, after: number) => {
+    const next = capContextWindow({ before, after }, contextCap);
+    if (qfControlled) onQfContextChange?.(next);
+    else {
+      setQfInternal(next);
+      onDeltaContextChange?.(next.before, next.after);
+    }
+  }, [contextCap, qfControlled, onQfContextChange, onDeltaContextChange]);
+
+  // A later, smaller applied window cuts bounds the user already entered.
+  useEffect(() => {
+    if (!qfExplicit) return;
+    const next = capContextWindow(qfExplicit, contextCap);
+    if (next.before === qfExplicit.before && next.after === qfExplicit.after) return;
+    publishQf(next.before, next.after);
+  }, [qfExplicit, contextCap, publishQf]);
+
   /** True when at least one quick-filter cell of the column has a value (blanks count). */
   const columnHasQuickContent = useCallback((id: ColId) => {
     if (id === 'delta') {
-      return activeFilters.deltaBeforeMs > 0 || activeFilters.deltaAfterMs > 0;
+      return qfBeforeMs > 0 || qfAfterMs > 0;
     }
     const cell = currentPatterns[id];
     return !!(cell?.top || cell?.bottom);
-  }, [activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs, currentPatterns]);
+  }, [qfBeforeMs, qfAfterMs, currentPatterns]);
 
   /** Turn a column filter on the first time an empty cell receives text. */
   const enableQuickColumnOnInput = useCallback((id: ColId) => {
@@ -838,23 +880,26 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   }, [setQuickPatterns, currentPatterns, enableQuickColumnOnInput, disableQuickColumnWhenEmpty]);
 
   const setDeltaContextCell = useCallback((beforeMs: number, afterMs: number) => {
-    const prevEmpty = activeFilters.deltaBeforeMs <= 0 && activeFilters.deltaAfterMs <= 0;
-    const nextEmpty = beforeMs <= 0 && afterMs <= 0;
-    onDeltaContextChange?.(beforeMs, afterMs);
+    const prevEmpty = qfBeforeMs <= 0 && qfAfterMs <= 0;
+    const next = capContextWindow({ before: beforeMs, after: afterMs }, contextCap);
+    const nextEmpty = next.before <= 0 && next.after <= 0;
+    publishQf(next.before, next.after);
     if (prevEmpty && !nextEmpty) {
       enableQuickColumnOnInput('delta');
       if (!activeFilters.deltaContextEnabled) onDeltaContextEnabledChange?.(true);
     } else if (!prevEmpty && nextEmpty) {
       disableQuickColumnWhenEmpty('delta');
     }
+    requestDisplayPinRef.current();
   }, [
-    activeFilters.deltaBeforeMs, activeFilters.deltaAfterMs, activeFilters.deltaContextEnabled,
-    onDeltaContextChange, onDeltaContextEnabledChange, enableQuickColumnOnInput, disableQuickColumnWhenEmpty,
+    qfBeforeMs, qfAfterMs, contextCap, publishQf,
+    activeFilters.deltaContextEnabled,
+    onDeltaContextEnabledChange, enableQuickColumnOnInput, disableQuickColumnWhenEmpty,
   ]);
 
   const clearQuickColumnInputs = useCallback((id: ColId) => {
     if (id === 'delta') {
-      onDeltaContextChange?.(0, 0);
+      publishQf(0, 0);
       disableQuickColumnWhenEmpty('delta');
       return;
     }
@@ -865,17 +910,17 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       return next;
     });
     disableQuickColumnWhenEmpty(id);
-  }, [onDeltaContextChange, setQuickPatterns, disableQuickColumnWhenEmpty]);
+  }, [publishQf, setQuickPatterns, disableQuickColumnWhenEmpty]);
 
   const clearAllQuickInputs = useCallback(() => {
     setQuickPatterns({});
-    onDeltaContextChange?.(0, 0);
+    publishQf(0, 0);
     setQuickColumnEnabled(prev => {
       const next = { ...prev };
       for (const id of Object.keys(DEFAULT_QUICK_FILTER_COLUMN_ENABLED)) next[id] = false;
       return next;
     });
-  }, [onDeltaContextChange, setQuickPatterns, setQuickColumnEnabled]);
+  }, [publishQf, setQuickPatterns, setQuickColumnEnabled]);
 
   // A column filter is only on when it is toggled on and has at least one cell value.
   const isQuickColumnEnabled = useCallback(
@@ -1158,8 +1203,6 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     return active;
   }, [targetColors, activeFilters.targets]);
 
-  const { before: deltaBeforeMs, after: deltaAfterMs } = effectiveDeltaContext(activeFilters);
-
   // Focus filter runs before quick-filter once the parent supplies a focus list.
   // Without `focusListAddresses` the header toggles stay visual-only (no Focus
   // panel wired yet). An empty list means no matches.
@@ -1280,7 +1323,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       { before: beforeSet, after: afterSet },
       deltaBeforeMs, deltaAfterMs,
       {
-        contextEnabled: activeFilters.deltaContextEnabled,
+        contextEnabled,
         pinnedKeys: pinned,
       },
     );
@@ -1291,7 +1334,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   }, [
     pausedTelegrams, pausedCount, listForcePool, hiddenKeySet, focusAddressSet,
     sourceFocusOnly, targetFocusOnly, noMainFilter, pillFilters, pillQuick, pinnedKeySet,
-    beforeSet, afterSet, deltaBeforeMs, deltaAfterMs, activeFilters.deltaContextEnabled,
+    beforeSet, afterSet, deltaBeforeMs, deltaAfterMs, contextEnabled,
   ]);
   const visiblePausedCountRef = useRef(0);
   visiblePausedCountRef.current = visiblePausedCount;
@@ -4065,7 +4108,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         // window has no circle and is not clickable.
         const showContextControls = quickEnabled
           && isQuickColumnEnabled('delta')
-          && activeFilters.deltaContextEnabled;
+          && contextEnabled;
         const rowKey = anchorKey(t);
         const contextBtn = (side: 'before' | 'after') => {
           const sideOn = side === 'before' ? beforeSet.has(rowKey) : afterSet.has(rowKey);
@@ -4881,7 +4924,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'center', justifyContent: 'flex-start', gap: '0.4rem' }}>
               {c.id === 'delta' && quickEnabled
                 && isQuickColumnEnabled('delta')
-                && activeFilters.deltaContextEnabled
+                && contextEnabled
                 && (deltaBeforeMs > 0 || deltaAfterMs > 0) && (
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                   {deltaBeforeMs > 0 && (
@@ -4976,7 +5019,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
             </div>
             <div style={{ flex: 1, minHeight: '1.3rem', padding: '0 1rem', display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-start', gap: '0.4rem' }}>
               {quickOpen && quickEnabled && (() => {
-                const deltaWindowSet = activeFilters.deltaBeforeMs > 0 || activeFilters.deltaAfterMs > 0;
+                const deltaWindowSet = qfBeforeMs > 0 || qfAfterMs > 0;
                 const toggleOpen = c.id === 'delta'
                   ? isQuickColumnEnabled(c.id) && deltaWindowSet
                   : isQuickColumnEnabled(c.id);
@@ -5056,34 +5099,38 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                       col="qf-delta"
                       placeholder="before"
                       unit="ms"
-                      value={activeFilters.deltaBeforeMs > 0 ? String(activeFilters.deltaBeforeMs) : ''}
+                      value={qfBeforeMs > 0 ? String(qfBeforeMs) : ''}
                       ariaLabel="Time-Delta-Context before (ms)"
                       title="Context before"
                       onChange={v => {
                         const n = v.trim() === '' ? 0 : Number(v);
                         if (!Number.isFinite(n) || n < 0) return;
-                        setDeltaContextCell(Math.floor(n), activeFilters.deltaAfterMs);
+                        setDeltaContextCell(Math.floor(n), qfAfterMs);
                       }}
                       onBlur={sanitized => {
                         const n = sanitized === '' ? 0 : Number(sanitized);
-                        setDeltaContextCell(Number.isFinite(n) ? n : 0, activeFilters.deltaAfterMs);
+                        const before = Number.isFinite(n) ? n : 0;
+                        if (qfExplicit == null && before === qfBeforeMs) return;
+                        setDeltaContextCell(before, qfAfterMs);
                       }}
                     />
                     <SecondsField
                       col="qf-delta"
                       placeholder="after"
                       unit="ms"
-                      value={activeFilters.deltaAfterMs > 0 ? String(activeFilters.deltaAfterMs) : ''}
+                      value={qfAfterMs > 0 ? String(qfAfterMs) : ''}
                       ariaLabel="Time-Delta-Context after (ms)"
                       title="Context after"
                       onChange={v => {
                         const n = v.trim() === '' ? 0 : Number(v);
                         if (!Number.isFinite(n) || n < 0) return;
-                        setDeltaContextCell(activeFilters.deltaBeforeMs, Math.floor(n));
+                        setDeltaContextCell(qfBeforeMs, Math.floor(n));
                       }}
                       onBlur={sanitized => {
                         const n = sanitized === '' ? 0 : Number(sanitized);
-                        setDeltaContextCell(activeFilters.deltaBeforeMs, Number.isFinite(n) ? n : 0);
+                        const after = Number.isFinite(n) ? n : 0;
+                        if (qfExplicit == null && after === qfAfterMs) return;
+                        setDeltaContextCell(qfBeforeMs, after);
                       }}
                     />
                   </>

@@ -28,11 +28,17 @@ test('every side-panel change, tighter or looser, stays pending until refresh', 
   expect(sidePanelPending(applied, { ...applied, types: ['Write'] })).toBe(true);
 });
 
-test('a delta-window edit is not a pending side-panel change', () => {
+test('a context-window edit is a pending side-panel change until refresh', () => {
   const widened = { ...applied, deltaBeforeMs: 500, deltaAfterMs: 500, deltaContextEnabled: true };
-  expect(sidePanelPending(applied, widened)).toBe(false);
-  expect(historyDisplayFilters(applied, widened).sources).toEqual(['1.1.1']);
-  expect(historyDisplayFilters(applied, widened).deltaAfterMs).toBe(500);
+  expect(sidePanelPending(applied, widened)).toBe(true);
+  expect(sidePanelPending(widened, { ...widened, deltaBeforeMs: 100 })).toBe(true);
+  expect(sidePanelPending(widened, { ...widened, deltaContextEnabled: false })).toBe(true);
+  expect(sidePanelPending(widened, widened)).toBe(false);
+  // The loaded view keeps the applied window. The live edit is not in effect yet.
+  expect(historyDisplayFilters(applied).sources).toEqual(['1.1.1']);
+  expect(historyDisplayFilters(applied).deltaBeforeMs).toBe(0);
+  expect(historyDisplayFilters(applied).deltaAfterMs).toBe(0);
+  expect(historyDisplayFilters(widened).deltaAfterMs).toBe(500);
 });
 
 test('the history counter shows x / y only while the quick filter is active', () => {

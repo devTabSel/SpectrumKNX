@@ -12,13 +12,19 @@ function sameList(a: readonly (string | number)[], b: readonly (string | number)
   return true;
 }
 
-/** Side-panel selections only. The delta window is quick-filter context, not the panel. */
+/**
+ * Side-panel selections and the context window. The quick filter's own
+ * before/after bounds are not part of this snapshot.
+ */
 export function sameSidePanel(a: ActiveFilters, b: ActiveFilters): boolean {
   return sameList(a.sources, b.sources)
     && sameList(a.targets, b.targets)
     && sameList(a.types, b.types)
     && sameList(a.directions, b.directions)
-    && sameList(a.dpts, b.dpts);
+    && sameList(a.dpts, b.dpts)
+    && a.deltaBeforeMs === b.deltaBeforeMs
+    && a.deltaAfterMs === b.deltaAfterMs
+    && a.deltaContextEnabled === b.deltaContextEnabled;
 }
 
 /** True once a history load exists and the live side panel differs from it. */
@@ -28,16 +34,11 @@ export function sidePanelPending(applied: ActiveFilters | null, current: ActiveF
 }
 
 /**
- * Visibility filters: the side panel captured at the last history load, with
- * the live Time-Delta window so quick-filter context can open without a reload.
+ * Visibility filters for a loaded history view: the side panel from the last
+ * refresh, including its context window. Live edits stay pending until then.
  */
-export function historyDisplayFilters(applied: ActiveFilters, live: ActiveFilters): ActiveFilters {
-  return {
-    ...applied,
-    deltaBeforeMs: live.deltaBeforeMs,
-    deltaAfterMs: live.deltaAfterMs,
-    deltaContextEnabled: live.deltaContextEnabled,
-  };
+export function historyDisplayFilters(applied: ActiveFilters): ActiveFilters {
+  return applied;
 }
 
 export interface HistoryCounts {
