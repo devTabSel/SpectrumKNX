@@ -2,6 +2,8 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { expect, test, vi } from 'vitest';
 import { DptTypeTree } from './DptTypeTree';
 import type { FilterOption } from '../types/filters';
+import { getPref } from '../utils/prefs';
+import { DPT_TREE_EXPANDED_PREF } from '../utils/filterPanelExpandPref';
 
 const ENTRIES: FilterOption[] = [
   { main: 1, sub: 1, label: 'Switch' },
@@ -92,6 +94,34 @@ test('unchecking one subtype of a fully selected main type keeps the others', ()
   // Group is selected → it renders expanded; uncheck the "Switch" subtype.
   fireEvent.click(screen.getByText('Switch'));
   expect(onChange).toHaveBeenCalledWith(['1.002']);
+});
+
+test('search expansion is not persisted, a manual collapse is', () => {
+  localStorage.clear();
+  const props = {
+    entries: ENTRIES,
+    selected: [] as string[],
+    onChange: () => {},
+    expandedPrefKey: DPT_TREE_EXPANDED_PREF,
+  };
+  const searching = render(<DptTypeTree {...props} searchQuery="switch" />);
+  expect(screen.getByText('Switch')).toBeInTheDocument();
+  expect(screen.getByText('Temperature (°C)')).toBeInTheDocument();
+  expect(getPref(DPT_TREE_EXPANDED_PREF)).toBeNull();
+
+  fireEvent.click(screen.getByText('DPT 1'));
+  expect(screen.queryByText('Switch')).not.toBeInTheDocument();
+  expect(screen.getByText('Temperature (°C)')).toBeInTheDocument();
+
+  searching.unmount();
+  const closed = render(<DptTypeTree {...props} searchQuery="" />);
+  expect(screen.queryByText('Switch')).not.toBeInTheDocument();
+  expect(screen.queryByText('Temperature (°C)')).not.toBeInTheDocument();
+
+  closed.unmount();
+  render(<DptTypeTree {...props} searchQuery="switch" />);
+  expect(screen.queryByText('Switch')).not.toBeInTheDocument();
+  expect(screen.getByText('Temperature (°C)')).toBeInTheDocument();
 });
 
 test('toggling a subtype adds and removes its exact key', () => {

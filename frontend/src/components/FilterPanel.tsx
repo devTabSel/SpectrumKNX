@@ -1,4 +1,17 @@
 import React, { useState, useMemo } from 'react';
+import {
+  DPT_TREE_EXPANDED_PREF,
+  FILTER_SECTION_DIRECTION,
+  FILTER_SECTION_DPT,
+  FILTER_SECTION_SOURCE,
+  FILTER_SECTION_TARGET,
+  FILTER_SECTION_TIME_DELTA,
+  FILTER_SECTION_TYPE,
+  SOURCE_TREE_EXPANDED_PREF,
+  TARGET_TREE_EXPANDED_PREF,
+  readSectionOpen,
+  writeSectionOpen,
+} from '../utils/filterPanelExpandPref';
 import { Search, ChevronDown, ChevronRight, SlidersHorizontal, X, Clock, FolderInput, AlertTriangle, Power } from 'lucide-react';
 import {
   type FilterOptions,
@@ -69,17 +82,22 @@ interface FilterPanelProps {
 }
 
 interface SectionProps {
+  id: string;
   title: string;
   children: React.ReactNode;
   defaultOpen?: boolean;
 }
 
-const Section: React.FC<SectionProps> = ({ title, children, defaultOpen = true }) => {
-  const [open, setOpen] = useState(defaultOpen);
+const Section: React.FC<SectionProps> = ({ id, title, children, defaultOpen = true }) => {
+  const [open, setOpen] = useState(() => readSectionOpen(id, defaultOpen));
   return (
     <div style={{ borderBottom: '1px solid var(--border-color)' }}>
       <button
-        onClick={() => setOpen(o => !o)}
+        onClick={() => {
+          const next = !open;
+          setOpen(next);
+          writeSectionOpen(id, next);
+        }}
         style={{
           width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '0.65rem 1rem', background: 'transparent', border: 'none',
@@ -529,8 +547,126 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
       {/* Scrollable options */}
       <div style={{ flex: 1, overflowY: 'auto' }}>
 
+        {/* No-project notice — source/target/DPT filters need an ETS project */}
+        {showNoProjectNotice && (
+          <div style={{
+            margin: '0.75rem', padding: '0.85rem',
+            border: '1px solid var(--border-color)', borderRadius: '8px',
+            background: 'var(--bg-subtle)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.4rem' }}>
+              <AlertTriangle size={14} style={{ color: 'var(--warning-text)', flexShrink: 0 }} />
+              <span style={{ fontSize: '0.8125rem', fontWeight: 700, color: 'var(--text-main)' }}>
+                No ETS project loaded
+              </span>
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: onUploadProject ? '0.7rem' : 0 }}>
+              Filtering by source, target and DPT needs the group and device names
+              from your ETS project. Upload a <code>.knxproj</code> file to enable it.
+            </div>
+            {onUploadProject && (
+              <button
+                onClick={onUploadProject}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '0.4rem',
+                  width: '100%', justifyContent: 'center',
+                  padding: '0.5rem 0.65rem', borderRadius: '6px', cursor: 'pointer',
+                  border: '1px solid var(--accent-primary)',
+                  background: 'rgba(99,102,241,0.12)', color: 'var(--accent-primary)',
+                  fontSize: '0.78rem', fontWeight: 600, fontFamily: 'inherit',
+                }}
+              >
+                <FolderInput size={14} />
+                Upload ETS project
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Source */}
+        {filteredSources.length > 0 && (
+          <Section id={FILTER_SECTION_SOURCE} title="Source" defaultOpen>
+            <KnxAddressTree
+              entries={filteredSources}
+              expandedPrefKey={SOURCE_TREE_EXPANDED_PREF}
+              selected={activeFilters.sources}
+              groupNames={options.pa_line_names ?? {}}
+              separator="."
+              onToggle={addresses => update({ sources: addresses })}
+              counts={counts?.sources}
+              searchQuery={q}
+              onLastSeen={onQuickLastSeen ? addr => onQuickLastSeen(addr, 'pa') : undefined}
+              writeEnabled={writeEnabled}
+              onGotoTelegram={onGotoTelegram}
+            />
+          </Section>
+        )}
+
+        {/* Target */}
+        {filteredTargets.length > 0 && (
+          <Section id={FILTER_SECTION_TARGET} title="Target" defaultOpen>
+            <KnxAddressTree
+              entries={filteredTargets}
+              expandedPrefKey={TARGET_TREE_EXPANDED_PREF}
+              selected={activeFilters.targets}
+              groupNames={options.ga_group_names ?? {}}
+              separator="/"
+              onToggle={addresses => update({ targets: addresses })}
+              counts={counts?.targets}
+              searchQuery={q}
+              onLastSeen={onQuickLastSeen ? addr => onQuickLastSeen(addr, 'ga') : undefined}
+              writeEnabled={writeEnabled}
+              onGotoTelegram={onGotoTelegram}
+            />
+          </Section>
+        )}
+
+        {/* Type */}
+        {filteredTypes.length > 0 && (
+          <Section id={FILTER_SECTION_TYPE} title="Type" defaultOpen>
+            {filteredTypes.map(t => (
+              <OptionRow
+                key={t}
+                label={t.toUpperCase()}
+                checked={activeFilters.types.includes(t)}
+                count={counts ? (counts?.types[t] ?? 0) : undefined}
+                onToggle={() => update({ types: toggle(activeFilters.types, t) })}
+              />
+            ))}
+          </Section>
+        )}
+
+        {/* Direction — orthogonal to Type: incoming bus traffic vs. self-sent telegrams (#194) */}
+        {filteredDirections.length > 0 && (
+          <Section id={FILTER_SECTION_DIRECTION} title="Direction" defaultOpen>
+            {filteredDirections.map(d => (
+              <OptionRow
+                key={d}
+                label={d}
+                checked={activeFilters.directions.includes(d)}
+                count={counts ? (counts?.directions[d] ?? 0) : undefined}
+                onToggle={() => update({ directions: toggle(activeFilters.directions, d) })}
+              />
+            ))}
+          </Section>
+        )}
+
+        {/* DPT — grouped by main data type / bit-byte width (#273) */}
+        {filteredDpts.length > 0 && (
+          <Section id={FILTER_SECTION_DPT} title="DPT" defaultOpen={false}>
+            <DptTypeTree
+              entries={filteredDpts}
+              expandedPrefKey={DPT_TREE_EXPANDED_PREF}
+              selected={activeFilters.dpts}
+              onChange={dpts => update({ dpts })}
+              counts={counts?.dpts}
+              searchQuery={q}
+            />
+          </Section>
+        )}
+
         {/* Context window is part of the side panel. Quick-filter bounds cannot exceed it. */}
-        <Section title="Time-Delta Context" defaultOpen={false}>
+        <Section id={FILTER_SECTION_TIME_DELTA} title="Time-Delta Context" defaultOpen={false}>
           <div style={{ fontSize: '0.7rem', color: 'var(--text-dim)', marginBottom: '0.65rem', lineHeight: 1.45 }}>
             How far around a match the list may show context. Applied with the other filters.
           </div>
@@ -579,121 +715,6 @@ export const FilterPanel: React.FC<FilterPanelProps> = ({
             }}
           />
         </Section>
-
-        {/* No-project notice — source/target/DPT filters need an ETS project */}
-        {showNoProjectNotice && (
-          <div style={{
-            margin: '0.75rem', padding: '0.85rem',
-            border: '1px solid var(--border-color)', borderRadius: '8px',
-            background: 'var(--bg-subtle)',
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginBottom: '0.4rem' }}>
-              <AlertTriangle size={14} style={{ color: 'var(--warning-text)', flexShrink: 0 }} />
-              <span style={{ fontSize: '0.8125rem', fontWeight: 700, color: 'var(--text-main)' }}>
-                No ETS project loaded
-              </span>
-            </div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-dim)', lineHeight: 1.5, marginBottom: onUploadProject ? '0.7rem' : 0 }}>
-              Filtering by source, target and DPT needs the group and device names
-              from your ETS project. Upload a <code>.knxproj</code> file to enable it.
-            </div>
-            {onUploadProject && (
-              <button
-                onClick={onUploadProject}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '0.4rem',
-                  width: '100%', justifyContent: 'center',
-                  padding: '0.5rem 0.65rem', borderRadius: '6px', cursor: 'pointer',
-                  border: '1px solid var(--accent-primary)',
-                  background: 'rgba(99,102,241,0.12)', color: 'var(--accent-primary)',
-                  fontSize: '0.78rem', fontWeight: 600, fontFamily: 'inherit',
-                }}
-              >
-                <FolderInput size={14} />
-                Upload ETS project
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* Source */}
-        {filteredSources.length > 0 && (
-          <Section title="Source" defaultOpen>
-            <KnxAddressTree
-              entries={filteredSources}
-              selected={activeFilters.sources}
-              groupNames={options.pa_line_names ?? {}}
-              separator="."
-              onToggle={addresses => update({ sources: addresses })}
-              counts={counts?.sources}
-              searchQuery={q}
-              onLastSeen={onQuickLastSeen ? addr => onQuickLastSeen(addr, 'pa') : undefined}
-              writeEnabled={writeEnabled}
-              onGotoTelegram={onGotoTelegram}
-            />
-          </Section>
-        )}
-
-        {/* Target */}
-        {filteredTargets.length > 0 && (
-          <Section title="Target" defaultOpen>
-            <KnxAddressTree
-              entries={filteredTargets}
-              selected={activeFilters.targets}
-              groupNames={options.ga_group_names ?? {}}
-              separator="/"
-              onToggle={addresses => update({ targets: addresses })}
-              counts={counts?.targets}
-              searchQuery={q}
-              onLastSeen={onQuickLastSeen ? addr => onQuickLastSeen(addr, 'ga') : undefined}
-              writeEnabled={writeEnabled}
-              onGotoTelegram={onGotoTelegram}
-            />
-          </Section>
-        )}
-
-        {/* Type */}
-        {filteredTypes.length > 0 && (
-          <Section title="Type" defaultOpen>
-            {filteredTypes.map(t => (
-              <OptionRow
-                key={t}
-                label={t.toUpperCase()}
-                checked={activeFilters.types.includes(t)}
-                count={counts ? (counts?.types[t] ?? 0) : undefined}
-                onToggle={() => update({ types: toggle(activeFilters.types, t) })}
-              />
-            ))}
-          </Section>
-        )}
-
-        {/* Direction — orthogonal to Type: incoming bus traffic vs. self-sent telegrams (#194) */}
-        {filteredDirections.length > 0 && (
-          <Section title="Direction" defaultOpen>
-            {filteredDirections.map(d => (
-              <OptionRow
-                key={d}
-                label={d}
-                checked={activeFilters.directions.includes(d)}
-                count={counts ? (counts?.directions[d] ?? 0) : undefined}
-                onToggle={() => update({ directions: toggle(activeFilters.directions, d) })}
-              />
-            ))}
-          </Section>
-        )}
-
-        {/* DPT — grouped by main data type / bit-byte width (#273) */}
-        {filteredDpts.length > 0 && (
-          <Section title="DPT" defaultOpen={false}>
-            <DptTypeTree
-              entries={filteredDpts}
-              selected={activeFilters.dpts}
-              onChange={dpts => update({ dpts })}
-              counts={counts?.dpts}
-              searchQuery={q}
-            />
-          </Section>
-        )}
 
       </div>
       </>)}

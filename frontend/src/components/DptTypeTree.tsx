@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useMemo } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { dptKey, type FilterOption } from '../types/filters';
 import { dptWidthLabel } from '../utils/dpt';
+import { useTreeExpand } from '../utils/filterPanelExpandPref';
 import { nextTriState, type TriState } from '../utils/triState';
 import { TriStateToggle } from './TriStateToggle';
 
@@ -12,6 +13,8 @@ interface DptTypeTreeProps {
   onChange: (keys: string[]) => void;
   counts?: Record<string, number>;
   searchQuery: string;
+  /** Preference key for manually expanded and collapsed main-type ids. */
+  expandedPrefKey?: string;
 }
 
 const CountBubble: React.FC<{ count: number }> = ({ count }) => (
@@ -32,11 +35,12 @@ const CountBubble: React.FC<{ count: number }> = ({ count }) => (
  * (`matchesDpt`) already treats as "every subtype of this main type".
  */
 export const DptTypeTree: React.FC<DptTypeTreeProps> = ({
-  entries, selected, onChange, counts, searchQuery,
+  entries, selected, onChange, counts, searchQuery, expandedPrefKey,
 }) => {
-  // Explicit user choice wins; otherwise groups with a selection (or an active
-  // search, whose matches would be invisible in collapsed groups) start open.
-  const [openState, setOpenState] = useState<Record<number, boolean>>({});
+  // Explicit user choice wins and is the only thing persisted. Otherwise groups
+  // with a selection (or an active search, whose matches would be invisible in
+  // collapsed groups) start open. Search expansion is not written.
+  const { isOpen, toggle } = useTreeExpand(expandedPrefKey);
 
   const groups = useMemo(() => {
     const byMain = new Map<number, FilterOption[]>();
@@ -91,12 +95,15 @@ export const DptTypeTree: React.FC<DptTypeTreeProps> = ({
     <div>
       {groups.map(({ main, options, childKeys }) => {
         const state = groupState(main, childKeys);
-        const open = openState[main] ?? (searchQuery !== '' || state !== 'none');
+        const id = String(main);
+        const defaultOpen = state !== 'none';
+        const searchForced = searchQuery !== '';
+        const open = isOpen(id, defaultOpen, searchForced);
         const width = dptWidthLabel(main);
         return (
           <div key={main}>
             <div
-              onClick={() => setOpenState(prev => ({ ...prev, [main]: !open }))}
+              onClick={() => toggle(id, defaultOpen, open, searchForced)}
               style={{
                 display: 'flex', alignItems: 'center', gap: '0.4rem', padding: '0.3rem 0.25rem',
                 borderRadius: '5px', cursor: 'pointer', userSelect: 'none',

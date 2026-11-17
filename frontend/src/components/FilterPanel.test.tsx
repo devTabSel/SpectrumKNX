@@ -1,7 +1,19 @@
 import { render, screen, fireEvent, within } from '@testing-library/react';
-import { expect, test, vi } from 'vitest';
+import { beforeEach, expect, test, vi } from 'vitest';
 import { FilterPanel } from './FilterPanel';
 import { DEFAULT_FILTERS, type FilterOptions } from '../types/filters';
+import { getPref, setPref } from '../utils/prefs';
+import {
+  DPT_TREE_EXPANDED_PREF,
+  FILTER_SECTION_DIRECTION,
+  FILTER_SECTION_TIME_DELTA,
+  SOURCE_TREE_EXPANDED_PREF,
+  sectionOpenPrefKey,
+} from '../utils/filterPanelExpandPref';
+
+beforeEach(() => {
+  localStorage.clear();
+});
 
 const EMPTY_OPTIONS: FilterOptions = {
   sources: [], targets: [], types: ['Write', 'Read', 'Response'], dpts: [],
@@ -267,4 +279,133 @@ test('in the Active view the checkbox switches an entry off, and only the × rem
   const row = screen.getByText('0/1/2').closest('label')!.parentElement!;
   fireEvent.click(within(row).getByTitle('Remove filter'));
   expect(onFiltersChange).toHaveBeenLastCalledWith(expect.objectContaining({ sources: ['1.2.3'], targets: [] }));
+});
+
+const RICH_OPTIONS: FilterOptions = {
+  sources: [
+    { address: '1.1.1', name: 'Taster' },
+    { address: '1.1.2', name: 'Taster 2' },
+    { address: '2.1.1', name: 'Other' },
+  ],
+  targets: [
+    { address: '0/1/2', name: 'Licht' },
+    { address: '1/0/1', name: 'Szene' },
+  ],
+  types: ['Write', 'Read', 'Response'],
+  dpts: [
+    { main: 1, sub: 1, label: 'Switch' },
+    { main: 9, sub: 1, label: 'Temperature' },
+  ],
+  ga_group_names: { '0': 'Zentral', '0/1': 'Lichtgruppe', '1': 'Szenen', '1/0': 'Szenenlinie' },
+  pa_line_names: { '1': 'EG', '1.1': 'Wohnen', '2': 'OG', '2.1': 'Schlafen' },
+};
+
+const richPanel = () => (
+  <FilterPanel
+    options={RICH_OPTIONS}
+    activeFilters={DEFAULT_FILTERS}
+    onFiltersChange={() => {}}
+    projectLoaded
+  />
+);
+
+function expectSidePanelDefaults() {
+  expect(screen.getByText('Outgoing')).toBeInTheDocument();
+  expect(screen.queryByLabelText('Side-panel context before (ms)')).not.toBeInTheDocument();
+  expect(screen.getByText('1.1 — Wohnen')).toBeInTheDocument();
+  expect(screen.queryByText('Taster')).not.toBeInTheDocument();
+  expect(screen.getByText('2 — OG')).toBeInTheDocument();
+}
+
+test('Time-Delta Context is the last side-panel section', () => {
+  render(
+    <FilterPanel
+      options={RICH_OPTIONS}
+      activeFilters={DEFAULT_FILTERS}
+      onFiltersChange={() => {}}
+      projectLoaded={false}
+      onUploadProject={() => {}}
+    />,
+  );
+
+  const order = ['Source', 'Target', 'Type', 'Direction', 'DPT', 'Time-Delta Context'];
+  const buttons = order.map(name => screen.getByRole('button', { name }));
+  for (let i = 1; i < buttons.length; i++) {
+    expect(buttons[i - 1].compareDocumentPosition(buttons[i]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  }
+
+  const delta = buttons[buttons.length - 1];
+  expect(delta.parentElement!.parentElement!.lastElementChild).toBe(delta.parentElement);
+  const notice = screen.getByText(/No ETS project loaded/i);
+  expect(notice.compareDocumentPosition(delta) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test('a collapsed side-panel section stays collapsed after remount', () => {
+  const { unmount } = render(richPanel());
+  expect(screen.getByText('Outgoing')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Direction' }));
+  expect(screen.queryByText('Outgoing')).not.toBeInTheDocument();
+  expect(getPref(sectionOpenPrefKey(FILTER_SECTION_DIRECTION))).toBe('0');
+
+  unmount();
+  render(richPanel());
+  expect(screen.queryByText('Outgoing')).not.toBeInTheDocument();
+  expect(screen.getByText('WRITE')).toBeInTheDocument();
+});
+
+test('an expanded address-tree node stays expanded after remount, untouched nodes keep their default', () => {
+  const first = render(richPanel());
+  expect(screen.queryByText('Taster')).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByText('1.1 — Wohnen'));
+  expect(screen.getByText('Taster')).toBeInTheDocument();
+
+  first.unmount();
+  const second = render(richPanel());
+  expect(screen.getByText('Taster')).toBeInTheDocument();
+  expect(screen.queryByText('Other')).not.toBeInTheDocument();
+  expect(screen.getByText('2.1 — Schlafen')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByText('1 — EG'));
+  expect(screen.queryByText('1.1 — Wohnen')).not.toBeInTheDocument();
+
+  second.unmount();
+  render(richPanel());
+  expect(screen.queryByText('1.1 — Wohnen')).not.toBeInTheDocument();
+  expect(screen.getByText('2 — OG')).toBeInTheDocument();
+});
+
+test('side-panel sections and tree nodes use their defaults when no preference is stored', () => {
+  render(richPanel());
+  expectSidePanelDefaults();
+  expect(getPref(sectionOpenPrefKey(FILTER_SECTION_DIRECTION))).toBeNull();
+  expect(getPref(sectionOpenPrefKey(FILTER_SECTION_TIME_DELTA))).toBeNull();
+  expect(getPref(SOURCE_TREE_EXPANDED_PREF)).toBeNull();
+});
+
+test('a broken side-panel preference falls back to the same defaults', () => {
+  setPref(sectionOpenPrefKey(FILTER_SECTION_DIRECTION), 'open');
+  setPref(sectionOpenPrefKey(FILTER_SECTION_TIME_DELTA), 'true');
+  setPref(SOURCE_TREE_EXPANDED_PREF, '{');
+  setPref(DPT_TREE_EXPANDED_PREF, JSON.stringify({ expanded: [1], collapsed: [] }));
+
+  render(richPanel());
+  expectSidePanelDefaults();
+  fireEvent.click(screen.getByRole('button', { name: 'DPT' }));
+  expect(screen.queryByText('Switch')).not.toBeInTheDocument();
+});
+
+test('searching options expands DPT groups without saving that expansion', () => {
+  const { unmount } = render(richPanel());
+  fireEvent.click(screen.getByRole('button', { name: 'DPT' }));
+  expect(screen.queryByText('Switch')).not.toBeInTheDocument();
+
+  fireEvent.change(screen.getByPlaceholderText('Search options...'), { target: { value: 'switch' } });
+  expect(screen.getByText('Switch')).toBeInTheDocument();
+  expect(getPref(DPT_TREE_EXPANDED_PREF)).toBeNull();
+
+  unmount();
+  render(richPanel());
+  expect(screen.queryByText('Switch')).not.toBeInTheDocument();
 });

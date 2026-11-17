@@ -4,6 +4,7 @@ import { SendToGaPopover } from './SendToGaPopover';
 import type { FilterOption } from '../types/filters';
 import type { Telegram } from '../hooks/useWebSocket';
 import { nextTriState, type TriState } from '../utils/triState';
+import { useTreeExpand } from '../utils/filterPanelExpandPref';
 import { TriStateToggle } from './TriStateToggle';
 
 interface KnxAddressTreeProps {
@@ -19,6 +20,8 @@ interface KnxAddressTreeProps {
   onLastSeen?: (address: string) => void;
   writeEnabled?: boolean;
   onGotoTelegram?: (telegram: Telegram) => void;
+  /** Preference key for manually expanded and collapsed group ids. */
+  expandedPrefKey?: string;
 }
 
 function getCheckState(leafAddresses: string[], selected: string[]): TriState {
@@ -141,12 +144,12 @@ interface GroupNodeProps {
   leafAddresses: string[];
   selected: string[];
   children: React.ReactNode;
-  defaultOpen?: boolean;
+  open: boolean;
+  onToggleOpen: () => void;
   onToggleAll: (e: React.MouseEvent) => void;
 }
 
-const GroupNode: React.FC<GroupNodeProps> = ({ label, sublabel, leafAddresses, selected, children, defaultOpen = true, onToggleAll }) => {
-  const [open, setOpen] = useState(defaultOpen);
+const GroupNode: React.FC<GroupNodeProps> = ({ label, sublabel, leafAddresses, selected, children, open, onToggleOpen, onToggleAll }) => {
   const state = getCheckState(leafAddresses, selected);
 
   return (
@@ -161,7 +164,7 @@ const GroupNode: React.FC<GroupNodeProps> = ({ label, sublabel, leafAddresses, s
         onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
       >
         <TriStateToggle state={state} onClick={onToggleAll} label={label} />
-        <div style={{ flex: 1, minWidth: 0 }} onClick={() => setOpen(o => !o)}>
+        <div style={{ flex: 1, minWidth: 0 }} onClick={onToggleOpen}>
           <div title={label} style={{
             fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-main)',
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
@@ -173,7 +176,7 @@ const GroupNode: React.FC<GroupNodeProps> = ({ label, sublabel, leafAddresses, s
             }}>{sublabel}</div>
           )}
         </div>
-        <div onClick={() => setOpen(o => !o)} style={{ color: 'var(--text-dim)', flexShrink: 0, display: 'flex' }}>
+        <div onClick={onToggleOpen} style={{ color: 'var(--text-dim)', flexShrink: 0, display: 'flex' }}>
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </div>
       </div>
@@ -184,8 +187,15 @@ const GroupNode: React.FC<GroupNodeProps> = ({ label, sublabel, leafAddresses, s
 
 export const KnxAddressTree: React.FC<KnxAddressTreeProps> = ({
   entries, selected, groupNames, separator, onToggle, counts, searchQuery, onLastSeen, writeEnabled, onGotoTelegram,
+  expandedPrefKey,
 }) => {
   const q = searchQuery.toLowerCase();
+  // Search only hides non-matching rows. It does not open groups, so every
+  // click here is a manual one and is the only thing written to the preference.
+  const { isOpen, toggle } = useTreeExpand(expandedPrefKey);
+  const toggleGroup = (id: string, defaultOpen: boolean) => {
+    toggle(id, defaultOpen, isOpen(id, defaultOpen), false);
+  };
 
   // Build tree structure: level1 → level2 → leaves
   const tree = useMemo(() => {
@@ -230,6 +240,8 @@ export const KnxAddressTree: React.FC<KnxAddressTreeProps> = ({
               label={l1Label}
               leafAddresses={allL1Leaves}
               selected={selected}
+              open={isOpen(l1Key, true)}
+              onToggleOpen={() => toggleGroup(l1Key, true)}
               onToggleAll={e => onToggle(selectionAfterTriToggle(allL1Leaves, selected, e.ctrlKey || e.metaKey))}
             >
               {leaves.map(e => (
@@ -251,6 +263,8 @@ export const KnxAddressTree: React.FC<KnxAddressTreeProps> = ({
             label={l1Label}
             leafAddresses={allL1Leaves}
             selected={selected}
+            open={isOpen(l1Key, true)}
+            onToggleOpen={() => toggleGroup(l1Key, true)}
             onToggleAll={e => onToggle(selectionAfterTriToggle(allL1Leaves, selected, e.ctrlKey || e.metaKey))}
           >
             {visibleL2.map(([l2Key, leaves]) => {
@@ -266,7 +280,8 @@ export const KnxAddressTree: React.FC<KnxAddressTreeProps> = ({
                   label={l2Label}
                   leafAddresses={l2Leaves}
                   selected={selected}
-                  defaultOpen={false}
+                  open={isOpen(l2Key, false)}
+                  onToggleOpen={() => toggleGroup(l2Key, false)}
                   onToggleAll={e => onToggle(selectionAfterTriToggle(l2Leaves, selected, e.ctrlKey || e.metaKey))}
                 >
                   {visibleLeaves.map(e => (
