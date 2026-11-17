@@ -1,41 +1,50 @@
-import { useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import {
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+} from 'react';
 import { format } from 'date-fns';
 import {
   ChevronLeft,
   ChevronRight,
-  CornerDownLeft,
   Download,
   FastForward,
   Rewind,
   Trash2,
   Play,
   Pause,
-  Square,
 } from 'lucide-react';
-import { ThemedDatetimePicker } from './ThemedDatetimePicker';
-import { SecondsField } from './SecondsField';
+import { DateTimeField } from './DateTimeField';
+import { DurationField, parseTypedDurationUnit } from './DurationField';
+import { GotoIcon } from './GotoIcon';
 import { READING_END_LABEL, type ReadingEndCause } from '../utils/telegramDisplay';
 import { classifyGotoTarget } from '../utils/gotoTarget';
-import { parseRangePreset, RANGE_PRESETS } from '../utils/rangeWindow';
+import { OUTSIDE_GOTO_TITLE } from '../utils/gotoBuffer';
+import {
+  parseRangePreset,
+  RANGE_PRESETS,
+  RANGE_UNITS,
+  type RangeUnit,
+} from '../utils/rangeWindow';
 
-const INPUT_FMT = "yyyy-MM-dd'T'HH:mm:ss";
-/** Local datetime-with-seconds display width (YYYY-MM-DDTHH:mm:ss). */
+/** Match telegram timestamp column: date + space + time with centiseconds. */
+const INPUT_FMT = 'yyyy-MM-dd HH:mm:ss.SS';
+/** Local datetime display width while editing (YYYY-MM-DD HH:mm:ss.SS). */
 const DT_WIDTH_CH = INPUT_FMT.length;
 
 export type ReadDirection = 'forward' | 'backward';
-export type RangeUnit = 's' | 'm' | 'h' | 't';
+export type { RangeUnit };
 
-const RANGE_UNITS: RangeUnit[] = ['s', 'm', 'h', 't'];
-const RANGE_LIST_ID = 'monitor-range-presets';
-
-/** Format canonical minutes into the active unit for the range field. `t` is days. */
+/** Format canonical minutes into the active unit for the range field. `d` is days. */
 export function formatRangeMinutes(minutes: number, unit: RangeUnit): string {
   if (unit === 's') return String(Math.round(minutes * 60));
   if (unit === 'h') {
     const h = minutes / 60;
     return Number.isInteger(h) ? String(h) : (Math.round(h * 100) / 100).toString();
   }
-  if (unit === 't') {
+  if (unit === 'd') {
     const d = minutes / (60 * 24);
     return Number.isInteger(d) ? String(d) : (Math.round(d * 100) / 100).toString();
   }
@@ -49,7 +58,7 @@ export function rangeValueToMinutes(raw: string, unit: RangeUnit): number | null
   let minutes = n;
   if (unit === 's') minutes = n / 60;
   else if (unit === 'h') minutes = n * 60;
-  else if (unit === 't') minutes = n * 60 * 24;
+  else if (unit === 'd') minutes = n * 60 * 24;
   const next = Math.max(1, Math.round(minutes));
   return next;
 }
@@ -96,8 +105,9 @@ export interface BufferStatusPillProps {
   filterActive: boolean;
   onClear: () => void;
   /**
-   * Reading-end marker. `range` / `loadlimit` / `data` turn Clear orange and
-   * name the reason. `loading` does not — the spinner owns that state.
+   * Reading-end marker. `range` / `loadlimit` turn Clear orange and name the
+   * reason. `data` names the reason and leaves Clear dim. `loading` does
+   * neither — the spinner owns that state.
    */
   readingEnd?: ReadingEndCause | null;
   /** Abort in-flight history load. */
@@ -149,10 +159,19 @@ const pillStyle: CSSProperties = {
   color: 'var(--text-dim)',
 };
 
-const dtStyle: CSSProperties = {
+/** Frameless editor while a buffer-edge time is focused. */
+const dtEditStyle: CSSProperties = {
   width: `${DT_WIDTH_CH}ch`,
+  border: 'none',
+  outline: 'none',
+  background: 'transparent',
+  padding: 0,
+  margin: 0,
+  color: 'var(--text-main)',
   fontSize: '0.7rem',
-  padding: '0.15rem 0.35rem',
+  fontFamily: "'JetBrains Mono', monospace",
+  fontVariantNumeric: 'tabular-nums',
+  fontWeight: 500,
   minHeight: 0,
   height: '1.55rem',
 };
@@ -164,14 +183,58 @@ function msToInput(ms: number | null): string {
 function parseCommitMs(raw: string): number | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  const ms = new Date(trimmed).getTime();
+  const m = trimmed.match(
+    /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/,
+  );
+  if (!m) {
+    const ms = new Date(trimmed.replace(' ', 'T')).getTime();
+    return Number.isNaN(ms) ? null : ms;
+  }
+  const csRaw = m[7] ?? '0';
+  const cs = Number(csRaw.padEnd(2, '0').slice(0, 2));
+  const ms = new Date(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]),
+    Number(m[5]),
+    Number(m[6] ?? 0),
+    cs * 10,
+  ).getTime();
   return Number.isNaN(ms) ? null : ms;
 }
 
 /**
- * Monitor-table buffer status pill: rewind → oldest → goto → direction →
- * range → clear/spinner → direction → newest → goto → fast-forward →
- * play/pause → WS LED → rate → count → export.
+ * Jump targets the edge telegram's real timestamp, never the second-truncated
+ * display string. A focused draft that still matches the edge display keeps
+ * that TG time; only a truly edited value becomes a typed goto.
+ */
+function resolveEdgeTarget(
+  focused: boolean,
+  draft: string,
+  edgeMs: number | null,
+): number | null {
+  if (!focused) return edgeMs;
+  if (draft.trim() === msToInput(edgeMs)) return edgeMs;
+  return parseCommitMs(draft);
+}
+
+function edgeGotoTone(
+  targetMs: number | null,
+  oldestMs: number | null,
+  newestMs: number | null,
+): 'ready' | 'outside' {
+  if (targetMs == null) return 'ready';
+  const place = classifyGotoTarget(targetMs, oldestMs, newestMs);
+  return place === 'inside' || place === 'unknown' ? 'ready' : 'outside';
+}
+
+/**
+ * Monitor-table buffer status pill.
+ * Backward: rewind → oldest → limit → clear → range → chevron → play/pause
+ * → newest → fast-forward → WS LED → rate → count → export.
+ * Forward: rewind → oldest → chevron → range → clear → limit → play
+ * → newest → fast-forward → WS LED → rate → count → export.
  */
 export function BufferStatusPill({
   oldestMs,
@@ -219,6 +282,10 @@ export function BufferStatusPill({
   const newestRef = useRef<HTMLInputElement>(null);
   const oldestCancel = useRef(false);
   const newestCancel = useRef(false);
+  const oldestDraftRef = useRef(oldestDraft);
+  const newestDraftRef = useRef(newestDraft);
+  oldestDraftRef.current = oldestDraft;
+  newestDraftRef.current = newestDraft;
 
   // Outside focus, always mirror buffer bounds.
   const [oldestBaseline, setOldestBaseline] = useState(oldestMs);
@@ -253,19 +320,17 @@ export function BufferStatusPill({
 
   const heldCount = unfilteredCount ?? totalCount;
   const bufferEmpty = heldCount <= 0;
-  const endMarked = readingEnd === 'range' || readingEnd === 'loadlimit' || readingEnd === 'data';
+  const endNamed = readingEnd === 'range' || readingEnd === 'loadlimit' || readingEnd === 'data';
+  const clearOrange = readingEnd === 'range' || readingEnd === 'loadlimit';
   const rangeTitle = `${heldCount}/${loadLimit}`;
   const clearLabel = 'Clear (also wipes the local telegram cache).';
   const clearTitle = bufferEmpty
     ? 'Buffer is empty'
-    : endMarked && readingEnd
+    : endNamed && readingEnd
       ? `${READING_END_LABEL[readingEnd]}. ${clearLabel}`
       : clearLabel;
 
-  const OUTSIDE_GOTO_TITLE = 'Ctrl-Klick lädt nach';
-
-  const applyTime = (raw: string, via: 'enter' | 'blur' | 'icon', ctrl: boolean, reset: () => void) => {
-    const ms = parseCommitMs(raw);
+  const applyTime = (ms: number | null, via: 'enter' | 'blur' | 'icon', ctrl: boolean, reset: () => void) => {
     if (ms == null) {
       reset();
       return;
@@ -281,33 +346,56 @@ export function BufferStatusPill({
   };
 
   const commitOldest = (raw: string, via: 'enter' | 'blur' | 'icon', ctrl = false) => {
-    applyTime(raw, via, ctrl, () => setOldestDraft(msToInput(oldestMs)));
+    // Enter/blur always treat the field value as a draft (even after focus clears).
+    const ms = resolveEdgeTarget(via !== 'icon' || oldestFocused, raw, oldestMs);
+    applyTime(ms, via, ctrl, () => setOldestDraft(msToInput(oldestMs)));
   };
 
   const commitNewest = (raw: string, via: 'enter' | 'blur' | 'icon', ctrl = false) => {
-    applyTime(raw, via, ctrl, () => setNewestDraft(msToInput(newestMs)));
+    const ms = resolveEdgeTarget(via !== 'icon' || newestFocused, raw, newestMs);
+    applyTime(ms, via, ctrl, () => setNewestDraft(msToInput(newestMs)));
   };
 
-  const jumpOldest = (raw: string, ctrl: boolean) => {
+  const jumpOldest = (ctrl: boolean) => {
     const el = oldestRef.current;
-    const focused = el != null && document.activeElement === el;
-    if (focused) oldestCancel.current = true;
+    // Prefer React focus state: jsdom often leaves activeElement unset after
+    // fireEvent.focus, but the draft still owns the typed target.
+    // Draft is always full date+time (input may show time-only via if-differs).
+    const raw = oldestFocused ? oldestDraftRef.current : msToInput(oldestMs);
+    const ms = resolveEdgeTarget(oldestFocused, raw, oldestMs);
+    const place = ms == null ? 'unknown' : classifyGotoTarget(ms, oldestMs, newestMs);
+    const willCommit = place === 'inside' || place === 'unknown' || ctrl;
+    // Keep an outside draft after a plain click so Ctrl can still load it.
+    if (oldestFocused && willCommit) {
+      oldestCancel.current = true;
+      commitOldest(raw, 'icon', ctrl);
+      if (el != null && document.activeElement === el) el.blur();
+      return;
+    }
     commitOldest(raw, 'icon', ctrl);
-    if (focused) el.blur();
   };
 
-  const jumpNewest = (raw: string, ctrl: boolean) => {
+  const jumpNewest = (ctrl: boolean) => {
     const el = newestRef.current;
-    const focused = el != null && document.activeElement === el;
-    if (focused) newestCancel.current = true;
+    const raw = newestFocused ? newestDraftRef.current : msToInput(newestMs);
+    const ms = resolveEdgeTarget(newestFocused, raw, newestMs);
+    const place = ms == null ? 'unknown' : classifyGotoTarget(ms, oldestMs, newestMs);
+    const willCommit = place === 'inside' || place === 'unknown' || ctrl;
+    if (newestFocused && willCommit) {
+      newestCancel.current = true;
+      commitNewest(raw, 'icon', ctrl);
+      if (el != null && document.activeElement === el) el.blur();
+      return;
+    }
     commitNewest(raw, 'icon', ctrl);
-    if (focused) el.blur();
   };
 
-  const oldestShown = parseCommitMs(oldestFocused ? oldestDraft : msToInput(oldestMs));
-  const newestShown = parseCommitMs(newestFocused ? newestDraft : msToInput(newestMs));
-  const oldestOutside = oldestShown != null && classifyGotoTarget(oldestShown, oldestMs, newestMs) !== 'inside';
-  const newestOutside = newestShown != null && classifyGotoTarget(newestShown, oldestMs, newestMs) !== 'inside';
+  const oldestTarget = resolveEdgeTarget(oldestFocused, oldestDraft, oldestMs);
+  const newestTarget = resolveEdgeTarget(newestFocused, newestDraft, newestMs);
+  const oldestTone = edgeGotoTone(oldestTarget, oldestMs, newestMs);
+  const newestTone = edgeGotoTone(newestTarget, oldestMs, newestMs);
+  const oldestOutside = oldestTone === 'outside';
+  const newestOutside = newestTone === 'outside';
 
   const gotoStyle: CSSProperties = {
     color: 'var(--text-dim)',
@@ -317,17 +405,15 @@ export function BufferStatusPill({
     cursor: isHistoryLoading ? 'not-allowed' : 'pointer',
   };
 
-  const commitRange = (raw: string = rangeDraft) => {
-    const preset = parseRangePreset(raw);
-    const unit = preset?.unit ?? rangeUnit;
-    const sanitized = preset ? String(preset.value) : sanitizeRangeInput(raw);
-    const next = rangeValueToMinutes(sanitized, unit);
+  const commitRange = (raw: string = rangeDraft, activeUnit: RangeUnit = rangeUnit) => {
+    const sanitized = sanitizeRangeInput(raw);
+    const next = rangeValueToMinutes(sanitized, activeUnit);
     if (next == null) {
       setRangeDraft(formatRangeMinutes(rangeMinutes, rangeUnit));
       return;
     }
-    if (preset) setRangeUnit(preset.unit);
-    setRangeDraft(formatRangeMinutes(next, unit));
+    if (activeUnit !== rangeUnit) setRangeUnit(activeUnit);
+    setRangeDraft(formatRangeMinutes(next, activeUnit));
     if (next !== rangeMinutes) onRangeMinutesChange(next);
   };
 
@@ -342,9 +428,7 @@ export function BufferStatusPill({
     if (next !== loadLimit) onLoadLimitChange?.(next);
   };
 
-  const cycleRangeUnit = () => {
-    const idx = RANGE_UNITS.indexOf(rangeUnit);
-    const nextUnit = RANGE_UNITS[(idx + 1) % RANGE_UNITS.length];
+  const applyRangeUnit = (nextUnit: RangeUnit) => {
     // A formatted echo of the committed window cycles without rounding drift
     // (days of a 1 h window are 0.04). A typed draft converts from that text.
     const fromDraft = rangeValueToMinutes(sanitizeRangeInput(rangeDraft), rangeUnit);
@@ -357,8 +441,9 @@ export function BufferStatusPill({
   const onRangeKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key !== 'Enter') return;
     e.preventDefault();
-    // Apply immediately in the selected unit, then leave the field.
-    commitRange((e.target as HTMLInputElement).value);
+    const raw = (e.target as HTMLInputElement).value;
+    const typed = parseTypedDurationUnit(raw, RANGE_UNITS);
+    commitRange(typed?.value ?? raw, (typed?.unit as RangeUnit | undefined) ?? rangeUnit);
     (e.target as HTMLInputElement).blur();
   };
 
@@ -382,7 +467,7 @@ export function BufferStatusPill({
       title={clearTitle}
       aria-label={clearLabel}
       style={{
-        color: endMarked ? 'var(--warning-text)' : 'var(--text-dim)',
+        color: clearOrange ? 'var(--warning-text)' : 'var(--text-dim)',
         padding: 0,
         flexShrink: 0,
         opacity: bufferEmpty ? 0.45 : 1,
@@ -393,29 +478,122 @@ export function BufferStatusPill({
     </button>
   );
 
-  // Backward: icon left, value+unit right. Forward: value+unit left, icon right.
-  const rangeIconLeft = readDirection === 'backward';
-  // Forward has no live control — a visible, non-clickable Stop. A wrapper
-  // carries the tooltip, because a disabled button does not show its own.
-  // A fixed anchor in the past uses the auto-pause icon even while the mode
-  // is still playing. Manual pause keeps its own icon. Offline only turns
-  // the LED red; it does not replace this control.
-  const forwardStop = readDirection === 'forward';
-  const showAuto = !forwardStop && pauseMode !== 'manual' && (pauseMode === 'auto' || fixedAnchor);
-  const controlLabel = forwardStop
-    ? 'Stop'
+  // Forward shows a blue Play. A click writes now into the edge opposite
+  // the anchor and the parent starts the fill. A fixed anchor in the past uses the
+  // auto-pause icon even while the mode is still playing. Manual pause keeps
+  // its own icon. Offline only turns the LED red; it does not replace this control.
+  const forwardPlay = readDirection === 'forward';
+  const showAuto = !forwardPlay && pauseMode !== 'manual' && (pauseMode === 'auto' || fixedAnchor);
+  const controlLabel = forwardPlay
+    ? 'Play'
     : showAuto
       ? 'Paused automatically'
       : pauseTitle;
-  const controlTitle = forwardStop ? 'Kein Live in Leserichtung vorwärts' : controlLabel;
-  const controlColor = forwardStop || showAuto ? 'var(--text-dim)' : pauseColor;
-  const controlDisabled = forwardStop || pauseDisabled;
+  const controlTitle = forwardPlay ? 'Jetzt auf die Gegenseite' : controlLabel;
+  const controlColor = forwardPlay
+    ? 'var(--accent-primary)'
+    : showAuto
+      ? 'var(--text-dim)'
+      : pauseColor;
+  const controlDisabled = forwardPlay ? false : pauseDisabled;
+
+  // Range stays next to the visible direction chevron; limit sits on the far side.
+  // Forward:  chevron → range → clear → limit
+  // Backward: limit → clear → range → chevron
+  const rangeField = (
+    <DurationField
+      value={rangeDraft}
+      onChange={v => {
+        setRangeFocused(true);
+        setRangeDraft(v);
+      }}
+      placeholder="range"
+      title={rangeTitle}
+      ariaLabel="Buffer range"
+      unit={rangeUnit}
+      alwaysShowUnit
+      unitSwitchable
+      units={RANGE_UNITS}
+      sanitize={sanitizeRangeInput}
+      onUnitChange={u => applyRangeUnit(u as RangeUnit)}
+      suggestions={RANGE_PRESETS.map(preset => preset.label)}
+      unitTitle="Cycle range unit (s / m / h / d)"
+      color={readingEnd === 'range' ? 'var(--warning-text)' : undefined}
+      onBlur={(sanitized, activeUnit) => {
+        setRangeFocused(false);
+        commitRange(sanitized, activeUnit as RangeUnit);
+      }}
+      onKeyDown={onRangeKeyDown}
+    />
+  );
+  const limitText = limitFocused ? limitDraft : String(loadLimit);
+  const limitField = (
+    <input
+      className="glass-input"
+      aria-label="Load limit"
+      value={limitText}
+      onChange={e => {
+        setLimitFocused(true);
+        setLimitDraft(e.target.value);
+      }}
+      onFocus={() => setLimitFocused(true)}
+      onBlur={e => {
+        setLimitFocused(false);
+        commitLimit(e.currentTarget.value);
+      }}
+      onKeyDown={e => {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();
+        const raw = (e.target as HTMLInputElement).value;
+        commitLimit(raw);
+        (e.target as HTMLInputElement).blur();
+      }}
+      inputMode="numeric"
+      title="Load limit"
+      size={Math.max(4, limitText.length)}
+      style={{
+        // content-box: size/ch cover the digits; glass padding/border add outside.
+        width: `${Math.max(4, limitText.length)}ch`,
+        boxSizing: 'content-box',
+        padding: '0.2rem 0.35rem',
+        font: 'inherit',
+        fontSize: '0.72rem',
+        flexShrink: 0,
+        ...(readingEnd === 'loadlimit' ? { color: 'var(--warning-text)' } : {}),
+      }}
+    />
+  );
+  const rangeLimitCluster = readDirection === 'forward'
+    ? <>{rangeField}{rangeAction}{limitField}</>
+    : <>{limitField}{rangeAction}{rangeField}</>;
+  // Directly before the right-hand time field in both directions.
+  const transportControl = (
+    <span title={controlTitle} style={{ display: 'inline-flex' }}>
+      <button
+        type="button"
+        className="icon-button"
+        onClick={onTogglePause}
+        title={controlTitle}
+        aria-label={controlLabel}
+        disabled={controlDisabled}
+        style={{
+          color: controlColor,
+          padding: '0.15rem',
+          opacity: controlDisabled ? 0.45 : 1,
+          cursor: controlDisabled ? 'not-allowed' : 'pointer',
+        }}
+      >
+        {forwardPlay
+          ? <Play size={15} fill="currentColor" />
+          : showAuto || pauseMode !== 'playing'
+            ? <Pause size={15} fill="currentColor" />
+            : <Play size={15} fill="currentColor" />}
+      </button>
+    </span>
+  );
 
   return (
     <div data-buffer-status-pill="" style={pillStyle}>
-      <datalist id={RANGE_LIST_ID}>
-        {RANGE_PRESETS.map(preset => <option key={preset.label} value={preset.label}>{preset.label}</option>)}
-      </datalist>
       <button
         type="button"
         className="icon-button"
@@ -433,18 +611,27 @@ export function BufferStatusPill({
         <Rewind size={15} />
       </button>
 
-      <ThemedDatetimePicker
-        inputRef={oldestRef}
-        value={oldestFocused ? oldestDraft : msToInput(oldestMs)}
-        onChange={v => {
-          setOldestFocused(true);
-          setOldestDraft(v);
-        }}
-        withSeconds
-        variant="field"
+      <DateTimeField
+        valueMs={oldestMs}
+        referenceMs={newestMs}
+        dateDisplay="if-differs"
+        editable
+        withCentiseconds
+        editValue={oldestDraft}
+        focused={oldestFocused}
         aria-label="Oldest telegram in buffer"
         placeholder="Oldest"
-        style={dtStyle}
+        inputRef={oldestRef}
+        editStyle={dtEditStyle}
+        onBeginEdit={() => {
+          setOldestDraft(msToInput(oldestMs));
+          setOldestFocused(true);
+        }}
+        onChange={v => {
+          setOldestFocused(true);
+          oldestDraftRef.current = v;
+          setOldestDraft(v);
+        }}
         onBlur={() => {
           setOldestFocused(false);
           if (oldestCancel.current) {
@@ -452,7 +639,8 @@ export function BufferStatusPill({
             setOldestDraft(msToInput(oldestMs));
             return;
           }
-          commitOldest(oldestRef.current?.value ?? oldestDraft, 'blur');
+          // Draft is always full date+time; the input may show time-only (if-differs).
+          commitOldest(oldestDraftRef.current, 'blur');
         }}
         onKeyDown={e => {
           if (e.key === 'Escape') {
@@ -464,25 +652,24 @@ export function BufferStatusPill({
           e.preventDefault();
           const el = e.currentTarget as HTMLInputElement;
           if (document.activeElement === el) oldestCancel.current = true;
-          commitOldest(el.value, 'enter');
+          commitOldest(oldestDraftRef.current, 'enter');
           if (document.activeElement === el) el.blur();
         }}
-      />
-      <button
-        type="button"
-        className="icon-button"
-        aria-label="Go to oldest time"
-        title={oldestOutside ? OUTSIDE_GOTO_TITLE : 'Go to oldest time'}
-        disabled={isHistoryLoading}
-        onMouseDown={e => e.preventDefault()}
-        onClick={e => jumpOldest(
-          oldestRef.current?.value ?? (oldestFocused ? oldestDraft : msToInput(oldestMs)),
-          e.ctrlKey || e.metaKey,
+        endSlot={(
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="Go to oldest time"
+            title={oldestOutside ? OUTSIDE_GOTO_TITLE : 'Go to oldest time'}
+            disabled={isHistoryLoading}
+            onMouseDown={e => e.preventDefault()}
+            onClick={e => jumpOldest(e.ctrlKey || e.metaKey)}
+            style={{ ...gotoStyle, color: oldestOutside ? 'var(--warning-text)' : gotoStyle.color }}
+          >
+            <GotoIcon tone={oldestTone} readDirection={readDirection} size={13} />
+          </button>
         )}
-        style={{ ...gotoStyle, color: oldestOutside ? 'var(--warning-text)' : gotoStyle.color }}
-      >
-        <CornerDownLeft size={13} />
-      </button>
+      />
 
       {readDirection === 'forward' ? (
         <button
@@ -491,71 +678,22 @@ export function BufferStatusPill({
           title="Reading forward — click for backward"
           aria-label="Reading forward"
           onClick={() => onReadDirectionChange('backward')}
-          style={{ color: 'var(--accent-primary)', padding: '0.15rem', flexShrink: 0 }}
+          style={{
+            color: 'var(--accent-primary)',
+            padding: '0.2rem 0.3rem',
+            flexShrink: 0,
+            border: '1px solid var(--border-color)',
+            borderRadius: 6,
+            background: 'var(--bg-inset)',
+            display: 'inline-flex',
+            alignItems: 'center',
+          }}
         >
           <ChevronRight size={14} />
         </button>
       ) : null}
 
-      <SecondsField
-        value={rangeDraft}
-        onChange={v => {
-          setRangeFocused(true);
-          setRangeDraft(v);
-        }}
-        placeholder="range"
-        title={rangeTitle}
-        ariaLabel="Buffer range"
-        unit={rangeUnit}
-        alwaysShowUnit
-        sanitize={sanitizeRangeInput}
-        onUnitClick={cycleRangeUnit}
-        list={RANGE_LIST_ID}
-        unitTitle="Cycle range unit (s / m / h / t)"
-        textAlign={rangeIconLeft ? 'right' : 'left'}
-        startSlot={rangeIconLeft ? rangeAction : undefined}
-        endSlot={rangeIconLeft ? undefined : rangeAction}
-        onBlur={sanitized => {
-          setRangeFocused(false);
-          commitRange(sanitized);
-        }}
-        onKeyDown={onRangeKeyDown}
-      />
-
-      <span aria-hidden style={{ color: 'var(--text-dim)', flexShrink: 0 }}>/</span>
-      <input
-        aria-label="Load limit"
-        value={limitFocused ? limitDraft : String(loadLimit)}
-        onChange={e => {
-          setLimitFocused(true);
-          setLimitDraft(e.target.value);
-        }}
-        onFocus={() => setLimitFocused(true)}
-        onBlur={e => {
-          setLimitFocused(false);
-          commitLimit(e.currentTarget.value);
-        }}
-        onKeyDown={e => {
-          if (e.key !== 'Enter') return;
-          e.preventDefault();
-          const raw = (e.target as HTMLInputElement).value;
-          commitLimit(raw);
-          (e.target as HTMLInputElement).blur();
-        }}
-        inputMode="numeric"
-        title="Load limit"
-        style={{
-          width: `${Math.max(4, String(loadLimit).length)}ch`,
-          border: 'none',
-          outline: 'none',
-          background: 'transparent',
-          color: 'var(--text-main)',
-          font: 'inherit',
-          fontSize: '0.72rem',
-          padding: 0,
-          flexShrink: 0,
-        }}
-      />
+      {rangeLimitCluster}
 
       {readDirection === 'backward' ? (
         <button
@@ -564,24 +702,44 @@ export function BufferStatusPill({
           title="Reading backward — click for forward"
           aria-label="Reading backward"
           onClick={() => onReadDirectionChange('forward')}
-          style={{ color: 'var(--accent-primary)', padding: '0.15rem', flexShrink: 0 }}
+          style={{
+            color: 'var(--accent-primary)',
+            padding: '0.2rem 0.3rem',
+            flexShrink: 0,
+            border: '1px solid var(--border-color)',
+            borderRadius: 6,
+            background: 'var(--bg-inset)',
+            display: 'inline-flex',
+            alignItems: 'center',
+          }}
         >
           <ChevronLeft size={14} />
         </button>
       ) : null}
 
-      <ThemedDatetimePicker
-        inputRef={newestRef}
-        value={newestFocused ? newestDraft : msToInput(newestMs)}
-        onChange={v => {
-          setNewestFocused(true);
-          setNewestDraft(v);
-        }}
-        withSeconds
-        variant="field"
+      {transportControl}
+
+      <DateTimeField
+        valueMs={newestMs}
+        referenceMs={oldestMs}
+        dateDisplay="if-differs"
+        editable
+        withCentiseconds
+        editValue={newestDraft}
+        focused={newestFocused}
         aria-label="Newest telegram in buffer"
         placeholder="Newest"
-        style={dtStyle}
+        inputRef={newestRef}
+        editStyle={dtEditStyle}
+        onBeginEdit={() => {
+          setNewestDraft(msToInput(newestMs));
+          setNewestFocused(true);
+        }}
+        onChange={v => {
+          setNewestFocused(true);
+          newestDraftRef.current = v;
+          setNewestDraft(v);
+        }}
         onBlur={() => {
           setNewestFocused(false);
           if (newestCancel.current) {
@@ -589,7 +747,8 @@ export function BufferStatusPill({
             setNewestDraft(msToInput(newestMs));
             return;
           }
-          commitNewest(newestRef.current?.value ?? newestDraft, 'blur');
+          // Draft is always full date+time; the input may show time-only (if-differs).
+          commitNewest(newestDraftRef.current, 'blur');
         }}
         onKeyDown={e => {
           if (e.key === 'Escape') {
@@ -601,25 +760,24 @@ export function BufferStatusPill({
           e.preventDefault();
           const el = e.currentTarget as HTMLInputElement;
           if (document.activeElement === el) newestCancel.current = true;
-          commitNewest(el.value, 'enter');
+          commitNewest(newestDraftRef.current, 'enter');
           if (document.activeElement === el) el.blur();
         }}
-      />
-      <button
-        type="button"
-        className="icon-button"
-        aria-label="Go to newest time"
-        title={newestOutside ? OUTSIDE_GOTO_TITLE : 'Go to newest time'}
-        disabled={isHistoryLoading}
-        onMouseDown={e => e.preventDefault()}
-        onClick={e => jumpNewest(
-          newestRef.current?.value ?? (newestFocused ? newestDraft : msToInput(newestMs)),
-          e.ctrlKey || e.metaKey,
+        endSlot={(
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="Go to newest time"
+            title={newestOutside ? OUTSIDE_GOTO_TITLE : 'Go to newest time'}
+            disabled={isHistoryLoading}
+            onMouseDown={e => e.preventDefault()}
+            onClick={e => jumpNewest(e.ctrlKey || e.metaKey)}
+            style={{ ...gotoStyle, color: newestOutside ? 'var(--warning-text)' : gotoStyle.color }}
+          >
+            <GotoIcon tone={newestTone} readDirection={readDirection} size={13} />
+          </button>
         )}
-        style={{ ...gotoStyle, color: newestOutside ? 'var(--warning-text)' : gotoStyle.color }}
-      >
-        <CornerDownLeft size={13} />
-      </button>
+      />
 
       <button
         type="button"
@@ -637,29 +795,6 @@ export function BufferStatusPill({
       >
         <FastForward size={15} />
       </button>
-
-      <span title={controlTitle} style={{ display: 'inline-flex' }}>
-        <button
-          type="button"
-          className="icon-button"
-          onClick={onTogglePause}
-          title={controlTitle}
-          aria-label={controlLabel}
-          disabled={controlDisabled}
-          style={{
-            color: controlColor,
-            padding: '0.15rem',
-            opacity: controlDisabled ? 0.45 : 1,
-            cursor: controlDisabled ? 'not-allowed' : 'pointer',
-          }}
-        >
-          {forwardStop
-            ? <Square size={15} fill="currentColor" />
-            : showAuto || pauseMode !== 'playing'
-              ? <Pause size={15} fill="currentColor" />
-              : <Play size={15} fill="currentColor" />}
-        </button>
-      </span>
 
       <span
         style={{

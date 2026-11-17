@@ -17,7 +17,7 @@ import { TelegramWhenJump, telegramEventType } from './TelegramWhenJump';
 import { EventTypeLabel } from './EventTypeLabel';
 import { useGaReadPhase } from './GaReadPhase';
 import { secondaryBtn } from '../utils/buttonStyles';
-import { SecondsField } from './SecondsField';
+import { DurationField } from './DurationField';
 import {
   sanitizeSecondsInput,
   correspondenceKeyFromDraft,
@@ -1391,7 +1391,7 @@ function SendToGaPopoverPanel({
                     justifySelf: 'start',
                   }}
                 >
-                  <SecondsField
+                  <DurationField
                     placeholder="delay"
                     value={delay}
                     onChange={setDelay}
@@ -1404,7 +1404,7 @@ function SendToGaPopoverPanel({
                     onBlur={sanitized => commitScheduleLink({ delay: sanitized })}
                     onKeyDown={scheduleEnter}
                   />
-                  <SecondsField
+                  <DurationField
                     placeholder="every"
                     value={every}
                     onChange={setEvery}

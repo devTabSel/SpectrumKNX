@@ -9,9 +9,12 @@ afterEach(() => {
 });
 
 function openPicker(label = 'When') {
-  const input = screen.getByLabelText(label);
+  const input = screen.getByLabelText(label) as HTMLInputElement;
   fireEvent.mouseDown(input);
   fireEvent.focus(input);
+  // Caret on the first segment so mouseUp toggles open (same-seg rule).
+  input.setSelectionRange(0, 0);
+  fireEvent.mouseUp(input);
   return input;
 }
 
@@ -112,7 +115,7 @@ test('typing digits edits the focused segment and advances when full', () => {
   expect(screen.getByRole('dialog')).toHaveAttribute('data-active-seg', 'month');
 });
 
-test('mouse wheel rolls the focused time segment and wraps', () => {
+test('mouse wheel rolls the focused segment with day/hour carry on overflow', () => {
   const onChange = vi.fn();
   render(
     <ThemedDatetimePicker
@@ -127,23 +130,73 @@ test('mouse wheel rolls the focused time segment and wraps', () => {
   fireEvent.keyDown(input, { key: 'ArrowRight' });
   fireEvent.keyDown(input, { key: 'ArrowRight' });
   expect(screen.getByRole('dialog')).toHaveAttribute('data-active-seg', 'h');
+  // Hour 23 → 0 carries into the next calendar day.
   fireEvent.wheel(input, { deltaY: -1 });
-  expect(input).toHaveValue('2026-07-18T00:59:59');
+  expect(input).toHaveValue('2026-07-19T00:59:59');
 
   fireEvent.keyDown(input, { key: 'ArrowRight' });
   fireEvent.wheel(input, { deltaY: -1 });
-  expect(input).toHaveValue('2026-07-18T00:00:59');
+  expect(input).toHaveValue('2026-07-19T01:00:59');
 
   fireEvent.keyDown(input, { key: 'ArrowRight' });
   fireEvent.wheel(input, { deltaY: -1 });
-  expect(input).toHaveValue('2026-07-18T00:00:00');
-  expect(onChange).not.toHaveBeenCalled();
+  expect(input).toHaveValue('2026-07-19T01:01:00');
+  expect(onChange).toHaveBeenCalledWith('2026-07-19T01:01:00');
   fireEvent.blur(input);
-  expect(onChange).toHaveBeenCalledWith('2026-07-18T00:00:00');
   expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
 });
 
-test('ArrowUp/Down bump the active field segment; OK commits', () => {
+test('mouse wheel hour underflow carries into the previous day', () => {
+  const onChange = vi.fn();
+  render(
+    <ThemedDatetimePicker
+      value="2026-07-18T00:15:00"
+      onChange={onChange}
+      aria-label="When"
+      openOnFocus={false}
+    />,
+  );
+  const input = openPicker() as HTMLInputElement;
+  fireEvent.keyDown(input, { key: 'ArrowRight' });
+  fireEvent.keyDown(input, { key: 'ArrowRight' });
+  fireEvent.keyDown(input, { key: 'ArrowRight' });
+  expect(screen.getByRole('dialog')).toHaveAttribute('data-active-seg', 'h');
+  fireEvent.wheel(input, { deltaY: 1 }); // dir -1
+  expect(input).toHaveValue('2026-07-17T23:15:00');
+  expect(onChange).toHaveBeenCalledWith('2026-07-17T23:15:00');
+});
+
+test('click on a non-selected segment selects it; click on selected toggles picker', () => {
+  const onChange = vi.fn();
+  render(
+    <ThemedDatetimePicker
+      value="2026-07-18T12:30:00"
+      onChange={onChange}
+      aria-label="When"
+      openOnFocus={false}
+    />,
+  );
+  const input = openPicker() as HTMLInputElement;
+  expect(screen.getByRole('dialog')).toHaveAttribute('data-active-seg', 'year');
+
+  // Click minutes (not selected) → select mi, picker stays open.
+  fireEvent.mouseDown(input);
+  input.setSelectionRange(14, 14);
+  fireEvent.mouseUp(input);
+  expect(screen.getByRole('dialog')).toHaveAttribute('data-active-seg', 'mi');
+  expect(screen.getByRole('dialog', { name: 'Date and time picker' })).toBeInTheDocument();
+
+  fireEvent.wheel(input, { deltaY: -1 });
+  expect(input).toHaveValue('2026-07-18T12:31:00');
+
+  // Click the already-selected minutes again → toggle picker closed.
+  fireEvent.mouseDown(input);
+  input.setSelectionRange(14, 14);
+  fireEvent.mouseUp(input);
+  expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
+});
+
+test('ArrowUp/Down bump the active field segment and publish live; OK clamps', () => {
   const onChange = vi.fn();
   render(
     <ThemedDatetimePicker
@@ -156,9 +209,56 @@ test('ArrowUp/Down bump the active field segment; OK commits', () => {
   );
   const input = openPicker('Day');
   fireEvent.keyDown(input, { key: 'ArrowDown' });
-  expect(onChange).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole('button', { name: 'OK' }));
   expect(onChange).toHaveBeenCalledWith('2027-07-18');
+  fireEvent.click(screen.getByRole('button', { name: 'OK' }));
+  expect(onChange).toHaveBeenLastCalledWith('2027-07-18');
+});
+
+test('hideDateInField shows only time but onChange keeps full date+time with day carry', () => {
+  const onChange = vi.fn();
+  render(
+    <ThemedDatetimePicker
+      value="2026-07-18 23:30:00.00"
+      onChange={onChange}
+      aria-label="When"
+      separator=" "
+      withCentiseconds
+      hideDateInField
+      openOnFocus={false}
+    />,
+  );
+  const input = openPicker() as HTMLInputElement;
+  expect(input.value).toBe('23:30:00.00');
+  expect(input.value).not.toContain('2026');
+  // First segment is hour when date is hidden.
+  expect(screen.getByRole('dialog')).toHaveAttribute('data-active-seg', 'h');
+  fireEvent.wheel(input, { deltaY: -1 });
+  expect(onChange).toHaveBeenCalledWith('2026-07-19 00:30:00.00');
+});
+
+test('space separator and centiseconds format for buffer-style fields', () => {
+  const onChange = vi.fn();
+  render(
+    <ThemedDatetimePicker
+      value="2026-10-21 12:19:49.46"
+      onChange={onChange}
+      separator=" "
+      withCentiseconds
+      aria-label="When"
+      openOnFocus={false}
+    />,
+  );
+  const input = openPicker() as HTMLInputElement;
+  expect(input).toHaveValue('2026-10-21 12:19:49.46');
+  fireEvent.keyDown(input, { key: 'ArrowRight' }); // month
+  fireEvent.keyDown(input, { key: 'ArrowRight' }); // day
+  fireEvent.keyDown(input, { key: 'ArrowRight' }); // h
+  fireEvent.keyDown(input, { key: 'ArrowRight' }); // mi
+  fireEvent.keyDown(input, { key: 'ArrowRight' }); // s
+  fireEvent.keyDown(input, { key: 'ArrowRight' }); // cs
+  expect(screen.getByRole('dialog')).toHaveAttribute('data-active-seg', 'cs');
+  fireEvent.wheel(input, { deltaY: -1 });
+  expect(onChange).toHaveBeenCalledWith('2026-10-21 12:19:49.47');
 });
 
 test('ArrowDown allows any day in the field; blur clamps to DB span', () => {
@@ -221,7 +321,7 @@ test('date before oldest clamps to oldest on blur; after newest to newest', () =
   expect(input).toHaveValue('2026-07-20');
 });
 
-test('mouse: picking a day drafts; OK commits', () => {
+test('mouse: picking a day publishes live; OK closes', () => {
   const onChange = vi.fn();
   render(
     <ThemedDatetimePicker
@@ -235,9 +335,9 @@ test('mouse: picking a day drafts; OK commits', () => {
   openPicker('Day');
   const dialog = screen.getByRole('dialog', { name: 'Date and time picker' });
   fireEvent.click(within(dialog).getByRole('button', { name: '2026-07-20' }));
-  expect(onChange).not.toHaveBeenCalled();
-  fireEvent.click(within(dialog).getByRole('button', { name: 'OK' }));
   expect(onChange).toHaveBeenCalledWith('2026-07-20');
+  fireEvent.click(within(dialog).getByRole('button', { name: 'OK' }));
+  expect(onChange).toHaveBeenLastCalledWith('2026-07-20');
   expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
 });
 
@@ -333,7 +433,7 @@ test('Escape restores a committed edit back to the focused value', () => {
   expect(input).toHaveValue('2026-07-18T12:30:00');
 });
 
-test('Escape discards draft without committing', () => {
+test('Escape discards a live draft and restores the focus value', () => {
   const onChange = vi.fn();
   render(
     <ThemedDatetimePicker
@@ -345,12 +445,13 @@ test('Escape discards draft without committing', () => {
   );
   const input = openPicker();
   fireEvent.keyDown(input, { key: 'ArrowDown' });
+  expect(onChange).toHaveBeenCalledWith('2027-07-18T12:30:00');
   fireEvent.keyDown(input, { key: 'Escape' });
-  expect(onChange).not.toHaveBeenCalled();
+  expect(onChange).toHaveBeenLastCalledWith('2026-07-18T12:30:00');
   expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
 });
 
-test('click on the field toggles the picker; Enter applies', () => {
+test('click on selected segment toggles picker; Enter applies and closes', () => {
   const onChange = vi.fn();
   render(
     <ThemedDatetimePicker
@@ -360,13 +461,20 @@ test('click on the field toggles the picker; Enter applies', () => {
       openOnFocus={false}
     />,
   );
-  const input = screen.getByLabelText('When');
-  fireEvent.mouseDown(input);
+  const input = openPicker() as HTMLInputElement;
   expect(screen.getByRole('dialog', { name: 'Date and time picker' })).toBeInTheDocument();
+  expect(screen.getByRole('dialog')).toHaveAttribute('data-active-seg', 'year');
+
+  // Same segment again → close.
   fireEvent.mouseDown(input);
+  input.setSelectionRange(0, 0);
+  fireEvent.mouseUp(input);
   expect(screen.queryByRole('dialog', { name: 'Date and time picker' })).not.toBeInTheDocument();
 
+  // Re-open on year, bump, Enter.
   fireEvent.mouseDown(input);
+  input.setSelectionRange(0, 0);
+  fireEvent.mouseUp(input);
   fireEvent.keyDown(input, { key: 'ArrowDown' });
   fireEvent.keyDown(input, { key: 'Enter' });
   expect(onChange).toHaveBeenCalledWith('2027-07-18T12:30:00');

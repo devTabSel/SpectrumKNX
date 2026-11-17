@@ -1,7 +1,7 @@
-/** Duration units for the history/monitor range field. `t` is days. */
-export type RangeUnit = 's' | 'm' | 'h' | 't';
+/** Duration units for the history/monitor range field. `d` is days. */
+export type RangeUnit = 's' | 'm' | 'h' | 'd';
 
-export const RANGE_UNITS: RangeUnit[] = ['s', 'm', 'h', 't'];
+export const RANGE_UNITS: RangeUnit[] = ['s', 'm', 'h', 'd'];
 
 export interface RangePreset {
   label: string;
@@ -9,7 +9,7 @@ export interface RangePreset {
   ms: number;
 }
 
-/** Common ranges offered as datalist / dropdown values. */
+/** Common ranges offered in the range Werthilfe. */
 export const RANGE_PRESETS: RangePreset[] = [
   { label: '30 s', ms: 30_000 },
   { label: '1 m', ms: 60_000 },
@@ -18,15 +18,15 @@ export const RANGE_PRESETS: RangePreset[] = [
   { label: '1 h', ms: 3_600_000 },
   { label: '6 h', ms: 6 * 3_600_000 },
   { label: '12 h', ms: 12 * 3_600_000 },
-  { label: '1 t', ms: 86_400_000 },
-  { label: '7 t', ms: 7 * 86_400_000 },
+  { label: '1 d', ms: 86_400_000 },
+  { label: '7 d', ms: 7 * 86_400_000 },
 ];
 
 const UNIT_MS: Record<RangeUnit, number> = {
   s: 1_000,
   m: 60_000,
   h: 3_600_000,
-  t: 86_400_000,
+  d: 86_400_000,
 };
 
 export function rangeUnitMs(unit: RangeUnit): number {
@@ -50,7 +50,7 @@ export function windowFromRange(
 
 /** "30 s" / "1,5 h" → value + unit. A bare number is not a preset. */
 export function parseRangePreset(raw: string): { value: number; unit: RangeUnit } | null {
-  const match = raw.trim().match(/^(\d+(?:[.,]\d+)?)\s*([smht])$/i);
+  const match = raw.trim().match(/^(\d+(?:[.,]\d+)?)\s*([smhd])$/i);
   if (!match) return null;
   const value = Number(match[1].replace(',', '.'));
   if (!Number.isFinite(value) || value <= 0) return null;

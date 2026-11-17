@@ -2,17 +2,21 @@ import { createContext, useContext } from 'react';
 import { classifyGotoTarget, type GotoPlacement } from './gotoTarget';
 
 export type GotoScope = 'live' | 'history';
+export type GotoReadDirection = 'forward' | 'backward';
 
 export interface GotoBufferValue {
   scope: GotoScope;
   oldestMs: number | null;
   newestMs: number | null;
+  /** Active fill/read axis; drives outside-goto glyphs. */
+  readDirection: GotoReadDirection;
 }
 
 export const GotoBufferContext = createContext<GotoBufferValue>({
   scope: 'live',
   oldestMs: null,
   newestMs: null,
+  readDirection: 'backward',
 });
 
 export function useGotoBuffer(): GotoBufferValue {

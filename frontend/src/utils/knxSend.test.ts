@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   coerceValue,
+  decodeTextDptPayload,
   formatDpt,
   isTextDptMain,
   parseDptMain,
@@ -124,5 +125,22 @@ describe('text DPT helpers', () => {
     );
     expect(textDptWritePayload('Ä', '16.001')).toBe('Ä'.padEnd(14, ' '));
     expect(textDptWritePayload('Ä', '4.002')).toBe('Ä');
+  });
+
+  test('decodeTextDptPayload maps DPT 4/16/28 bytes to characters', () => {
+    expect(decodeTextDptPayload([0x48], '4.001')).toBe('H');
+    expect(decodeTextDptPayload([0xc4], '4.002')).toBe('Ä');
+
+    const hi = Array.from('Hi'.padEnd(14, '\0'), ch => ch.charCodeAt(0));
+    expect(decodeTextDptPayload(hi, '16.000')).toBe('Hi'.padEnd(14, ' '));
+
+    const latin = Array.from('Ä'.padEnd(14, '\0'), ch => ch.charCodeAt(0));
+    expect(decodeTextDptPayload(latin, '16.001')).toBe('Ä'.padEnd(14, ' '));
+
+    const utf8 = Array.from(new TextEncoder().encode('Café'));
+    expect(decodeTextDptPayload(utf8, '28.001')).toBe('Café');
+
+    expect(decodeTextDptPayload([0x48, 0x69], '16.000')).toBeNull(); // wrong width
+    expect(decodeTextDptPayload([0x48], '5.001')).toBeNull();
   });
 });

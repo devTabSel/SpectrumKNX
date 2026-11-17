@@ -4,6 +4,7 @@ import uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import type { ChartBucket } from '../hooks/useChartData';
 import { useThemeTick } from '../hooks/useTheme';
+// TODO(charts): reuse DateTimeFacetPair / shared date-time facets (see timeFormat.ts).
 import { spansMultipleDays, formatAxisTime, formatFullTime } from '../utils/timeFormat';
 import { labelGutterWidth } from '../utils/chartGutter';
 

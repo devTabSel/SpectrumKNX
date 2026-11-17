@@ -1333,7 +1333,7 @@ describe('buffer anchor', () => {
     expect(saved.some(([s, e]) => s <= 10_000 && 10_000 <= e)).toBe(true);
   });
 
-  it('clear resets the anchor timestamp and keeps its direction', async () => {
+  it('clear keeps direction and anchor timestamp', async () => {
     const { result } = renderHook(() => useTelegramCache(10, false));
     await settle(result);
     act(() => {
@@ -1346,7 +1346,7 @@ describe('buffer anchor', () => {
       await result.current.clear();
     });
     expect(result.current.telegrams).toEqual([]);
-    expect(result.current.bufferAnchor).toEqual({ direction: 'forward', ts: null });
+    expect(result.current.bufferAnchor).toEqual({ direction: 'forward', ts: 5000 });
     expect(_idb.size).toBe(0);
   });
 

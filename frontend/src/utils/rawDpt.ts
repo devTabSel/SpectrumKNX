@@ -37,30 +37,46 @@ export const RAW_DPT_OPTIONS: RawDptOption[] = [
 
 const OPTION_BY_KEY = new Map(RAW_DPT_OPTIONS.map(o => [o.key, o]));
 
-/** The physical unit a decoded value should be bucketed/labelled under. */
-export const rawDptUnit = (key: string): string => OPTION_BY_KEY.get(key)?.unit ?? '';
+/** Resolve a project subtype key (e.g. 9.004) to a RAW_DPT_OPTIONS entry. */
+function resolveRawOption(key: string): RawDptOption | undefined {
+  const direct = OPTION_BY_KEY.get(key);
+  if (direct) return direct;
+  // Subtypes share the main-number codec (9.004 illuminance → DPT 9 float).
+  const main = key.trim().match(/^(\d+)(?:\.\d+)?$/)?.[1];
+  return main ? OPTION_BY_KEY.get(main) : undefined;
+}
 
-/** Decodes the KNX 2-byte float (DPT 9) format from two bytes. */
-const decodeKnxFloat16 = (b0: number, b1: number): number => {
+/** The physical unit a decoded value should be bucketed/labelled under. */
+export const rawDptUnit = (key: string): string => resolveRawOption(key)?.unit ?? '';
+
+/**
+ * Decodes the KNX 2-byte float (DPT 9) format from two bytes.
+ * Layout SEEEEMMM MMMMMMMM; value = (0.01 · M) · 2^E with M signed via S
+ * (matches xknx DPT2ByteFloat / DPTLux).
+ * 0x7FFF is reserved as invalid and returns null.
+ */
+const decodeKnxFloat16 = (b0: number, b1: number): number | null => {
+  if (b0 === 0x7f && b1 === 0xff) return null;
   const data = ((b0 << 8) | b1) & 0xffff;
-  const exponent = (data & 0x7800) >> 11;
-  // 11-bit mantissa in two's complement (the high bit is the sign).
+  const exponent = (data >> 11) & 0x0f;
   let mantissa = data & 0x07ff;
   if (data & 0x8000) mantissa -= 2048;
-  return 0.01 * mantissa * Math.pow(2, exponent);
+  // Same arithmetic as xknx: (mantissa << exponent) / 100
+  return (mantissa * 2 ** exponent) / 100;
 };
 
 /**
  * Decodes raw payload bytes into a plottable number for the chosen datatype,
  * or null when the datatype is unknown or the width does not match.
+ * Accepts bare mains (`9`) and subtypes (`9.004`).
  */
 export function decodeRawDpt(bytes: readonly number[], key: string): number | null {
-  const opt = OPTION_BY_KEY.get(key);
+  const opt = resolveRawOption(key);
   if (!opt || bytes.length !== opt.bytes) return null;
   if (bytes.some(b => !Number.isInteger(b) || b < 0 || b > 255)) return null;
 
   const view = new DataView(new Uint8Array(bytes).buffer);
-  switch (key) {
+  switch (opt.key) {
     case '5':
       return view.getUint8(0);
     case '5.001':

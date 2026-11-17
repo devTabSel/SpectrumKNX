@@ -1,9 +1,8 @@
 import React, { useMemo, useRef, useEffect, useLayoutEffect, useState, useCallback, type ReactNode } from 'react';
-import { format } from 'date-fns';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
 import { ChevronUp, ChevronDown, Filter, LineChart, X, Clock, Plus, Minus, Download, List, Search } from 'lucide-react';
-import { enabledFilters, hasActiveFilters, matchesTelegram, type ActiveFilters } from '../types/filters';
+import { enabledFilters, hasActiveFilters, matchesTelegram, type ActiveFilters, type FilterOption } from '../types/filters';
 import { capContextWindow } from '../utils/contextWindow';
 import {
   contextRailSigns,
@@ -18,8 +17,9 @@ import type { SendCorrespondenceKey } from '../utils/sendCorrespondence';
 import type { BusPayload } from '../utils/dptValues';
 import { GotoTimeControl } from './GotoTimeControl';
 import { classifyGotoTarget } from '../utils/gotoTarget';
-import { BusValueText } from './BusValueText';
-import { SecondsField } from './SecondsField';
+import { BusValueFacetPair } from './BusValueFacetPair';
+import { DateTimeFacetPair } from './DateTimeFacetPair';
+import { DurationField } from './DurationField';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
 import { getPref, setPref } from '../utils/prefs';
 import type { SortKey, SortLevel, SortConfig } from '../utils/sortConfig';
@@ -52,6 +52,8 @@ import { forceIncludeKeys } from '../utils/forceIncludeKeys';
 import { peakRate } from '../utils/peakRate';
 import { moveColumn, readColumnOrderPref, writeColumnOrderPref } from '../utils/columnOrder';
 import { dptDescriptionLabel, dptKeyLabel } from '../utils/dpt';
+import { effectiveTelegramDpt, projectDptByAddress } from '../utils/effectiveTelegramDpt';
+import { enrichTelegramValueDisplay } from '../utils/telegramValueDisplay';
 import { ttTypeClass } from '../utils/telegramCellStyles';
 import {
   isGroupRead,
@@ -95,6 +97,11 @@ interface TelegramTableProps {
   /** `additive` (ctrl/cmd-click) adds/toggles a sort level instead of replacing the whole config (#311). */
   onSort: (key: SortKey, opts?: { additive?: boolean }) => void;
   activeFilters: ActiveFilters;
+  /**
+   * Project GA list (filter-panel targets). Used to fill DPT / decode VALUE
+   * when a telegram row carries no dpt_main of its own.
+   */
+  projectTargets?: FilterOption[];
   onQuickFilter: (key: 'sources' | 'targets' | 'types' | 'dpts', value: string | number) => void;
   onQuickVisualize: (targetAddress: string) => void;
   onQuickLastSeen?: (address: string, mode: 'ga' | 'pa') => void;
@@ -577,8 +584,9 @@ interface VirtualEdgeItem {
  * Merged rows completely scrolled out toward `edge` (partial overlap does not
  * count). Rows outside the rendered window are fully out; only the
  * already-rendered edge items are inspected, so this stays O(overscan).
- * `leadPx` is scroll content before the virtualizer block: item `start` is
- * relative to that block, `scrollTop` is not.
+ * `leadPx` is scroll content before the virtualizer when item `start` is
+ * relative to that block. Display mode puts the same lead in `scrollMargin`,
+ * so `start` is already a scroll offset and callers pass 0.
  */
 function countMergedScrolledOut(
   rowCount: number,
@@ -639,7 +647,7 @@ function useLiftedKeyList(
 }
 
 export const TelegramTable: React.FC<TelegramTableProps> = ({
-  telegrams, readPhaseTelegrams, forceIncludeFrom, visibleColumns, sortConfig, onSort, activeFilters, onQuickFilter, onQuickVisualize, onQuickLastSeen, canSend,
+  telegrams, readPhaseTelegrams, forceIncludeFrom, visibleColumns, sortConfig, onSort, activeFilters, projectTargets, onQuickFilter, onQuickVisualize, onQuickLastSeen, canSend,
   onGotoTelegram, latestTelegram, onAltSend, onCtrlSend, sendPanelAddresses,
   activeSendJobAddresses, gaJobStatuses, linkedStatus = null,
   onScheduleCommit, onWriteWithSchedule, onReadWithSchedule, onCancelLinked, onClearLinked,
@@ -1608,12 +1616,27 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const [frozenGeom, setFrozenGeom] = useState<ScrollGeom | null>(null);
   const fillRubberPx = frozenGeom?.fillRubberPx ?? liveFillRubberPx;
   const fillPadPx = frozenGeom?.fillPadPx ?? liveFillPadPx;
+  // Lead of the spacer painted before the list. Item `start` includes it
+  // (scrollMargin) so the window is in scroll-element coordinates. Sticky
+  // growth is applied just below, once that state exists. Legacy keeps 0.
+  const liveOppositeForLead = displayPlan
+    ? (readingIsLive ? displayPlan.anchorPx : readingBlockPx)
+    : 0;
+  const oppositeForLead = displayPlan
+    ? (frozenGeom?.oppositeSpacerPx ?? liveOppositeForLead)
+    : 0;
+  const scrollLeadPx = !displayPlan
+    ? 0
+    : readingEdge === 'top'
+      ? (readingIsLive ? readingBlockPx : oppositeForLead)
+      : (liveEdge === 'bottom' ? oppositeForLead : 0);
 
   const virtualizer = useVirtualizer({
     count: telegramRows.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => ROW_ESTIMATE, // Better estimate for multi-line rows
     overscan: 10,
+    scrollMargin: scrollLeadPx,
     paddingStart: liveEdge === 'top' ? fillPadPx : 0,
     paddingEnd: liveEdge === 'bottom' ? fillPadPx : 0,
     getItemKey: (index) => {
@@ -1660,16 +1683,20 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const [stickyOppositeSpacerPx, setStickyOppositeSpacerPx] = useState(0);
   const oppositeSpacerPx =
     frozenGeom?.oppositeSpacerPx ?? Math.max(liveOppositeSpacerPx, stickyOppositeSpacerPx);
-  // Spacers painted before the virtualizer in display mode. Item `start`
-  // ignores them, so the anchor-pill scroll math subtracts this lead. The
-  // reading block leads when it is on top; otherwise the anchor rubber leads
-  // only while it is a sibling (newest-at-bottom). The two never stack.
-  // Legacy live-edge geometry keeps a lead of 0 so its pill math is unchanged.
+  // Spacers painted before the virtualizer in display mode. `scrollMargin`
+  // folds this lead into item `start`, so pill math compares it to scrollTop
+  // directly. The row transform subtracts it: the list box begins after the
+  // spacer. The reading block leads when it is on top; otherwise the anchor
+  // rubber leads only while it is a sibling (newest-at-bottom). The two never
+  // stack. Legacy live-edge geometry keeps a lead of 0.
   const rowsLeadPx = !displayPlan
     ? 0
     : readingEdge === 'top'
       ? (readingIsLive ? readingBlockPx : oppositeSpacerPx)
       : (liveEdge === 'bottom' ? oppositeSpacerPx : 0);
+  if (virtualizer.options.scrollMargin !== rowsLeadPx) {
+    virtualizer.setOptions({ ...virtualizer.options, scrollMargin: rowsLeadPx });
+  }
   const rubberBandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rubberBandRafRef = useRef<number | null>(null);
   /** Active rubber-band animation; survives live prepends (no retarget). */
@@ -2609,7 +2636,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           scrollElNow.scrollTop,
           scrollElNow.clientHeight,
           itemsNow,
-          rowsLeadPx,
+          0,
         );
         nextRaw = displayEdges && readDirection
           ? anchorEdgeCount(mergedOut, visiblePausedCountRef.current, readDirection)
@@ -4084,6 +4111,11 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     )
     : telegramRows;
 
+  const projectByGa = useMemo(
+    () => projectDptByAddress(projectTargets ?? []),
+    [projectTargets],
+  );
+
   const renderCell = (id: ColId, t: TelegramRow, rowIndex: number, forceShow = false): React.ReactNode => {
     if (shouldHideRepeatedOnSortLevel(id, rowIndex, forceShow)) {
       return <div style={cellBox} className="tt-cell filterable-cell" />;
@@ -4091,14 +4123,13 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     switch (id) {
       case 'time':
         return (
-          <div className="tt-cell" style={cellBox}>
-            <div className="mono-addr" style={{ color: 'var(--text-main)', fontVariantNumeric: 'tabular-nums', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {format(new Date(t.timestamp), 'HH:mm:ss.SS')}
-            </div>
-            <div className="subtitle-name" style={{ fontSize: '0.65rem', color: 'var(--text-dim)', marginTop: 0, fontVariantNumeric: 'tabular-nums', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {format(new Date(t.timestamp), 'yyyy-MM-dd')}
-            </div>
-          </div>
+          <DateTimeFacetPair
+            value={t.timestamp}
+            withCentiseconds
+            allowFocus={false}
+            className="tt-cell"
+            style={cellBox}
+          />
         );
 
       case 'delta': {
@@ -4402,16 +4433,19 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       }
 
       case 'dpt': {
-        const dptKey = t.dpt_main != null ? (dptKeyLabel(t.dpt_main, t.dpt_sub) ?? '-') : '-';
-        const dptDesc = t.dpt_main != null ? (dptDescriptionLabel(t.dpt_name, t.unit) ?? '-') : '';
+        const eff = effectiveTelegramDpt(t, projectByGa);
+        const dptKey = eff?.key ?? '-';
+        const dptDesc = eff
+          ? (dptDescriptionLabel(eff.name || null, eff.unit || null) ?? '')
+          : '';
         return (
           <div style={cellBox} className="tt-cell filterable-cell">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', minWidth: 0 }}>
-              {t.dpt_main != null && (
-                <div title={getDPTLabel(t.dpt_main)} style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: getDPTColor(t.dpt_main), flexShrink: 0 }} />
+              {eff != null && (
+                <div title={getDPTLabel(eff.main)} style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: getDPTColor(eff.main), flexShrink: 0 }} />
               )}
               <div
-                title={t.dpt_main != null ? (dptKeyLabel(t.dpt_main, t.dpt_sub) ?? undefined) : undefined}
+                title={eff?.key}
                 style={{ fontSize: '0.75rem', color: 'var(--text-main)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }}
               >
                 {dptKey}
@@ -4428,36 +4462,36 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
       }
 
       case 'value': {
-        const dptKey = t.dpt ?? (t.dpt_main != null ? dptKeyLabel(t.dpt_main, t.dpt_sub) : null);
+        const eff = effectiveTelegramDpt(t, projectByGa);
+        const enriched = enrichTelegramValueDisplay(
+          {
+            value_formatted: t.value_formatted,
+            value_numeric: t.value_numeric,
+            value_json: t.value_json ?? null,
+            raw_hex: t.raw_hex,
+            unit: t.unit,
+            raw_data: t.raw_data,
+          },
+          eff?.key ?? null,
+        );
         return (
-          <div style={cellBox} className="tt-cell filterable-cell">
-            <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, overflow: 'hidden' }}>
-              <BusValueText
-                value={{
-                  value_formatted: t.value_formatted,
-                  value_numeric: t.value_numeric,
-                  value_json: t.value_json ?? null,
-                  raw_hex: t.raw_hex,
-                  unit: t.unit,
-                }}
-                dpt={dptKey}
-                allowFocus={false}
-                as="span"
-                style={{
-                  fontWeight: 700,
-                  color: 'var(--accent-primary)',
-                  fontSize: '0.9375rem',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  minWidth: 0,
-                }}
-              />
-            </div>
-            <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', overflow: 'hidden' }} aria-hidden>
-              {'\u00a0'}
-            </div>
-          </div>
+          <BusValueFacetPair
+            value={enriched.value}
+            dpt={enriched.dptKey}
+            allowDecoded={enriched.allowDecoded}
+            allowFocus={false}
+            wrapClassName="tt-cell filterable-cell"
+            wrapStyle={cellBox}
+            style={{
+              fontWeight: 700,
+              color: 'var(--accent-primary)',
+              fontSize: '0.9375rem',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              minWidth: 0,
+            }}
+          />
         );
       }
     }
@@ -4503,7 +4537,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         scrollEl.scrollTop,
         scrollEl.clientHeight,
         virtualItems,
-        rowsLeadPx,
+        0,
       );
     }
     newerCount = pausedForPill(mergedOut);
@@ -4689,9 +4723,12 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         flexDirection: 'column',
         overflow: 'hidden',
         outline: 'none',
-        boxShadow: noMainFilter ? undefined : 'inset 3px 0 0 var(--warning, #f59e0b)',
       }}
     >
+      <div
+        data-tt-chrome=""
+        style={{ flexShrink: 0, display: 'flex', flexDirection: 'column' }}
+      >
       {(headerLeading != null || headerCenter != null) && (
         <div
           data-tt-header=""
@@ -5156,7 +5193,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', minWidth: 0, flex: 1 }}>
                 {c.id === 'delta' ? (
                   <>
-                    <SecondsField
+                    <DurationField
                       col="qf-delta"
                       placeholder="before"
                       unit="ms"
@@ -5175,7 +5212,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                         setDeltaContextCell(before, qfAfterMs);
                       }}
                     />
-                    <SecondsField
+                    <DurationField
                       col="qf-delta"
                       placeholder="after"
                       unit="ms"
@@ -5276,10 +5313,30 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
           </div>
         </div>
       )}
+      </div>
 
       {/* Body area — relative wrapper so the jump-to-live pill (#202) anchors
           below the header, not over it. */}
-      <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <div
+        data-tt-body=""
+        style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+      >
+      {!noMainFilter && (
+        <div
+          data-tt-sp-bar=""
+          aria-hidden
+          style={{
+            position: 'absolute',
+            left: 0,
+            bottom: 0,
+            top: 0,
+            width: 1,
+            background: 'var(--warning)',
+            pointerEvents: 'none',
+            zIndex: 11,
+          }}
+        />
+      )}
 
       {/* Anchor-end pill, on the side where the anchor sits in the current
           time sort. Backward: "N newer" (scrolled-out rows + pause backlog).
@@ -5586,7 +5643,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
                     top: 0,
                     left: 0,
                     width: '100%',
-                    transform: `translateY(${virtualRow.start}px)`,
+                    transform: `translateY(${virtualRow.start - virtualizer.options.scrollMargin}px)`,
                     display: 'flex',
                     borderBottom: '1px solid var(--border-color)',
                     fontSize: '0.8125rem',
@@ -6019,11 +6076,6 @@ style.textContent = `
   .marks-pill button[aria-disabled="true"] {
     opacity: 0.4;
     cursor: default;
-  }
-
-  /* Active side panel: vertical orange bar on the left. QF keeps its bottom edge. */
-  .tt-sp-active {
-    box-shadow: inset 3px 0 0 var(--warning, #f59e0b);
   }
 
   /* Status line under the open QF: inactive → dark, idle → gray, filtering → orange. */

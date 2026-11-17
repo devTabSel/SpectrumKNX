@@ -347,11 +347,38 @@ test('an active side panel paints a vertical bar and leaves the quick-filter edg
       activeFilters={{ ...DEFAULT_FILTERS, sources: ['1.1.1'] }}
       onQuickFilter={vi.fn()}
       onQuickVisualize={vi.fn()}
+      headerLeading={<span>Filter slot</span>}
     />,
   );
   const marked = container.querySelector('[data-sp-active="true"]');
   expect(marked).toBeInTheDocument();
   expect(marked).toHaveClass('tt-sp-active');
+  const body = marked!.querySelector('[data-tt-body]');
+  const spBar = body!.querySelector('[data-tt-sp-bar]') as HTMLElement;
+  expect(body).toBeInTheDocument();
+  expect(spBar).toBeInTheDocument();
+  expect(spBar.style.bottom).toBe('0px');
+  expect(marked!.querySelector('[data-tt-chrome] [data-tt-sp-bar]')).toBeNull();
+  expect((marked as HTMLElement).style.boxShadow).toBe('');
+});
+
+test('the side-panel bar grows through the quick filter when it is open', () => {
+  const { container } = render(
+    <TelegramTable
+      telegrams={[historyRead]}
+      visibleColumns={visibleColumns}
+      sortConfig={sortConfig}
+      onSort={vi.fn()}
+      activeFilters={{ ...DEFAULT_FILTERS, sources: ['1.1.1'] }}
+      onQuickFilter={vi.fn()}
+      onQuickVisualize={vi.fn()}
+      headerLeading={<span>Filter slot</span>}
+      quickFilterOpen
+    />,
+  );
+  const root = container.querySelector('[data-telegram-table]')!;
+  expect(root.querySelector('[data-tt-body] [data-tt-sp-bar]')).toBeInTheDocument();
+  expect(root.querySelector('[data-tt-chrome] .quick-filter-bar')).toBeInTheDocument();
 });
 
 test('a history response hidden by the side panel has no jump icon and the READ stays answered', () => {

@@ -32,6 +32,17 @@ describe('decodeRawDpt (#315)', () => {
     expect(decodeRawDpt([0x00, 0x01], '9')).toBeCloseTo(0.01, 6);
     // Negative: sign set, mantissa -1 → -0.01
     expect(decodeRawDpt([0x87, 0xff], '9')).toBeCloseTo(-0.01, 6);
+    // Reserved invalid encoding
+    expect(decodeRawDpt([0x7f, 0xff], '9')).toBeNull();
+  });
+
+  test('DPT 9.004 illuminance (lx) matches xknx DPTLux', () => {
+    // Undecoded store dump from a lux GA with null dpt_main.
+    expect(decodeRawDpt([46, 118], '9.004')).toBeCloseTo(529.28, 6);
+    expect(decodeRawDpt([0x04, 0xa5], '9.004')).toBeCloseTo(11.89, 6);
+    expect(decodeRawDpt([0x5c, 0xe0], '9.004')).toBeCloseTo(25559.04, 6);
+    expect(decodeRawDpt([0x00, 0x00], '9.004')).toBe(0);
+    expect(decodeRawDpt([0x7f, 0xff], '9.004')).toBeNull();
   });
 
   test('4-byte unsigned / signed / float (big-endian)', () => {

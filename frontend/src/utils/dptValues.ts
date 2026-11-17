@@ -225,7 +225,8 @@ export function formatDiscreteChoiceLabel(
 export interface BusValueView {
   value_formatted?: string | null;
   value_numeric?: number | null;
-  value_json?: Record<string, unknown> | null;
+  /** Decoded object/bool/string, or undecoded raw byte list from the store. */
+  value_json?: Record<string, unknown> | number[] | null;
   raw_hex?: string | null;
   unit?: string | null;
 }
@@ -262,6 +263,10 @@ function discreteBitsForView(value: BusValueView, dptKey?: string | null): numbe
 }
 
 function decimalLabelForView(value: BusValueView, dptKey?: string | null): string | null {
+  // Character/string DPTs have no meaningful single decimal; hex stays available.
+  const textMain = dptKey ? parseDptKey(dptKey)?.main : null;
+  if (isTextDptMain(textMain)) return null;
+
   if (value.value_numeric != null && Number.isFinite(value.value_numeric)) {
     return String(value.value_numeric);
   }
@@ -278,6 +283,11 @@ function decimalLabelForView(value: BusValueView, dptKey?: string | null): strin
 function hexLabelForView(value: BusValueView, dptKey?: string | null): string | null {
   const raw = normalizeHex(value.raw_hex);
   if (raw) return raw;
+  // Undecoded byte lists still expose hex (always allowed as a facet).
+  const json = value.value_json as unknown;
+  if (Array.isArray(json) && json.length > 0 && json.every(b => typeof b === 'number')) {
+    return `0x${(json as number[]).map(b => b.toString(16).padStart(2, '0')).join('').toUpperCase()}`;
+  }
   const bits = discreteBitsForView(value, dptKey);
   const width = discreteDptBitWidth(dptKey);
   if (bits == null || width == null) return null;
@@ -293,6 +303,14 @@ function binLabelForView(value: BusValueView, dptKey?: string | null): string | 
   return `0b${bits.toString(2).padStart(width, '0')}`;
 }
 
+export interface BuildValueDisplayModesOptions {
+  /**
+   * When false, omit the decoded facet (no DPT, or payload does not fit the
+   * DPT). Hex remains always available; bin stays ≤4-bit only.
+   */
+  allowDecoded?: boolean;
+}
+
 /**
  * Builds the click-cycle options for a bus value: decoded → decimal (only when
  * different from decoded) → hex → binary (≤4-bit discrete DPTs only).
@@ -300,14 +318,25 @@ function binLabelForView(value: BusValueView, dptKey?: string | null): string | 
 export function buildValueDisplayModes(
   value: BusValueView,
   dptKey?: string | null,
+  opts?: BuildValueDisplayModesOptions,
 ): ValueDisplayOption[] {
-  const decoded = formatBusValueForDpt(value, dptKey);
-  const modes: ValueDisplayOption[] = [
-    { mode: 'decoded', label: decoded.text || '—', unit: decoded.unit || undefined },
-  ];
+  const allowDecoded = opts?.allowDecoded !== false && !!dptKey?.trim();
+  const modes: ValueDisplayOption[] = [];
+
+  let decodedText = '';
+  if (allowDecoded) {
+    const decoded = formatBusValueForDpt(value, dptKey);
+    decodedText = decoded.text || '—';
+    // Never present a raw byte-list dump as "decoded".
+    if (!/^\[\s*-?\d+(\s*,\s*-?\d+)*\s*\]$/.test(decodedText.trim())) {
+      modes.push({ mode: 'decoded', label: decodedText, unit: decoded.unit || undefined });
+    } else {
+      decodedText = '';
+    }
+  }
 
   const decimal = decimalLabelForView(value, dptKey);
-  if (decimal != null && decimal !== decoded.text) {
+  if (decimal != null && decimal !== decodedText) {
     modes.push({ mode: 'decimal', label: decimal });
   }
 

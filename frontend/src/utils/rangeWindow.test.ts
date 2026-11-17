@@ -31,15 +31,15 @@ test('windowFromRange keeps the oldest anchor when reading forward', () => {
   });
 });
 
-test('range presets cover the common windows in s / m / h / t', () => {
+test('range presets cover the common windows in s / m / h / d', () => {
   expect(RANGE_PRESETS.map(p => p.label)).toEqual([
-    '30 s', '1 m', '5 m', '15 m', '1 h', '6 h', '12 h', '1 t', '7 t',
+    '30 s', '1 m', '5 m', '15 m', '1 h', '6 h', '12 h', '1 d', '7 d',
   ]);
   expect(parseRangePreset('30 s')).toEqual({ value: 30, unit: 's' });
-  expect(parseRangePreset('1 t')).toEqual({ value: 1, unit: 't' });
+  expect(parseRangePreset('1 d')).toEqual({ value: 1, unit: 'd' });
   expect(rangeValueToMs('30', 's')).toBe(30_000);
-  expect(rangeValueToMs('1 t', 'm')).toBe(86_400_000);
-  expect(rangeValueToMs('7', 't')).toBe(7 * 86_400_000);
+  expect(rangeValueToMs('1 d', 'm')).toBe(86_400_000);
+  expect(rangeValueToMs('7', 'd')).toBe(7 * 86_400_000);
   expect(formatRangeMs(3_600_000, 'h')).toBe('1');
-  expect(formatRangeMs(86_400_000, 't')).toBe('1');
+  expect(formatRangeMs(86_400_000, 'd')).toBe('1');
 });

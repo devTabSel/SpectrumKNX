@@ -7,6 +7,7 @@ import type { ChartBucket } from '../hooks/useChartData';
 import { useThemeTick } from '../hooks/useTheme';
 import { seriesColor } from '../utils/seriesColors';
 import { isSeriesHidden, setSeriesHidden } from '../utils/legendVisibility';
+// TODO(charts): reuse DateTimeFacetPair / shared date-time facets (see timeFormat.ts).
 import { spansMultipleDays, formatAxisTime, formatFullTime } from '../utils/timeFormat';
 import { metricGutterWidth } from '../utils/chartGutter';
 import { clampChartHeight, readChartHeight, writeChartHeight } from '../utils/chartHeight';

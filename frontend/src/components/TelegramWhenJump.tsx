@@ -1,9 +1,9 @@
 import type { CSSProperties } from 'react';
 import { format } from 'date-fns';
-import { Clock } from 'lucide-react';
 
 import type { Telegram } from '../hooks/useWebSocket';
 import { EventTypeLabel } from './EventTypeLabel';
+import { GotoIcon } from './GotoIcon';
 import {
   FILTERED_GOTO_TITLE,
   MISSING_GOTO_TITLE,
@@ -136,7 +136,7 @@ export function TelegramWhenJump({
         color: outside || missing || filtered ? 'var(--warning-text)' : undefined,
       }}
     >
-      <Clock size={13} />
+      <GotoIcon tone={tone} readDirection={buf.readDirection} size={13} />
     </button>
   ) : reserveJump ? (
     <span aria-hidden style={{ display: 'inline-block', width: 18, height: 18, flexShrink: 0 }} />

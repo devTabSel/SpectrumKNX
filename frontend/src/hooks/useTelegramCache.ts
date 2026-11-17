@@ -1205,14 +1205,7 @@ export function useTelegramCache(
     pendingDropRef.current = 0;
     structuralWhilePausedRef.current = false;
     setTelegrams([]);
-    // The pill Clear is a real wipe: the next window is measured from the
-    // buffer edge, not from the anchor that pointed at the deleted rows.
-    const anchor = anchorRef.current;
-    if (anchor.ts != null) {
-      const next: BufferAnchor = { direction: anchor.direction, ts: null };
-      anchorRef.current = next;
-      setAnchorState(next);
-    }
+    // Keep bufferAnchor (direction + ts) so Clear does not lose the parked window.
     await cacheRef.current!.clear().catch(() => {});
   }, [trackRemoved, saveCoverage, updatePausedCount]);
 

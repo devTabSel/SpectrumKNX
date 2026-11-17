@@ -215,7 +215,7 @@ test('ctrl/cmd-click on the DELTA TIME toggle disables/enables the window withou
   );
   fireEvent.click(screen.getByTitle('Show quick filter bar'));
 
-  // Values are shown regardless of enabled state (SecondsField text inputs).
+  // Values are shown regardless of enabled state (DurationField text inputs).
   expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveValue('500');
   expect(screen.getByLabelText('Time-Delta-Context after (ms)')).toHaveValue('250');
 
@@ -645,7 +645,7 @@ test('empty quick-filter cells that do not filter use a dark background', () => 
   const name = screen.getByLabelText('Quick filter TARGET name');
   expect(pattern).toHaveClass('idle');
   expect(name).toHaveClass('idle');
-  // Delta uses SecondsField (send-panel style); empty shows placeholder, not idle class.
+  // Delta uses DurationField (send-panel style); empty shows placeholder, not idle class.
   expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveValue('');
   expect(screen.getByLabelText('Time-Delta-Context before (ms)')).toHaveAttribute('placeholder', 'before');
   expect(screen.getByLabelText('Time-Delta-Context after (ms)')).toHaveAttribute('placeholder', 'after');

@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'vitest';
-import { spansMultipleDays, formatAxisTime, formatFullTime } from './timeFormat';
+import {
+  spansMultipleDays,
+  formatAxisTime,
+  formatFullTime,
+  formatDateFacet,
+  formatTimeFacet,
+  formatDateTimeFacet,
+} from './timeFormat';
 
 // Use fixed local-time instants so assertions don't depend on the runner's tz
 // beyond what the formatters themselves use.
@@ -40,5 +47,16 @@ describe('formatFullTime', () => {
     const s = formatFullTime(t('2026-07-18T14:30:15'), true);
     expect(s).toContain('14:30:15');
     expect(s).toContain('2026');
+  });
+});
+
+describe('date/time facets', () => {
+  test('formatDateFacet / formatTimeFacet match telegram TIME column', () => {
+    const instant = new Date(2026, 9, 21, 12, 19, 46, 210);
+    expect(formatDateFacet(instant)).toBe('2026-10-21');
+    expect(formatTimeFacet(instant)).toBe('12:19:46.21');
+    expect(formatTimeFacet(instant, false)).toBe('12:19:46');
+    expect(formatDateTimeFacet(instant, 'date')).toBe('2026-10-21');
+    expect(formatDateTimeFacet(instant, 'time')).toBe('12:19:46.21');
   });
 });

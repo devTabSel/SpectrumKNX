@@ -32,6 +32,20 @@ interface Props {
   pulse?: 'Incoming' | 'Outgoing' | null;
   /** New key restarts the pulse animation without resetting format state. */
   pulseKey?: string | number | null;
+  /**
+   * Controlled display mode (exclusive facet pairs). When set with `onCycle`,
+   * clicks call `onCycle` instead of the internal decoded→decimal→hex→bin walk.
+   */
+  mode?: ValueDisplayMode;
+  /** Parent-driven cycle (exclusive facet pair). */
+  onCycle?: () => void;
+  /** Hover title override (e.g. next exclusive facet). */
+  cycleTitle?: string;
+  /**
+   * When false, omit the decoded facet (no DPT / payload does not fit).
+   * Hex stays available; bin only for ≤4-bit DPTs.
+   */
+  allowDecoded?: boolean;
 }
 
 const MODE_TITLE: Record<ValueDisplayMode, string> = {
@@ -51,11 +65,20 @@ export function BusValueText({
   allowFocus = true,
   pulse = null,
   pulseKey = null,
+  mode: modeProp,
+  onCycle,
+  cycleTitle,
+  allowDecoded = true,
 }: Props) {
-  const modes = useMemo(() => buildValueDisplayModes(value, dpt), [value, dpt]);
-  const [mode, setMode] = useState<ValueDisplayMode>(() => (
+  const modes = useMemo(
+    () => buildValueDisplayModes(value, dpt, { allowDecoded }),
+    [value, dpt, allowDecoded],
+  );
+  const controlled = modeProp != null && onCycle != null;
+  const [uncontrolledMode, setUncontrolledMode] = useState<ValueDisplayMode>(() => (
     defaultShowHex ? 'hex' : 'decoded'
   ));
+  const mode = controlled ? modeProp! : uncontrolledMode;
 
   const active = modes.find(m => m.mode === mode)
     ?? (defaultShowHex ? modes.find(m => m.mode === 'hex') : undefined)
@@ -73,11 +96,16 @@ export function BusValueText({
 
   const cycle = () => {
     if (!canCycle) return;
-    setMode(prev => nextValueDisplayMode(modes, prev));
+    if (controlled) {
+      onCycle();
+      return;
+    }
+    setUncontrolledMode(prev => nextValueDisplayMode(modes, prev));
   };
 
   const nextTitle = (() => {
-    if (!canCycle || !active) return undefined;
+    if (cycleTitle) return cycleTitle;
+    if (!canCycle || !active || controlled) return undefined;
     const next = nextValueDisplayMode(modes, active.mode);
     return MODE_TITLE[next];
   })();
@@ -147,7 +175,10 @@ export function BusValueText({
       }}
       style={{ cursor: 'pointer' }}
     >
+      {/* Stack every format (decoded+unit, decimal, hex, bin) so width stays stable. */}
       {modes.map(opt => renderOption(opt, opt.mode === active.mode))}
     </Tag>
   );
 }
+
+export { MODE_TITLE as BUS_VALUE_MODE_TITLE };

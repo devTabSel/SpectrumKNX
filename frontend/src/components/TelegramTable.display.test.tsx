@@ -460,6 +460,37 @@ test('pill, spacer and end marker follow direction together with the time sort',
   }
 });
 
+test('forward desc paints the reading-end rows directly under the big spacer', () => {
+  // Taller than the overscan window, so a missing scrollMargin leaves a hole
+  // between the spacer and the first painted row.
+  scrollBlockSize = 2000;
+  const rows = Array.from({ length: 40 }, (_, i) => at(i, `r${i}`));
+  const { container } = render(
+    <TelegramTable
+      {...baseProps}
+      telegrams={rows}
+      sortConfig={desc}
+      readDirection="forward"
+      liveFollow={false}
+      listFollow={false}
+    />,
+  );
+  const port = portOf(container);
+  const restore = emulateRowLayout(port);
+  try {
+    const spacerH = Number.parseFloat(screen.getByTestId('reading-spacer').style.height);
+    expect(spacerH).toBeGreaterThan(DISPLAY_ROW_PX * 12);
+    port.scrollTop = spacerH - 100;
+    fireEvent.scroll(port);
+    const newest = container.querySelector('[data-index="0"]') as HTMLElement | null;
+    expect(newest).not.toBeNull();
+    const gap = newest!.getBoundingClientRect().top - (spacerH - port.scrollTop);
+    expect(Math.abs(gap)).toBeLessThan(DISPLAY_ROW_PX);
+  } finally {
+    restore();
+  }
+});
+
 test('live follow backward stays on the newest row for both time sorts', () => {
   const older = [at(1, 'a'), at(2, 'b'), at(3, 'c'), at(4, 'd')];
   const newest = at(5, 'newest');

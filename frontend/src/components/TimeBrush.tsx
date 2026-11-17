@@ -1,5 +1,6 @@
 import React, { useRef, useMemo, useEffect, useState } from 'react';
 import type { Telegram } from '../hooks/useWebSocket';
+// TODO(charts): reuse DateTimeFacetPair / shared date-time facets (see timeFormat.ts).
 import { spansMultipleDays, formatFullTime } from '../utils/timeFormat';
 
 interface TimeBrushProps {

@@ -220,6 +220,47 @@ export function textDptWritePayload(raw: string, dptKey?: string | null): string
   return value;
 }
 
+/**
+ * Decode raw bus payload bytes into a character/string for DPT 4 / 16 / 28.
+ * Fixed-width DPTs require an exact byte length; NULs become spaces so display
+ * matches the space-padded write path. Returns null when the DPT is not text
+ * or the width/encoding does not fit.
+ */
+export function decodeTextDptPayload(
+  bytes: readonly number[],
+  dptKey?: string | null,
+): string | null {
+  const parsed = parseDptKey(dptKey);
+  if (!parsed || !isTextDptMain(parsed.main)) return null;
+  if (bytes.some(b => !Number.isInteger(b) || b < 0 || b > 255)) return null;
+
+  const encoding = textDptEncoding(dptKey);
+  if (!encoding) return null;
+
+  const width = textDptCharWidth(parsed.main);
+  if (width != null) {
+    if (bytes.length !== width) return null;
+  }
+
+  if (encoding === 'utf8') {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bytes));
+    } catch {
+      return null;
+    }
+  }
+
+  // ASCII / Latin-1: one byte → one code unit. Bus data may contain high bytes
+  // even on ASCII DPTs; still show the character rather than failing the fit.
+  let text = '';
+  for (const b of bytes) text += String.fromCharCode(b);
+  if (width != null) {
+    // KNX Character / String pads with 0x00; UI write path uses spaces.
+    return text.replace(/\0/g, ' ');
+  }
+  return text.replace(/\0+$/g, '');
+}
+
 async function post<T = unknown>(endpoint: string, body?: unknown): Promise<T> {
   const res = await fetch(apiUrl(endpoint), {
     method: 'POST',

@@ -82,6 +82,15 @@ test('formatBusValueForDpt keeps and pads spaces for fixed-width text DPTs', () 
   });
 });
 
+test('buildValueDisplayModes for text DPTs: decoded + hex, no decimal/bin', () => {
+  const modes = buildValueDisplayModes(
+    { value_formatted: 'Hi', raw_hex: '0x4869000000000000000000000000' },
+    '16.000',
+  );
+  expect(modes.map(m => m.mode)).toEqual(['decoded', 'hex']);
+  expect(modes[0].label).toBe('Hi'.padEnd(14, ' '));
+});
+
 test('discretePayloadRawBits packs DPT 1/2/3 payloads', () => {
   expect(discretePayloadRawBits(false, '1.001')).toBe(0);
   expect(discretePayloadRawBits(true, '1.001')).toBe(1);
@@ -121,5 +130,22 @@ test('buildValueDisplayModes skips decimal when identical to decoded and omits b
   );
   expect(modes.map(m => m.mode)).toEqual(['decoded', 'hex']);
   expect(modes[0]).toMatchObject({ label: '21.5', unit: '°C' });
+});
+
+test('buildValueDisplayModes allowDecoded=false omits decoded; hex always; bin only ≤4-bit', () => {
+  const wide = buildValueDisplayModes(
+    { value_json: [46, 118], value_formatted: null, raw_hex: '0x2E76' },
+    '9.004',
+    { allowDecoded: false },
+  );
+  // Decimal from parsing raw hex is fine; decoded must stay off; no bin for DPT 9.
+  expect(wide.map(m => m.mode)).toEqual(['decimal', 'hex']);
+
+  const discrete = buildValueDisplayModes(
+    { value_numeric: 1, raw_hex: '0x01' },
+    '1.001',
+    { allowDecoded: false },
+  );
+  expect(discrete.map(m => m.mode)).toEqual(['decimal', 'hex', 'bin']);
 });
 

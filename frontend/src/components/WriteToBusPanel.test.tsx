@@ -964,7 +964,7 @@ test('shows countdown immediately on delayed Write click', async () => {
 
 test('delay and every show unit s beside the value inside the field shell', () => {
   const { container } = render(<WriteToBusPanel targets={[]} />);
-  expect(container.querySelectorAll('[data-seconds-field]')).toHaveLength(2);
+  expect(container.querySelectorAll('[data-duration-field]')).toHaveLength(2);
   expect(screen.queryByText('s')).not.toBeInTheDocument();
 
   fireEvent.change(screen.getByPlaceholderText('GA'), { target: { value: '1/2/3' } });
@@ -975,7 +975,7 @@ test('delay and every show unit s beside the value inside the field shell', () =
 
   const units = screen.getAllByText('s');
   expect(units).toHaveLength(2);
-  const shells = container.querySelectorAll('[data-seconds-field]');
+  const shells = container.querySelectorAll('[data-duration-field]');
   expect(shells[0]).toContainElement(units[0]);
   expect(shells[1]).toContainElement(units[1]);
   expect(delay.nextElementSibling).toBe(units[0]);

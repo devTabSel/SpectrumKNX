@@ -7,6 +7,7 @@ import {
   type CSSProperties,
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
   type Ref,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -20,6 +21,8 @@ export type DatetimeMode = 'datetime' | 'date' | 'time';
  * - before: Before… | Live | Clear  (TIME filter "bis")
  */
 export type DatetimeActions = 'standard' | 'since' | 'before';
+/** Separator between date and time in datetime values. */
+export type DatetimeSeparator = 'T' | ' ';
 
 interface Props {
   value: string;
@@ -27,6 +30,10 @@ interface Props {
   mode?: DatetimeMode;
   /** Include seconds in datetime/time values (default true). */
   withSeconds?: boolean;
+  /** Append centiseconds `.SS` after seconds (requires withSeconds). */
+  withCentiseconds?: boolean;
+  /** Date/time join character (default `T`). */
+  separator?: DatetimeSeparator;
   className?: string;
   style?: CSSProperties;
   disabled?: boolean;
@@ -52,10 +59,18 @@ interface Props {
   onLive?: () => void;
   /** Decorative field chevron (default false). */
   showChevron?: boolean;
+  /** Trailing control inside the field chrome (e.g. goto). */
+  endSlot?: ReactNode;
+  /**
+   * When true with mode `datetime`, the field shows only the time (segment
+   * edit / wheel on h–cs) while the draft and onChange stay full date+time.
+   * Used so if-differs idle chrome does not expand on focus alone.
+   */
+  hideDateInField?: boolean;
 }
 
-type Parts = { y: number; mo: number; d: number; h: number; mi: number; s: number };
-type SegKey = 'year' | 'month' | 'day' | 'h' | 'mi' | 's';
+type Parts = { y: number; mo: number; d: number; h: number; mi: number; s: number; cs: number };
+type SegKey = 'year' | 'month' | 'day' | 'h' | 'mi' | 's' | 'cs';
 type FieldSeg = { key: SegKey; start: number; end: number; maxLen: number };
 
 const WEEKDAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
@@ -73,20 +88,27 @@ function dateKey(y: number, mo: number, d: number) {
   return `${String(y).padStart(4, '0')}-${pad(mo + 1)}-${pad(d)}`;
 }
 
+function parseCs(raw: string | undefined): number {
+  if (raw == null || raw === '') return 0;
+  const digits = raw.replace(/\D/g, '').slice(0, 2);
+  if (!digits) return 0;
+  return Math.min(99, Number(digits.padEnd(2, '0')));
+}
+
 function parseParts(value: string, mode: DatetimeMode): Parts | null {
   const now = new Date();
   if (!value.trim()) {
     return {
       y: now.getFullYear(), mo: now.getMonth(), d: now.getDate(),
-      h: now.getHours(), mi: now.getMinutes(), s: now.getSeconds(),
+      h: now.getHours(), mi: now.getMinutes(), s: now.getSeconds(), cs: 0,
     };
   }
   if (mode === 'time') {
-    const m = value.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    const m = value.match(/^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/);
     if (!m) return null;
     return {
       y: now.getFullYear(), mo: now.getMonth(), d: now.getDate(),
-      h: Number(m[1]), mi: Number(m[2]), s: Number(m[3] ?? 0),
+      h: Number(m[1]), mi: Number(m[2]), s: Number(m[3] ?? 0), cs: parseCs(m[4]),
     };
   }
   if (mode === 'date') {
@@ -94,25 +116,35 @@ function parseParts(value: string, mode: DatetimeMode): Parts | null {
     if (!m) return null;
     return {
       y: Number(m[1]), mo: Number(m[2]) - 1, d: Number(m[3]),
-      h: 0, mi: 0, s: 0,
+      h: 0, mi: 0, s: 0, cs: 0,
     };
   }
-  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/);
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?/);
   if (!m) return null;
   return {
     y: Number(m[1]), mo: Number(m[2]) - 1, d: Number(m[3]),
-    h: Number(m[4]), mi: Number(m[5]), s: Number(m[6] ?? 0),
+    h: Number(m[4]), mi: Number(m[5]), s: Number(m[6] ?? 0), cs: parseCs(m[7]),
   };
 }
 
-function formatParts(p: Parts, mode: DatetimeMode, withSeconds: boolean): string {
+function formatTime(p: Parts, withSeconds: boolean, withCentiseconds: boolean): string {
+  if (!withSeconds) return `${pad(p.h)}:${pad(p.mi)}`;
+  const base = `${pad(p.h)}:${pad(p.mi)}:${pad(p.s)}`;
+  return withCentiseconds ? `${base}.${pad(p.cs)}` : base;
+}
+
+function formatParts(
+  p: Parts,
+  mode: DatetimeMode,
+  withSeconds: boolean,
+  separator: DatetimeSeparator = 'T',
+  withCentiseconds = false,
+): string {
   const date = dateKey(p.y, p.mo, p.d);
-  const time = withSeconds
-    ? `${pad(p.h)}:${pad(p.mi)}:${pad(p.s)}`
-    : `${pad(p.h)}:${pad(p.mi)}`;
+  const time = formatTime(p, withSeconds, withCentiseconds && withSeconds);
   if (mode === 'date') return date;
   if (mode === 'time') return time;
-  return `${date}T${time}`;
+  return `${date}${separator}${time}`;
 }
 
 function daysInMonth(y: number, mo: number) {
@@ -130,21 +162,36 @@ function clampDay(y: number, mo: number, d: number) {
   return Math.min(d, daysInMonth(y, mo));
 }
 
-function fieldSegKeys(mode: DatetimeMode, withSeconds: boolean): SegKey[] {
-  if (mode === 'time') return withSeconds ? ['h', 'mi', 's'] : ['h', 'mi'];
+function fieldSegKeys(
+  mode: DatetimeMode,
+  withSeconds: boolean,
+  withCentiseconds = false,
+): SegKey[] {
+  const cs = withSeconds && withCentiseconds;
+  if (mode === 'time') {
+    if (!withSeconds) return ['h', 'mi'];
+    return cs ? ['h', 'mi', 's', 'cs'] : ['h', 'mi', 's'];
+  }
   if (mode === 'date') return ['year', 'month', 'day'];
-  return withSeconds
-    ? ['year', 'month', 'day', 'h', 'mi', 's']
-    : ['year', 'month', 'day', 'h', 'mi'];
+  if (!withSeconds) return ['year', 'month', 'day', 'h', 'mi'];
+  return cs
+    ? ['year', 'month', 'day', 'h', 'mi', 's', 'cs']
+    : ['year', 'month', 'day', 'h', 'mi', 's'];
 }
 
-function fieldSegments(text: string, mode: DatetimeMode, withSeconds: boolean): FieldSeg[] {
-  const keys = fieldSegKeys(mode, withSeconds);
+function fieldSegments(
+  text: string,
+  mode: DatetimeMode,
+  withSeconds: boolean,
+  withCentiseconds = false,
+): FieldSeg[] {
+  const keys = fieldSegKeys(mode, withSeconds, withCentiseconds);
   const out: FieldSeg[] = [];
   if (mode === 'time') {
     out.push({ key: 'h', start: 0, end: 2, maxLen: 2 });
     out.push({ key: 'mi', start: 3, end: 5, maxLen: 2 });
     if (withSeconds) out.push({ key: 's', start: 6, end: 8, maxLen: 2 });
+    if (withSeconds && withCentiseconds) out.push({ key: 'cs', start: 9, end: 11, maxLen: 2 });
     return out.filter(s => keys.includes(s.key));
   }
   out.push({ key: 'year', start: 0, end: 4, maxLen: 4 });
@@ -154,6 +201,7 @@ function fieldSegments(text: string, mode: DatetimeMode, withSeconds: boolean): 
     out.push({ key: 'h', start: 11, end: 13, maxLen: 2 });
     out.push({ key: 'mi', start: 14, end: 16, maxLen: 2 });
     if (withSeconds) out.push({ key: 's', start: 17, end: 19, maxLen: 2 });
+    if (withSeconds && withCentiseconds) out.push({ key: 'cs', start: 20, end: 22, maxLen: 2 });
   }
   return out.filter(s => keys.includes(s.key) && s.end <= text.length);
 }
@@ -244,8 +292,19 @@ const chipBtn = (accent = false, disabled = false): CSSProperties => ({
 const iconBtnStyle = (disabled = false): CSSProperties => iconBtn(disabled);
 
 /** Comparable local instant string for clamping (date / datetime / time). */
-function partsCompareKey(p: Parts, mode: DatetimeMode, withSeconds: boolean): string {
-  return formatParts(p, mode === 'time' ? 'datetime' : mode, withSeconds);
+function partsCompareKey(
+  p: Parts,
+  mode: DatetimeMode,
+  withSeconds: boolean,
+  withCentiseconds = false,
+): string {
+  return formatParts(
+    p,
+    mode === 'time' ? 'datetime' : mode,
+    withSeconds,
+    'T',
+    withCentiseconds,
+  );
 }
 
 /**
@@ -260,6 +319,7 @@ function clampPartsToDb(
   maxDateTime?: string,
   minDate?: string,
   maxDate?: string,
+  withCentiseconds = false,
 ): Parts {
   if (mode === 'time') return p;
   const minBound = minDateTime ?? minDate;
@@ -279,16 +339,22 @@ function clampPartsToDb(
     return p;
   }
 
-  const cur = partsCompareKey(p, 'datetime', withSeconds);
+  const cur = partsCompareKey(p, 'datetime', withSeconds, withCentiseconds);
   const toInstant = (bound: string, which: 'min' | 'max') => {
-    if (bound.includes('T')) return bound;
+    if (bound.includes('T') || bound.includes(' ')) return bound.replace(' ', 'T');
     return which === 'min' ? `${bound}T00:00:00` : `${bound}T23:59:59`;
   };
   const norm = (bound: string) => {
-    if (withSeconds) {
-      return bound.length >= 19 ? bound.slice(0, 19) : `${bound}:00`.slice(0, 19);
+    const t = bound.replace(' ', 'T');
+    if (withCentiseconds && withSeconds) {
+      if (t.length >= 22) return t.slice(0, 22);
+      if (t.length >= 19) return `${t.slice(0, 19)}.00`;
+      return `${t}:00.00`.slice(0, 22);
     }
-    return bound.slice(0, 16);
+    if (withSeconds) {
+      return t.length >= 19 ? t.slice(0, 19) : `${t}:00`.slice(0, 19);
+    }
+    return t.slice(0, 16);
   };
   if (minBound) {
     const minInst = toInstant(minBound, 'min');
@@ -301,13 +367,18 @@ function clampPartsToDb(
   return p;
 }
 
-/** One step of a field segment; wraps within natural ranges (year free, month/day/time cyclic). */
+/**
+ * One step of a field segment with carry into larger units:
+ * cs→s→mi→h→day→month→year (and the reverse on underflow).
+ */
 function stepParts(p: Parts, key: SegKey, dir: 1 | -1): Parts {
   const next = { ...p };
   if (key === 'year') {
     next.y = next.y + dir;
     next.d = clampDay(next.y, next.mo, next.d);
-  } else if (key === 'month') {
+    return next;
+  }
+  if (key === 'month') {
     let mo = next.mo + dir;
     let y = next.y;
     if (mo > 11) { mo = 0; y += 1; }
@@ -315,18 +386,83 @@ function stepParts(p: Parts, key: SegKey, dir: 1 | -1): Parts {
     next.mo = mo;
     next.y = y;
     next.d = clampDay(y, mo, next.d);
-  } else if (key === 'day') {
+    return next;
+  }
+  if (key === 'day') {
     const dim = daysInMonth(next.y, next.mo);
     let d = next.d + dir;
-    if (d > dim) d = 1;
-    if (d < 1) d = dim;
+    if (d > dim) {
+      let mo = next.mo + 1;
+      let y = next.y;
+      if (mo > 11) { mo = 0; y += 1; }
+      next.y = y;
+      next.mo = mo;
+      next.d = 1;
+      return next;
+    }
+    if (d < 1) {
+      let mo = next.mo - 1;
+      let y = next.y;
+      if (mo < 0) { mo = 11; y -= 1; }
+      next.y = y;
+      next.mo = mo;
+      next.d = daysInMonth(y, mo);
+      return next;
+    }
     next.d = d;
-  } else if (key === 'h') {
-    next.h = (next.h + dir + 24) % 24;
-  } else if (key === 'mi') {
-    next.mi = (next.mi + dir + 60) % 60;
-  } else if (key === 's') {
-    next.s = (next.s + dir + 60) % 60;
+    return next;
+  }
+  if (key === 'h') {
+    let h = next.h + dir;
+    if (h > 23) {
+      next.h = 0;
+      return stepParts(next, 'day', 1);
+    }
+    if (h < 0) {
+      next.h = 23;
+      return stepParts(next, 'day', -1);
+    }
+    next.h = h;
+    return next;
+  }
+  if (key === 'mi') {
+    let mi = next.mi + dir;
+    if (mi > 59) {
+      next.mi = 0;
+      return stepParts(next, 'h', 1);
+    }
+    if (mi < 0) {
+      next.mi = 59;
+      return stepParts(next, 'h', -1);
+    }
+    next.mi = mi;
+    return next;
+  }
+  if (key === 's') {
+    let s = next.s + dir;
+    if (s > 59) {
+      next.s = 0;
+      return stepParts(next, 'mi', 1);
+    }
+    if (s < 0) {
+      next.s = 59;
+      return stepParts(next, 'mi', -1);
+    }
+    next.s = s;
+    return next;
+  }
+  if (key === 'cs') {
+    let cs = next.cs + dir;
+    if (cs > 99) {
+      next.cs = 0;
+      return stepParts(next, 's', 1);
+    }
+    if (cs < 0) {
+      next.cs = 99;
+      return stepParts(next, 's', -1);
+    }
+    next.cs = cs;
+    return next;
   }
   return next;
 }
@@ -341,6 +477,8 @@ export function ThemedDatetimePicker({
   onChange,
   mode = 'datetime',
   withSeconds = true,
+  withCentiseconds = false,
+  separator = 'T',
   className,
   style,
   disabled = false,
@@ -359,12 +497,19 @@ export function ThemedDatetimePicker({
   actions = 'standard',
   onLive,
   showChevron,
+  endSlot,
+  hideDateInField = false,
 }: Props) {
+  const useCs = withSeconds && withCentiseconds;
+  // Field chrome may hide the date; draft / onChange stay on the real mode.
+  const fieldMode: DatetimeMode = hideDateInField && mode === 'datetime' ? 'time' : mode;
+  const fmt = (p: Parts) => formatParts(p, mode, withSeconds, separator, useCs);
+  const fmtField = (p: Parts) => formatParts(p, fieldMode, withSeconds, separator, useCs);
   const [open, setOpen] = useState(false);
   const [fieldFocused, setFieldFocused] = useState(false);
   /** After Clear: keep the input blank while focused (draft still seeds the calendar). */
   const [cleared, setCleared] = useState(false);
-  const [activeSeg, setActiveSeg] = useState<SegKey>(() => fieldSegKeys(mode, withSeconds)[0]);
+  const [activeSeg, setActiveSeg] = useState<SegKey>(() => fieldSegKeys(fieldMode, withSeconds, useCs)[0]);
   const wrapRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const localInputRef = useRef<HTMLInputElement>(null);
@@ -372,6 +517,14 @@ export function ThemedDatetimePicker({
   const digitBuf = useRef('');
   const pendingSelect = useRef<SegKey | null>(null);
   const ignoreSelect = useRef(false);
+  /** True while a pointer is down on the field — skip focus/layout caret resets. */
+  const mouseDownOnField = useRef(false);
+  /** Focus just opened the popover; the trailing mouseup must not toggle it closed. */
+  const openedByThisPointer = useRef(false);
+  const activeSegRef = useRef(activeSeg);
+  const openRef = useRef(open);
+  activeSegRef.current = activeSeg;
+  openRef.current = open;
   const valueAtFocus = useRef(value);
   const dirty = useRef(false);
   /** Escape restores the focused value; the blur that follows must not commit the draft. */
@@ -388,15 +541,27 @@ export function ThemedDatetimePicker({
   const [viewMo, setViewMo] = useState(base.mo);
   const [draft, setDraft] = useState(base);
 
+  const valueParts = useMemo(() => parseParts(value, mode), [value, mode]);
   const shown = cleared
     ? ''
     : (fieldFocused || open)
-      ? formatParts(draft, mode, withSeconds)
-      : value;
+      ? fmtField(draft)
+      : (hideDateInField && mode === 'datetime' && valueParts
+        ? fmtField(valueParts)
+        : value);
   const segs = useMemo(
-    () => fieldSegments(shown, mode, withSeconds),
-    [shown, mode, withSeconds],
+    () => fieldSegments(shown, fieldMode, withSeconds, useCs),
+    [shown, fieldMode, withSeconds, useCs],
   );
+
+  /** Publish draft immediately so parents (e.g. goto icons) track uncommitted edits. */
+  const publishDraft = (p: Parts) => {
+    markDirty();
+    setDraft(p);
+    setViewY(p.y);
+    setViewMo(p.mo);
+    onChange(fmt(p));
+  };
 
   const wasOpen = useRef(false);
   useEffect(() => {
@@ -464,11 +629,12 @@ export function ThemedDatetimePicker({
       maxDateTime,
       minDate,
       maxDate,
+      useCs,
     );
     setDraft(clamped);
     setViewY(clamped.y);
     setViewMo(clamped.mo);
-    const formatted = formatParts(clamped, mode, withSeconds);
+    const formatted = fmt(clamped);
     onChange(formatted);
     valueAtFocus.current = formatted;
     dirty.current = false;
@@ -479,8 +645,8 @@ export function ThemedDatetimePicker({
     pendingSelect.current = key;
     setActiveSeg(key);
     const el = localInputRef.current;
-    const text = formatParts(draft, mode, withSeconds);
-    const list = fieldSegments(text, mode, withSeconds);
+    const text = fmtField(draft);
+    const list = fieldSegments(text, fieldMode, withSeconds, useCs);
     const seg = list.find(s => s.key === key);
     if (el && seg) {
       ignoreSelect.current = true;
@@ -492,16 +658,18 @@ export function ThemedDatetimePicker({
   useLayoutEffect(() => {
     const key = pendingSelect.current ?? activeSeg;
     if (!fieldFocused) return;
+    // A field click owns the caret until mouseup selects/toggles — don't snap back.
+    if (mouseDownOnField.current) return;
     const el = localInputRef.current;
     if (!el) return;
-    const list = fieldSegments(shown, mode, withSeconds);
+    const list = fieldSegments(shown, fieldMode, withSeconds, useCs);
     const seg = list.find(s => s.key === key);
     if (!seg) return;
     ignoreSelect.current = true;
     el.setSelectionRange(seg.start, seg.end);
     pendingSelect.current = null;
     queueMicrotask(() => { ignoreSelect.current = false; });
-  }, [shown, activeSeg, fieldFocused, mode, withSeconds]);
+  }, [shown, activeSeg, fieldFocused, fieldMode, withSeconds, useCs]);
 
   const applySegmentDigits = (key: SegKey, digits: string) => {
     const maxLen = key === 'year' ? 4 : 2;
@@ -511,12 +679,10 @@ export function ThemedDatetimePicker({
     const next = { ...draft };
     if (key === 'year') {
       next.y = Math.min(9999, Math.max(0, n));
-      setViewY(next.y);
       next.d = clampDay(next.y, next.mo, next.d);
     } else if (key === 'month') {
       n = Math.min(12, Math.max(1, n));
       next.mo = n - 1;
-      setViewMo(next.mo);
       next.d = clampDay(next.y, next.mo, next.d);
     } else if (key === 'day') {
       const dim = daysInMonth(next.y, next.mo);
@@ -527,20 +693,18 @@ export function ThemedDatetimePicker({
       next.mi = Math.min(59, Math.max(0, n));
     } else if (key === 's') {
       next.s = Math.min(59, Math.max(0, n));
+    } else if (key === 'cs') {
+      next.cs = Math.min(99, Math.max(0, Number(raw.padEnd(2, '0').slice(0, 2))));
     }
-    markDirty();
-    setDraft(next);
     pendingSelect.current = key;
+    publishDraft(next);
   };
 
   /** ArrowUp/Down: free segment scroll in the field (DB clamp happens on blur/OK). */
   const bumpSeg = (key: SegKey, dir: 1 | -1) => {
     const candidate = stepParts(draft, key, dir);
-    markDirty();
-    setDraft(candidate);
-    setViewY(candidate.y);
-    setViewMo(candidate.mo);
     pendingSelect.current = key;
+    publishDraft(candidate);
   };
 
   useEffect(() => {
@@ -553,10 +717,10 @@ export function ThemedDatetimePicker({
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [fieldFocused, activeSeg, disabled, draft, mode, withSeconds]);
+  }, [fieldFocused, activeSeg, disabled, draft, mode, withSeconds, useCs, separator]);
 
   const shiftFieldSeg = (dir: 1 | -1): boolean => {
-    const keys = fieldSegKeys(mode, withSeconds);
+    const keys = fieldSegKeys(fieldMode, withSeconds, useCs);
     const idx = keys.indexOf(activeSeg);
     const next = keys[idx + dir];
     if (!next) return false;
@@ -569,6 +733,7 @@ export function ThemedDatetimePicker({
     return {
       y: n.getFullYear(), mo: n.getMonth(), d: n.getDate(),
       h: n.getHours(), mi: n.getMinutes(), s: n.getSeconds(),
+      cs: Math.floor(n.getMilliseconds() / 10),
     };
   };
   const todayAllowed = (() => {
@@ -601,10 +766,7 @@ export function ThemedDatetimePicker({
 
   const pickDay = (y: number, mo: number, d: number) => {
     const next = { ...draft, y, mo, d };
-    markDirty();
-    setDraft(next);
-    setViewY(y);
-    setViewMo(mo);
+    publishDraft(next);
     selectSeg('day');
   };
 
@@ -613,8 +775,7 @@ export function ThemedDatetimePicker({
     if (key === 'h') next.h = ((n % 24) + 24) % 24;
     if (key === 'mi') next.mi = ((n % 60) + 60) % 60;
     if (key === 's') next.s = ((n % 60) + 60) % 60;
-    markDirty();
-    setDraft(next);
+    publishDraft(next);
     selectSeg(key);
   };
 
@@ -695,12 +856,17 @@ export function ThemedDatetimePicker({
     return cells;
   }, [viewY, viewMo, minDate, maxDate]);
 
+  const timePh = !withSeconds
+    ? 'HH:mm'
+    : useCs
+      ? 'HH:mm:ss.SS'
+      : 'HH:mm:ss';
   const displayPlaceholder = placeholder
     ?? (mode === 'date'
       ? 'YYYY-MM-DD'
       : mode === 'time'
-        ? (withSeconds ? 'HH:mm:ss' : 'HH:mm')
-        : (withSeconds ? 'YYYY-MM-DDTHH:mm:ss' : 'YYYY-MM-DDTHH:mm'));
+        ? timePh
+        : `YYYY-MM-DD${separator}${timePh}`);
 
   const setInputRef = (el: HTMLInputElement | null) => {
     localInputRef.current = el;
@@ -711,12 +877,15 @@ export function ThemedDatetimePicker({
 
   const useHostChrome = Boolean(className) && variant === 'field';
   const chevronVisible = showChevron === true;
+  const hasEndSlot = endSlot != null;
   const explicitWidth = style?.width;
   const wrapWidth: CSSProperties['width'] = explicitWidth != null
     ? 'fit-content'
     : variant === 'bare'
       ? undefined
       : '100%';
+  /** When an endSlot is present, chrome sits on the wrap so the button is inside the field. */
+  const shellChrome = variant === 'field' && hasEndSlot && !useHostChrome;
   const fieldStyle: CSSProperties = variant === 'bare'
     ? {
         ...style,
@@ -730,6 +899,28 @@ export function ThemedDatetimePicker({
         minWidth: 0,
         cursor: disabled ? 'default' : 'text',
       }
+    : shellChrome
+      ? {
+          border: 'none',
+          outline: 'none',
+          background: 'transparent',
+          padding: 0,
+          color: 'var(--text-main)',
+          fontSize: '0.7rem',
+          fontFamily: "'JetBrains Mono', monospace",
+          fontVariantNumeric: 'tabular-nums',
+          width: explicitWidth ?? '100%',
+          minWidth: 0,
+          cursor: disabled ? 'default' : 'text',
+          boxSizing: 'border-box',
+          ...style,
+          // Keep size tokens from style, but chrome lives on the wrap.
+          borderWidth: undefined,
+          borderStyle: undefined,
+          borderColor: undefined,
+          background: 'transparent',
+          padding: 0,
+        }
     : useHostChrome
       ? {
           width: '100%',
@@ -765,10 +956,13 @@ export function ThemedDatetimePicker({
       setDraft(p);
       setViewY(p.y);
       setViewMo(p.mo);
+      const wasDirty = dirty.current;
       dirty.current = false;
       escapeRevert.current = true;
       setCleared(original.trim() === '');
-      if (value !== original) onChange(original);
+      // Always restore for live drafts — even when the controlled `value` prop
+      // has not caught up yet (or the parent is uncontrolled).
+      if (wasDirty || value !== original) onChange(original);
       closePicker();
       // Leave the field so a parent blur sees the restored value and does not jump.
       localInputRef.current?.blur();
@@ -785,7 +979,7 @@ export function ThemedDatetimePicker({
       digitBuf.current = (digitBuf.current + e.key).slice(-maxLen);
       applySegmentDigits(key, digitBuf.current);
       if (digitBuf.current.length >= maxLen) {
-        const keys = fieldSegKeys(mode, withSeconds);
+        const keys = fieldSegKeys(fieldMode, withSeconds, useCs);
         const i = keys.indexOf(key);
         digitBuf.current = '';
         if (i >= 0 && i < keys.length - 1) {
@@ -821,29 +1015,63 @@ export function ThemedDatetimePicker({
     }
   };
 
+  const onInputMouseDown = () => {
+    if (disabled) return;
+    mouseDownOnField.current = true;
+  };
+
+  /**
+   * Click on a non-active segment → select it (picker stays/opens).
+   * Click on the already-selected segment → toggle the calendar popover
+   * (except the mouseup of the pointer that just focused/opened).
+   */
   const onInputMouseUp = () => {
-    if (ignoreSelect.current) return;
     const el = localInputRef.current;
-    if (!el) return;
+    if (!el) {
+      mouseDownOnField.current = false;
+      openedByThisPointer.current = false;
+      return;
+    }
+    // Read caret after the browser placed it; win over focus layout ignoreSelect.
+    ignoreSelect.current = false;
     const caret = el.selectionStart ?? 0;
-    const hit = segAtCaret(segs, caret);
-    if (hit) selectSeg(hit.key);
+    const list = fieldSegments(el.value || shown, fieldMode, withSeconds, useCs);
+    const hit = segAtCaret(list, caret);
+    mouseDownOnField.current = false;
+    if (!hit) {
+      openedByThisPointer.current = false;
+      return;
+    }
+
+    if (hit.key === activeSegRef.current) {
+      if (openedByThisPointer.current) {
+        // Opening click: keep popover open, keep this segment selected.
+        openedByThisPointer.current = false;
+        selectSeg(hit.key);
+        if (!openRef.current) openPicker();
+        return;
+      }
+      if (openRef.current) {
+        skipFocusOpen.current = true;
+        closePicker();
+      } else {
+        openPicker();
+      }
+      selectSeg(hit.key);
+      return;
+    }
+
+    openedByThisPointer.current = false;
+    selectSeg(hit.key);
+    if (!openRef.current) openPicker();
   };
 
   const onWrapMouseDown = (e: ReactMouseEvent) => {
     if (disabled) return;
     const target = e.target as HTMLElement;
     const onField = target === localInputRef.current || localInputRef.current?.contains(target);
-    if (onField) {
-      // Click on the value toggles popover visibility (Esc closes, Enter applies).
-      if (open) {
-        skipFocusOpen.current = true;
-        closePicker();
-      } else {
-        openPicker();
-      }
-      return;
-    }
+    // Field clicks are owned by onInputMouseDown/Up (select vs toggle).
+    if (onField) return;
     e.preventDefault();
     if (open) {
       skipFocusOpen.current = true;
@@ -920,11 +1148,22 @@ export function ThemedDatetimePicker({
         style={{
           display: 'inline-flex',
           alignItems: 'center',
+          gap: hasEndSlot ? 2 : undefined,
           width: wrapWidth,
           minWidth: 0,
           position: 'relative',
           flex: variant === 'bare' ? '1 1 auto' : undefined,
-          flexShrink: explicitWidth != null ? 0 : undefined,
+          flexShrink: explicitWidth != null || shellChrome ? 0 : undefined,
+          ...(shellChrome
+            ? {
+                background: 'var(--bg-inset)',
+                border: '1px solid var(--border-color)',
+                borderRadius: 6,
+                padding: '0.15rem 0.2rem 0.15rem 0.35rem',
+                boxSizing: 'border-box' as const,
+                height: style?.height,
+              }
+            : null),
         }}
         onMouseDown={onWrapMouseDown}
       >
@@ -952,29 +1191,60 @@ export function ThemedDatetimePicker({
             setDraft(p);
             setViewY(p.y);
             setViewMo(p.mo);
-            const first = fieldSegKeys(mode, withSeconds)[0];
-            pendingSelect.current = first;
-            setActiveSeg(first);
             digitBuf.current = '';
+            // Keyboard/programmatic focus starts on the first segment. A pointer
+            // click leaves the caret alone — mouseup selects/toggles.
+            if (!mouseDownOnField.current) {
+              const first = fieldSegKeys(fieldMode, withSeconds, useCs)[0];
+              pendingSelect.current = first;
+              setActiveSeg(first);
+            }
             if (skipFocusOpen.current) {
               skipFocusOpen.current = false;
               return;
             }
-            if (openOnFocus) openPicker();
+            if (openOnFocus) {
+              openPicker();
+              if (mouseDownOnField.current) openedByThisPointer.current = true;
+            }
           }}
           onChange={e => {
             const v = e.target.value;
             markDirty();
-            const p = parseParts(v, mode);
-            if (p) {
-              setDraft(p);
-              setViewY(p.y);
-              setViewMo(p.mo);
-              onChange(formatParts(p, mode, withSeconds));
+            // Freehand: when the date is hidden, accept a pasted full datetime or
+            // a time-only edit merged onto the draft's calendar day.
+            if (hideDateInField && mode === 'datetime') {
+              const asFull = parseParts(v, mode);
+              if (asFull) {
+                setDraft(asFull);
+                setViewY(asFull.y);
+                setViewMo(asFull.mo);
+                onChange(fmt(asFull));
+                return;
+              }
+              const typed = parseParts(v, 'time');
+              if (typed) {
+                const next = { ...draft, h: typed.h, mi: typed.mi, s: typed.s, cs: typed.cs };
+                setDraft(next);
+                setViewY(next.y);
+                setViewMo(next.mo);
+                onChange(fmt(next));
+                return;
+              }
+              onChange(v);
+              return;
+            }
+            const typed = parseParts(v, mode);
+            if (typed) {
+              setDraft(typed);
+              setViewY(typed.y);
+              setViewMo(typed.mo);
+              onChange(fmt(typed));
             } else {
               onChange(v);
             }
           }}
+          onMouseDown={onInputMouseDown}
           onMouseUp={onInputMouseUp}
           onBlur={() => {
             const reverting = escapeRevert.current;
@@ -994,12 +1264,23 @@ export function ThemedDatetimePicker({
           }}
           onKeyDown={onFieldKeyDown}
         />
+        {hasEndSlot ? (
+          <span
+            style={{ display: 'inline-flex', alignItems: 'center', flexShrink: 0 }}
+            onMouseDown={e => {
+              // Keep field focus while clicking the trailing control.
+              e.preventDefault();
+            }}
+          >
+            {endSlot}
+          </span>
+        ) : null}
         {chevronVisible && (
           <span
             aria-hidden
             style={{
               position: 'absolute',
-              right: 4,
+              right: hasEndSlot ? 22 : 4,
               top: '50%',
               transform: 'translateY(-50%)',
               color: 'var(--text-dim)',

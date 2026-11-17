@@ -57,12 +57,18 @@ describe('TelegramWhenJump', () => {
   it('loads an outside target only on ctrl-click', () => {
     const onJump = vi.fn();
     render(
-      <GotoBufferProvider scope="live" oldestMs={1_000} newestMs={2_000}>
+      <GotoBufferProvider
+        scope="live"
+        oldestMs={1_000}
+        newestMs={2_000}
+        readDirection="forward"
+      >
         <TelegramWhenJump timestamp={new Date(5_000).toISOString()} onJump={onJump} />
       </GotoBufferProvider>,
     );
     const jump = screen.getByRole('button', { name: 'Ctrl-Klick lädt nach' });
     expect(jump).toHaveStyle({ color: 'var(--warning-text)' });
+    expect(jump.querySelector('.lucide-arrow-right-from-line')).toBeTruthy();
     fireEvent.click(jump);
     expect(onJump).not.toHaveBeenCalled();
     fireEvent.click(jump, { ctrlKey: true });

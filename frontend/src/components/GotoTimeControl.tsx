@@ -3,8 +3,14 @@ import { createPortal } from 'react-dom';
 import { format } from 'date-fns';
 import { Clock } from 'lucide-react';
 import { ThemedDatetimePicker } from './ThemedDatetimePicker';
+import { GotoIcon } from './GotoIcon';
 import { classifyGotoTarget } from '../utils/gotoTarget';
-import { MISSING_GOTO_TITLE, OUTSIDE_GOTO_TITLE, type GotoScope } from '../utils/gotoBuffer';
+import {
+  MISSING_GOTO_TITLE,
+  OUTSIDE_GOTO_TITLE,
+  useGotoBuffer,
+  type GotoScope,
+} from '../utils/gotoBuffer';
 
 // "Quick goto time" control for the telegram list (#282): a clock button that
 // opens a small time-entry popover. Submitting jumps the list to the telegram
@@ -35,6 +41,7 @@ const INPUT_FMT = "yyyy-MM-dd'T'HH:mm:ss";
 export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({
   seedMs, onGoto, oldestMs = null, newestMs = null, scope = 'live',
 }) => {
+  const buf = useGotoBuffer();
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState('');
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -77,6 +84,7 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({
     : 'unknown';
   const goOutside = draftPlace === 'older' || draftPlace === 'newer';
   const goMissing = goOutside && scope === 'history';
+  const goTone = goMissing ? 'missing' as const : goOutside ? 'outside' as const : 'ready' as const;
 
   const toggle = () => {
     if (open) { setOpen(false); return; }
@@ -171,10 +179,11 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({
             onMouseDown={e => e.preventDefault()}
             onClick={e => submitFrom(inputRef.current?.value ?? value, 'icon', e.ctrlKey || e.metaKey)}
             disabled={!value}
+            aria-label="Go"
             title={goMissing ? MISSING_GOTO_TITLE : goOutside ? OUTSIDE_GOTO_TITLE : 'Go'}
             style={goOutside ? { color: 'var(--warning-text)' } : undefined}
           >
-            Go
+            <GotoIcon tone={goTone} readDirection={buf.readDirection} size={13} />
           </button>
         </div>,
         document.body,

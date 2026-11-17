@@ -73,9 +73,9 @@ test('opens on click, shows the last value and sends a DPT-1 boolean', async () 
   const dpt = screen.getByLabelText('Datapoint type');
   const delay = screen.getByPlaceholderText('delay');
   const every = screen.getByPlaceholderText('every');
-  expect(document.querySelectorAll('[data-seconds-field]')).toHaveLength(2);
-  const schedule = delay.closest('[data-seconds-field]')!.parentElement!.parentElement as HTMLElement;
-  expect(schedule).toBe(every.closest('[data-seconds-field]')!.parentElement!.parentElement);
+  expect(document.querySelectorAll('[data-duration-field]')).toHaveLength(2);
+  const schedule = delay.closest('[data-duration-field]')!.parentElement!.parentElement as HTMLElement;
+  expect(schedule).toBe(every.closest('[data-duration-field]')!.parentElement!.parentElement);
   expect(schedule.style.display).toBe('flex');
   expect(dpt.compareDocumentPosition(delay) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(delay.compareDocumentPosition(every) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -363,8 +363,8 @@ test('triggers a GroupValueRead from the Read button', async () => {
   expect(areas).toContain('"dpt sched"');
   expect(areas).toContain('"value value"');
   expect(areas).toContain('"write read"');
-  expect(delay.closest('[data-seconds-field]')!.parentElement!.parentElement)
-    .toBe(every.closest('[data-seconds-field]')!.parentElement!.parentElement);
+  expect(delay.closest('[data-duration-field]')!.parentElement!.parentElement)
+    .toBe(every.closest('[data-duration-field]')!.parentElement!.parentElement);
   expect(value.compareDocumentPosition(write) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(write.compareDocumentPosition(read) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   fireEvent.click(read);
@@ -1027,7 +1027,7 @@ test('delay and every match the send-panel seconds field chrome', async () => {
 
   const delay = await waitFor(() => screen.getByPlaceholderText('delay'));
   const every = screen.getByPlaceholderText('every');
-  expect(document.querySelectorAll('[data-seconds-field]')).toHaveLength(2);
+  expect(document.querySelectorAll('[data-duration-field]')).toHaveLength(2);
   expect(screen.queryByText('s')).not.toBeInTheDocument();
   expect(delay).toHaveStyle({ textAlign: 'right' });
   expect(every).toHaveStyle({ textAlign: 'right' });

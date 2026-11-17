@@ -505,6 +505,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               scope="history"
               oldestMs={loadedSpan.oldest}
               newestMs={loadedSpan.newest}
+              readDirection={readDirection}
             >
             <TelegramTable
               telegrams={visible.items}
@@ -522,6 +523,7 @@ export const HistorySearch: React.FC<HistorySearchProps> = ({
               sortConfig={sortConfig}
               onSort={handleSort}
               activeFilters={activeFilters}
+              projectTargets={filterOptions.targets}
               filtersEnabled={filtersEnabled}
               sidePanelFilters={filtersAtLoad ?? undefined}
               onQuickFilter={handleQuickFilter}

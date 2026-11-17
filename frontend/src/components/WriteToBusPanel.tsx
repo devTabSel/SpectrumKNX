@@ -34,7 +34,7 @@ import {
   ROW_OUTLINE_FLASH_MS,
 } from '../utils/rowOutlineFlash';
 import { useRetainFocusThroughDisabled } from '../hooks/useRetainFocusThroughDisabled';
-import { SecondsField } from './SecondsField';
+import { DurationField } from './DurationField';
 import {
   sanitizeSecondsInput,
   rowsEqualForCorrespondence,
@@ -484,7 +484,7 @@ function measureColumnCell(cell: HTMLElement, col: number): number {
   const statusShell = cell.querySelector('[data-status-field]') as HTMLElement | null;
   if (statusShell) return measureStatusShell(statusShell);
   const shell = cell.querySelector(
-    '[data-value-field], [data-seconds-field], [data-dpt-field]',
+    '[data-value-field], [data-duration-field], [data-dpt-field]',
   ) as HTMLElement | null;
   if (shell) return measureIntrinsicWidth(shell);
   const glass = cell.querySelector('.glass-input') as HTMLElement | null;
@@ -2090,7 +2090,7 @@ export function WriteToBusPanel({
                       }}
                     />
                   </div>
-                  <SecondsField
+                  <DurationField
                     col="4"
                     placeholder={delayPlaceholder}
                     value={row.delay}
@@ -2104,7 +2104,7 @@ export function WriteToBusPanel({
                     }
                     disabled={showJob || !addressValid}
                   />
-                  <SecondsField
+                  <DurationField
                     col="5"
                     placeholder={everyPlaceholder}
                     value={row.every}

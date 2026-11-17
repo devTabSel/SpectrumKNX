@@ -284,6 +284,8 @@ function App() {
     return resolveMonitorStartup({ embedded, url });
   });
   const [monitorView, setMonitorView] = useState<MonitorView>(initialMonitor.view);
+  /** Now written into the edge opposite the anchor by the forward Play control. */
+  const [oppositeEdgeMs, setOppositeEdgeMs] = useState<number | null>(null);
   const readDirection = monitorView.direction;
   // Chevron keeps the current rows and only swaps the spacers. Every other
   // direction change rebuilds the list onto the anchor.
@@ -786,8 +788,11 @@ function App() {
   // auto ↔ manual (stays frozen). Manual→Auto keeps the backlog in the pause
   // buffer; the table fills the fill-spacer with its oldest row and feeds the
   // rest in as the user scrolls toward the live edge. An empty buffer disables
-  // the pause toggle. A clear leaves play/pause as it was. Resume via the newer pill while
-  // auto-paused, Ctrl-click on that pill while manually paused, or an auto
+  // the pause toggle. Clear keeps the anchor and pulls the other edge onto
+  // it, so the telegram at that instant stays. Backward (not Stop) latches
+  // auto-pause so later arrivals stay on the newer pill.
+  // Resume via the newer pill while auto-paused, Ctrl-click on that pill
+  // while manually paused, or an auto
   // edge-flush / follow-while-auto. A plain pill click keeps manual pause and
   // publishes the backlog so the view can land on the newest telegram.
   const bufferEmpty = liveTelegrams.length === 0;
@@ -1333,6 +1338,7 @@ function App() {
     edge = false,
   ) => {
     setDirectionGesture(edge ? 'chevron' : 'rebuild');
+    setOppositeEdgeMs(null);
     const switched = readDirection !== dir;
     // Forward has nothing to restore. Latch auto only after `after` publishes
     // the window — pausing first would hide that fill.
@@ -1474,6 +1480,25 @@ function App() {
     enforceTimeWindow, loadRange, setCacheRangeMinutes,
   ]);
 
+  // After the cache adopts the new maxSize, refill gaps from the parked
+  // (or buffer-edge) anchor in the current read direction.
+  const prevMonitorLoadLimitRef = useRef(monitorLoadLimit);
+  useEffect(() => {
+    if (prevMonitorLoadLimitRef.current === monitorLoadLimit) return;
+    prevMonitorLoadLimitRef.current = monitorLoadLimit;
+    const ts = monitorView.anchorTs
+      ?? (readDirection === 'forward' ? bufferOldestTs : bufferNewestTs);
+    if (ts == null) return;
+    void fillAnchorWindow(readDirection, ts);
+  }, [
+    monitorLoadLimit,
+    monitorView.anchorTs,
+    readDirection,
+    bufferOldestTs,
+    bufferNewestTs,
+    fillAnchorWindow,
+  ]);
+
   // Replace the app with a login screen when authentication is required. Early
   // so an unauthenticated visitor triggers no data fetching or WebSocket work
   // (those requests would 401 and the socket would be refused anyway).
@@ -1482,7 +1507,12 @@ function App() {
   }
 
   return (
-    <GotoBufferProvider scope="live" oldestMs={bufferOldestTs} newestMs={bufferNewestTs}>
+    <GotoBufferProvider
+      scope="live"
+      oldestMs={bufferOldestTs}
+      newestMs={bufferNewestTs}
+      readDirection={readDirection}
+    >
     <DptCatalogProvider value={filterOptions.dpts}>
     <GaReadPhaseProvider rows={ingestedTelegrams}>
     <div className="container dashboard-grid" style={{ padding: '1.5rem', gap: '1.5rem' }}>
@@ -1980,8 +2010,18 @@ function App() {
                     )}
                     headerCenter={(
                       <BufferStatusPill
-                        oldestMs={bufferOldestTs}
-                        newestMs={bufferNewestTs}
+                        // Clear parks both edges on the anchor. Play may pin now on the
+                        // edge opposite the anchor until the direction changes.
+                        oldestMs={
+                          readDirection === 'backward' && oppositeEdgeMs != null
+                            ? oppositeEdgeMs
+                            : (bufferOldestTs ?? monitorView.anchorTs)
+                        }
+                        newestMs={
+                          readDirection === 'forward' && oppositeEdgeMs != null
+                            ? oppositeEdgeMs
+                            : (bufferNewestTs ?? monitorView.anchorTs)
+                        }
                         readDirection={readDirection}
                         onReadDirectionChange={dir => {
                           void changeReadDirection(dir, async () => {
@@ -2003,20 +2043,46 @@ function App() {
                         filterActive={quickFilterActive}
                         readingEnd={readingEnd}
                         onClear={() => {
+                          const dir = readDirection;
+                          // Explicit anchor, else the live buffer edge for this direction.
+                          const ts = monitorView.anchorTs
+                            ?? (dir === 'forward' ? bufferOldestTs : bufferNewestTs);
+                          // Stop (forward) has no pause. Otherwise latch auto so
+                          // arrivals after the collapsed window stay on the pill.
+                          const autoPause = dir === 'backward';
+                          setOppositeEdgeMs(null);
                           setMonitorView(v => ({
                             ...v,
                             follow: false,
-                            anchorTs: null,
+                            ...(autoPause ? { pauseMode: 'auto' as const } : {}),
+                            ...(ts != null ? { anchorTs: ts } : {}),
                           }));
-                          // Real wipe. clear() also drops the anchor timestamp.
-                          void clearTelegrams();
+                          if (ts != null) {
+                            setBufferAnchor({ direction: dir, ts });
+                            // Far edge joins the anchor. Rows at that instant stay.
+                            retainPausedInWindow(ts, ts);
+                          } else {
+                            void clearTelegrams();
+                          }
+                          if (autoPause) applyCachePause(true);
                         }}
                         onCancelLoad={cancelLoad}
                         pauseTitle={pauseTitle}
                         pauseColor={pauseColor}
                         pauseMode={pauseMode === 'off' ? 'auto' : pauseMode}
                         pauseDisabled={bufferEmpty}
-                        onTogglePause={togglePause}
+                        onTogglePause={() => {
+                          if (readDirection !== 'forward') {
+                            togglePause();
+                            return;
+                          }
+                          // Keep the anchor. Now goes on the opposite edge and
+                          // the fill runs from the anchor toward it.
+                          const now = Date.now();
+                          const anchor = monitorView.anchorTs ?? bufferOldestTs;
+                          setOppositeEdgeMs(now);
+                          if (anchor != null) void fillForwardFrom(anchor);
+                        }}
                         busRate={busRate}
                         rateMode={rateMode}
                         onCycleRateMode={() => setRateMode(m => (m === 's' ? 'm' : m === 'm' ? 'h' : 's'))}
@@ -2132,6 +2198,7 @@ function App() {
                     sortConfig={sortConfig}
                     onSort={handleSort}
                     activeFilters={activeFilters}
+                    projectTargets={filterOptions.targets}
                     onQuickFilter={handleQuickFilter}
                     onQuickVisualize={handleQuickVisualize}
                     onQuickLastSeen={handleQuickLastSeen}
