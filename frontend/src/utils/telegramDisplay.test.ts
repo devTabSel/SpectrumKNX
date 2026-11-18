@@ -5,7 +5,6 @@ import { anchorKey } from './anchorKey';
 import { pinnedVisibleKeys, selectVisibleTelegrams, type SelectVisibleOpts } from './selectVisibleTelegrams';
 import {
   END_MARKER_PX,
-  DISPLAY_ROW_PX,
   DISPLAY_RUBBER_PX,
   anchorDisplayEdge,
   anchorEdgeCount,
@@ -109,30 +108,32 @@ describe('readingEndCause', () => {
 });
 
 describe('spacerVariantA', () => {
-  const viewport = 800;
+  it('keeps both ends clear at rest so a settled scroll sits on telegrams', () => {
+    const plan = spacerVariantA({ temporal: true, hasRows: true });
+    expect(plan.anchorPx).toBe(0);
+    expect(plan.anchorRubberPx).toBe(0);
+    expect(plan.markerPx).toBe(END_MARKER_PX);
+    expect(plan.readingRubberPx).toBe(0);
+    expect(plan.readingPx).toBe(0);
+  });
 
-  it('sizes the reading end for one row plus the marker, and the anchor end at half a row', () => {
-    const plan = spacerVariantA({ viewportPx: viewport, temporal: true, hasRows: true });
+  it('opens a half-row rubber only on the side that is scrolling', () => {
+    const plan = spacerVariantA({
+      temporal: true,
+      hasRows: true,
+      anchorRubberPx: DISPLAY_RUBBER_PX,
+    });
     expect(plan.anchorPx).toBe(DISPLAY_RUBBER_PX);
     expect(plan.anchorRubberPx).toBe(DISPLAY_RUBBER_PX);
+    expect(plan.readingPx).toBe(0);
+    expect(plan.readingRubberPx).toBe(0);
     expect(plan.markerPx).toBe(END_MARKER_PX);
-    expect(plan.readingRubberPx).toBe(DISPLAY_RUBBER_PX);
-    expect(plan.readingPx).toBe(viewport - DISPLAY_ROW_PX - END_MARKER_PX + DISPLAY_RUBBER_PX);
-    // Settled reading scroll shows one row + marker; the rubber sits past that.
-    const travel = plan.readingPx - plan.readingRubberPx;
-    expect(travel + DISPLAY_ROW_PX + plan.markerPx).toBe(viewport);
   });
 
-  it('uses the same anchor and reading sizes in either direction', () => {
-    const back = spacerVariantA({ viewportPx: viewport, temporal: true, hasRows: true });
-    const fore = spacerVariantA({ viewportPx: 800, temporal: true, hasRows: true });
-    expect(fore).toEqual(back);
-  });
-
-  it('keeps a half-row rubber at both ends when the sort is not temporal', () => {
-    const plan = spacerVariantA({ viewportPx: viewport, temporal: false, hasRows: true });
-    expect(plan.anchorPx).toBe(DISPLAY_RUBBER_PX);
-    expect(plan.readingPx).toBe(DISPLAY_RUBBER_PX);
+  it('keeps a non-temporal sort free of rubber and the end marker at rest', () => {
+    const plan = spacerVariantA({ temporal: false, hasRows: true });
+    expect(plan.anchorPx).toBe(0);
+    expect(plan.readingPx).toBe(0);
     expect(plan.markerPx).toBe(0);
   });
 });

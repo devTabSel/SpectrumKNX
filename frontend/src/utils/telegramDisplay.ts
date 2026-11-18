@@ -109,9 +109,9 @@ export function readingEndCause(input: ReadingEndInput): ReadingEndCause {
 }
 
 export interface SpacerPlan {
-  /** Anchor-end block: at most half a row, and that half is the rubber band. */
+  /** Anchor-end rubber. Zero unless that side is in a scroll overscroll. */
   anchorPx: number;
-  /** Reading-end spacer excluding the end marker: travel + rubber. */
+  /** Reading-end rubber, excluding the end marker. Zero unless that side is scrolling. */
   readingPx: number;
   anchorRubberPx: number;
   readingRubberPx: number;
@@ -119,37 +119,30 @@ export interface SpacerPlan {
 }
 
 /**
- * Variant A. Time sort: the reading end is tall enough that the settled scroll
- * shows one row plus the end marker, then a half-row rubber band. The anchor
- * end is only that half-row rubber. Any other sort keeps a half-row rubber at
- * both ends and no marker, so the top row can stay put.
+ * Variant A. Resting rubber is zero, so a settled scroll sits on telegrams.
+ * A scroll overscroll passes a rubber size for the side it is pulling. The
+ * reading end still carries the end marker. A buffer shorter than the
+ * viewport cannot fill it; that gap is not extra spacer. Any other sort has
+ * no marker, so the top row can stay put.
  */
 export function spacerVariantA(opts: {
-  viewportPx: number;
-  rowPx?: number;
   markerPx?: number;
+  /** Both ends, when a per-side size is omitted. Resting default is 0. */
   rubberPx?: number;
+  anchorRubberPx?: number;
+  readingRubberPx?: number;
   temporal: boolean;
   hasRows: boolean;
 }): SpacerPlan {
-  const row = opts.rowPx ?? DISPLAY_ROW_PX;
-  const rubber = opts.hasRows ? (opts.rubberPx ?? DISPLAY_RUBBER_PX) : 0;
+  const fallback = opts.hasRows ? (opts.rubberPx ?? 0) : 0;
+  const anchor = opts.hasRows ? (opts.anchorRubberPx ?? fallback) : 0;
+  const reading = opts.hasRows ? (opts.readingRubberPx ?? fallback) : 0;
   const marker = opts.temporal && opts.hasRows ? (opts.markerPx ?? END_MARKER_PX) : 0;
-  if (!opts.temporal || !opts.hasRows) {
-    return {
-      anchorPx: rubber,
-      readingPx: rubber,
-      anchorRubberPx: rubber,
-      readingRubberPx: rubber,
-      markerPx: 0,
-    };
-  }
-  const travel = Math.max(0, opts.viewportPx - row - marker);
   return {
-    anchorPx: rubber,
-    readingPx: travel + rubber,
-    anchorRubberPx: rubber,
-    readingRubberPx: rubber,
+    anchorPx: anchor,
+    readingPx: reading,
+    anchorRubberPx: anchor,
+    readingRubberPx: reading,
     markerPx: marker,
   };
 }

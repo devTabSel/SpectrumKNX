@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
 import { format } from 'date-fns';
 import { Clock } from 'lucide-react';
-import { ThemedDatetimePicker } from './ThemedDatetimePicker';
+import { DateTimeField, parseEditValueMs } from './DateTimeField';
 import { GotoIcon } from './GotoIcon';
 import { classifyGotoTarget } from '../utils/gotoTarget';
 import {
@@ -12,14 +12,14 @@ import {
   type GotoScope,
 } from '../utils/gotoBuffer';
 
-// "Quick goto time" control for the telegram list (#282): a clock button that
-// opens a small time-entry popover. Submitting jumps the list to the telegram
-// nearest that time and (via the parent) stops live-following.
+// Clock in the telegram-list header (#282). The popover is the shared
+// DateTimeField (same idle anchor as the buffer edges). Its endSlot is the
+// goto button. Clicking the time edits; Enter, blur, and the goto button jump.
 
 export interface GotoTimeMods {
-  /** Ctrl-click outside the buffer: load that window. */
+  /** Enter, blur, or Ctrl-click of the goto button outside the buffer: load that window. */
   load?: boolean;
-  /** Ctrl-click inside the buffer: add a jump target. */
+  /** Ctrl-Enter or Ctrl-click inside the buffer: add a jump target. */
   additive?: boolean;
 }
 
@@ -35,27 +35,52 @@ interface GotoTimeControlProps {
   scope?: GotoScope;
 }
 
-/** date-fns pattern for an <input type="datetime-local" step="1"> value (local time). */
-const INPUT_FMT = "yyyy-MM-dd'T'HH:mm:ss";
+/** Full local draft, same shape as DateTimeField / buffer edges. */
+const INPUT_FMT = 'yyyy-MM-dd HH:mm:ss.SS';
+
+/** Same frameless editor as the buffer-edge anchors in the status pill. */
+const editStyle: CSSProperties = {
+  width: `${INPUT_FMT.length}ch`,
+  border: 'none',
+  outline: 'none',
+  background: 'transparent',
+  padding: 0,
+  margin: 0,
+  color: 'var(--text-main)',
+  fontSize: '0.7rem',
+  fontFamily: "'JetBrains Mono', monospace",
+  fontVariantNumeric: 'tabular-nums',
+  fontWeight: 500,
+  minHeight: 0,
+  height: '1.55rem',
+};
 
 export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({
   seedMs, onGoto, oldestMs = null, newestMs = null, scope = 'live',
 }) => {
   const buf = useGotoBuffer();
   const [open, setOpen] = useState(false);
+  const [focused, setFocused] = useState(false);
   const [value, setValue] = useState('');
   const btnRef = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  /** Draft stays full date+time even when the field hides the date (if-differs). */
+  const valueRef = useRef('');
   /** Set when Escape or an explicit submit already owns the outcome, so the blur that follows does not submit again. */
   const skipBlur = useRef(false);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
 
+  const setDraft = (next: string) => {
+    valueRef.current = next;
+    setValue(next);
+  };
+
   const bounded = oldestMs != null && newestMs != null;
   const submitFrom = (raw: string, via: 'field' | 'icon', ctrl: boolean) => {
-    const ms = new Date(raw).getTime();
-    if (!raw || Number.isNaN(ms)) {
+    const ms = parseEditValueMs(raw);
+    if (ms == null) {
       skipBlur.current = true;
+      setFocused(false);
       setOpen(false);
       return;
     }
@@ -64,22 +89,26 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({
       skipBlur.current = true;
       if (ctrl && place === 'inside') onGoto(ms, { additive: true });
       else onGoto(ms);
+      setFocused(false);
       setOpen(false);
       return;
     }
     if (scope === 'history') {
       skipBlur.current = true;
+      setFocused(false);
       setOpen(false);
       return;
     }
+    // The goto button only loads on Ctrl. Enter and blur still commit a typed time.
     if (via === 'icon' && !ctrl) return;
     skipBlur.current = true;
     onGoto(ms, { load: true });
+    setFocused(false);
     setOpen(false);
   };
 
-  const draftMs = value ? new Date(value).getTime() : NaN;
-  const draftPlace = bounded && Number.isFinite(draftMs)
+  const draftMs = parseEditValueMs(value);
+  const draftPlace = bounded && draftMs != null
     ? classifyGotoTarget(draftMs, oldestMs, newestMs)
     : 'unknown';
   const goOutside = draftPlace === 'older' || draftPlace === 'newer';
@@ -89,7 +118,8 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({
   const toggle = () => {
     if (open) { setOpen(false); return; }
     // Reseed to the newest telegram each time the popover opens.
-    setValue(seedMs != null ? format(new Date(seedMs), INPUT_FMT) : '');
+    setFocused(false);
+    setDraft(seedMs != null ? format(new Date(seedMs), INPUT_FMT) : '');
     const r = btnRef.current?.getBoundingClientRect();
     if (r) {
       // Sit in the middle header row: vertically centered on the clock,
@@ -143,20 +173,26 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({
             zIndex: 1000,
           }}
         >
-          <ThemedDatetimePicker
-            className="goto-time-input"
-            inputRef={inputRef}
-            value={value}
-            autoFocus
-            withSeconds
+          <DateTimeField
+            valueMs={draftMs}
+            dateDisplay="if-differs"
+            editable
+            withCentiseconds
+            editValue={value}
+            focused={focused}
             aria-label="Target time"
-            onChange={setValue}
+            placeholder="Target time"
+            editStyle={editStyle}
+            onBeginEdit={() => setFocused(true)}
+            onChange={setDraft}
             onBlur={() => {
+              setFocused(false);
               if (skipBlur.current) {
                 skipBlur.current = false;
                 return;
               }
-              submitFrom(inputRef.current?.value ?? value, 'field', false);
+              // Draft is always full date+time; the input may show time-only.
+              submitFrom(valueRef.current, 'field', false);
             }}
             onKeyDown={e => {
               if (e.key === 'Escape') {
@@ -165,26 +201,28 @@ export const GotoTimeControl: React.FC<GotoTimeControlProps> = ({
               }
               if (e.key !== 'Enter') return;
               e.preventDefault();
-              submitFrom((e.currentTarget as HTMLInputElement).value, 'field', e.ctrlKey || e.metaKey);
+              submitFrom(valueRef.current, 'field', e.ctrlKey || e.metaKey);
             }}
+            endSlot={(
+              <button
+                type="button"
+                className={`icon-button${goOutside ? ' tt-goto-outside' : ''}${goMissing ? ' tt-goto-missing' : ''}`}
+                aria-label="Go"
+                title={goMissing ? MISSING_GOTO_TITLE : goOutside ? OUTSIDE_GOTO_TITLE : 'Go'}
+                disabled={draftMs == null}
+                onMouseDown={e => e.preventDefault()}
+                onClick={e => submitFrom(valueRef.current, 'icon', e.ctrlKey || e.metaKey)}
+                style={{
+                  color: goOutside ? 'var(--warning-text)' : 'var(--text-dim)',
+                  padding: '0.15rem',
+                  flexShrink: 0,
+                  opacity: draftMs == null ? 0.45 : 1,
+                }}
+              >
+                <GotoIcon tone={goTone} readDirection={buf.readDirection} size={13} />
+              </button>
+            )}
           />
-          {goMissing ? (
-            <style>{`
-              .goto-time-popover .tt-goto-missing { opacity: 0; }
-              .goto-time-popover:hover .tt-goto-missing { opacity: 1; }
-            `}</style>
-          ) : null}
-          <button
-            className={`goto-time-go${goOutside ? ' tt-goto-outside' : ''}${goMissing ? ' tt-goto-missing' : ''}`}
-            onMouseDown={e => e.preventDefault()}
-            onClick={e => submitFrom(inputRef.current?.value ?? value, 'icon', e.ctrlKey || e.metaKey)}
-            disabled={!value}
-            aria-label="Go"
-            title={goMissing ? MISSING_GOTO_TITLE : goOutside ? OUTSIDE_GOTO_TITLE : 'Go'}
-            style={goOutside ? { color: 'var(--warning-text)' } : undefined}
-          >
-            <GotoIcon tone={goTone} readDirection={buf.readDirection} size={13} />
-          </button>
         </div>,
         document.body,
       )}

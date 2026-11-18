@@ -1,5 +1,5 @@
 import { render, fireEvent, screen, act } from '@testing-library/react';
-import { expect, test, beforeAll, afterEach } from 'vitest';
+import { expect, test, beforeAll, afterEach, vi } from 'vitest';
 import { TelegramTable, type SortConfig } from './TelegramTable';
 import { makeTelegram } from '../test/telegramFactory';
 import type { Telegram } from '../hooks/useWebSocket';
@@ -108,10 +108,8 @@ function markerSide(container: HTMLElement): 'top' | 'bottom' {
   return rowFollowsMarker ? 'top' : 'bottom';
 }
 
-const settledBottom = (port: HTMLElement) => {
-  const max = Math.max(0, port.scrollHeight - port.clientHeight);
-  return Math.max(0, max - DISPLAY_RUBBER_PX);
-};
+const settledBottom = (port: HTMLElement) =>
+  Math.max(0, port.scrollHeight - port.clientHeight);
 
 function emulateRowLayout(port: HTMLElement) {
   const original = Element.prototype.getBoundingClientRect;
@@ -155,8 +153,7 @@ test('end marker names the limit that stopped the reading end', () => {
   }
 });
 
-test('variant A spacer sizes at the reading and anchor ends, both directions', () => {
-  const readingPx = 800 - DISPLAY_ROW_PX - END_MARKER_PX + DISPLAY_RUBBER_PX;
+test('variant A keeps the rubber spacer off until a scroll overscrolls', () => {
   const { container, rerender } = render(
     <TelegramTable
       {...baseProps}
@@ -167,8 +164,8 @@ test('variant A spacer sizes at the reading and anchor ends, both directions', (
     />,
   );
   const back = portOf(container);
-  expect(back.dataset.anchorPx).toBe(String(DISPLAY_RUBBER_PX));
-  expect(back.dataset.readingPx).toBe(String(readingPx));
+  expect(back.dataset.anchorPx).toBe('0');
+  expect(back.dataset.readingPx).toBe('0');
   expect(back.dataset.anchorEdge).toBe('top');
   expect(screen.getByTestId('reading-spacer')).toBeInTheDocument();
   expect(container.querySelector('[data-testid="anchor-spacer"]')).toBeNull();
@@ -184,11 +181,47 @@ test('variant A spacer sizes at the reading and anchor ends, both directions', (
     />,
   );
   const fore = portOf(container);
-  expect(fore.dataset.anchorPx).toBe(String(DISPLAY_RUBBER_PX));
-  expect(fore.dataset.readingPx).toBe(String(readingPx));
+  expect(fore.dataset.anchorPx).toBe('0');
+  expect(fore.dataset.readingPx).toBe('0');
   expect(fore.dataset.anchorEdge).toBe('top');
-  expect(Number.parseFloat(screen.getByTestId('anchor-spacer').style.height)).toBe(DISPLAY_RUBBER_PX);
+  expect(container.querySelector('[data-testid="anchor-spacer"]')).toBeNull();
   expect(screen.getByTestId('reading-end-marker')).toHaveTextContent('end of data');
+});
+
+test('a scroll past the live edge opens the rubber spacer, then it retracts', async () => {
+  const rows = Array.from({ length: 30 }, (_, i) => at(30 - i, `r${i}`));
+  const { container } = render(
+    <TelegramTable
+      {...baseProps}
+      telegrams={rows}
+      sortConfig={desc}
+      readDirection="backward"
+      liveFollow={false}
+      listFollow={false}
+    />,
+  );
+  const port = portOf(container);
+  expect(port.dataset.anchorPx).toBe('0');
+  port.scrollTop = 0;
+
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    fireEvent.wheel(port, { deltaY: -80 });
+    expect(port.dataset.anchorPx).toBe(String(DISPLAY_RUBBER_PX));
+    expect(port.dataset.readingPx).toBe('0');
+
+    await act(async () => {
+      vi.advanceTimersByTime(90);
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+
+    expect(port.dataset.anchorPx).toBe('0');
+    expect(port.scrollTop).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test('only the gapless run from the anchor is visible, and the anchor row stays while the gap closes', () => {
@@ -292,7 +325,7 @@ test('chevron keeps the scroll position; another direction change rebuilds onto 
     />,
   );
   expect(port.scrollTop).not.toBe(200);
-  expect(port.scrollTop).toBe(DISPLAY_RUBBER_PX);
+  expect(port.scrollTop).toBe(0);
 });
 
 test('the anchor pill counts rows scrolled out toward the anchor, not the status total', () => {
@@ -339,18 +372,18 @@ test('the anchor pill counts rows scrolled out toward the anchor, not the status
   expect(screen.queryByRole('button', { name: /newer telegram/ })).not.toBeInTheDocument();
 
   // Two rows sit fully above the one-row viewport. The two below it do not count.
-  port.scrollTop = DISPLAY_RUBBER_PX + DISPLAY_ROW_PX * 2;
+  port.scrollTop = DISPLAY_ROW_PX * 2;
   fireEvent.scroll(port);
   expect(screen.getByRole('button', { name: '2 older telegrams' })).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: '4 older telegrams' })).not.toBeInTheDocument();
 
   fireEvent.click(screen.getByRole('button', { name: '2 older telegrams' }));
-  expect(port.scrollTop).toBe(DISPLAY_RUBBER_PX);
+  expect(port.scrollTop).toBe(0);
   fireEvent.scroll(port);
   expect(screen.queryByRole('button', { name: /older telegram/ })).not.toBeInTheDocument();
 });
 
-test('a non-temporal sort keeps the top row and uses half-row spacers with the pill on top', async () => {
+test('a non-temporal sort keeps the top row and the pill on top', async () => {
   scrollBlockSize = DISPLAY_ROW_PX;
   const bySource: SortConfig = [{ key: 'source_address', direction: 'asc' }];
   const first = makeTelegram({ source_address: '1.1.2', target_name: 'keep-top', raw_hex: 'keep' });
@@ -370,8 +403,8 @@ test('a non-temporal sort keeps the top row and uses half-row spacers with the p
     />,
   );
   const port = portOf(container);
-  expect(port.dataset.anchorPx).toBe(String(DISPLAY_RUBBER_PX));
-  expect(port.dataset.readingPx).toBe(String(DISPLAY_RUBBER_PX));
+  expect(port.dataset.anchorPx).toBe('0');
+  expect(port.dataset.readingPx).toBe('0');
   const pill = screen.getByRole('button', { name: '2 newer telegrams' });
   expect(pill).toHaveAttribute('data-edge', 'top');
 
@@ -444,7 +477,7 @@ test('pill, spacer and end marker follow direction together with the time sort',
     const port = portOf(container);
     expect(port.dataset.anchorEdge).toBe(c.anchor);
     expect(markerSide(container)).toBe(c.anchor === 'top' ? 'bottom' : 'top');
-    expect(port.dataset.anchorPx).toBe(String(DISPLAY_RUBBER_PX));
+    expect(port.dataset.anchorPx).toBe('0');
 
     if (c.anchor === 'top') port.scrollTop = port.scrollHeight;
     else port.scrollTop = 0;
@@ -454,15 +487,15 @@ test('pill, spacer and end marker follow direction together with the time sort',
     expect(pill).toHaveAttribute('data-edge-kind', c.word);
 
     fireEvent.click(pill);
-    const atAnchor = c.anchor === 'top' ? DISPLAY_RUBBER_PX : settledBottom(port);
+    const atAnchor = c.anchor === 'top' ? 0 : settledBottom(port);
     expect(port.scrollTop).toBe(atAnchor);
     unmount();
   }
 });
 
-test('forward desc paints the reading-end rows directly under the big spacer', () => {
-  // Taller than the overscan window, so a missing scrollMargin leaves a hole
-  // between the spacer and the first painted row.
+test('forward desc paints the reading-end rows directly under the spacer', () => {
+  // Tall viewport: a missing scrollMargin leaves a hole between the spacer
+  // and the first painted row.
   scrollBlockSize = 2000;
   const rows = Array.from({ length: 40 }, (_, i) => at(i, `r${i}`));
   const { container } = render(
@@ -479,8 +512,8 @@ test('forward desc paints the reading-end rows directly under the big spacer', (
   const restore = emulateRowLayout(port);
   try {
     const spacerH = Number.parseFloat(screen.getByTestId('reading-spacer').style.height);
-    expect(spacerH).toBeGreaterThan(DISPLAY_ROW_PX * 12);
-    port.scrollTop = spacerH - 100;
+    expect(spacerH).toBe(END_MARKER_PX);
+    port.scrollTop = 0;
     fireEvent.scroll(port);
     const newest = container.querySelector('[data-index="0"]') as HTMLElement | null;
     expect(newest).not.toBeNull();
@@ -509,7 +542,7 @@ test('live follow backward stays on the newest row for both time sorts', () => {
   );
   const port = portOf(container);
   const first = () => container.querySelector('.log-row')?.textContent ?? '';
-  expect(port.scrollTop).toBe(DISPLAY_RUBBER_PX);
+  expect(port.scrollTop).toBe(0);
   expect(first()).toContain('newest');
 
   rerender(
@@ -522,7 +555,7 @@ test('live follow backward stays on the newest row for both time sorts', () => {
       listFollow
     />,
   );
-  expect(port.scrollTop).toBe(DISPLAY_RUBBER_PX);
+  expect(port.scrollTop).toBe(0);
   expect(first()).toContain('arrived');
   unmount();
 

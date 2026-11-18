@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useEffect, useLayoutEffect, useState, useCallback, type ReactNode } from 'react';
+import { flushSync } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Telegram } from '../hooks/useWebSocket';
 import { ChevronUp, ChevronDown, Filter, LineChart, X, Clock, Plus, Minus, Download, List, Search } from 'lucide-react';
@@ -1569,16 +1570,34 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const readingEdge: 'top' | 'bottom' = anchorEdge === 'top' ? 'bottom' : 'top';
   const [viewportHeight, setViewportHeight] = useState(0);
 
-  // Fill-axis rubber (½ row) as virtualizer padding — pause backlog stays in the
-  // newer-pill only, not in scrollHeight / thumb. In display mode the anchor
-  // end keeps that half row (the backward pause slot, when the anchor is the
-  // newer edge). The reading end is a separate block.
+  // Half-row rubber exists only while a scroll gesture is overscrolling that
+  // side. At rest the table sits on telegrams. A pause backlog or a manual
+  // hold still keeps the fill slot; that slot is not scroll rubber. The
+  // reading end keeps its end marker either way. Legacy live-edge geometry
+  // (no read direction) keeps the resting half-row so overscroll has a range.
+  const pauseSlotPx =
+    ((isPaused && !isManualPause && pausedCount > 0 && !!onPauseReveal)
+      || (isManualPause && visiblePausedCount > 0))
+      ? FILL_RUBBER_PX
+      : 0;
+  const [scrollRubber, setScrollRubber] = useState<null | 'fill' | 'opposite'>(null);
+  const scrollRubberRef = useRef<null | 'fill' | 'opposite'>(null);
+  scrollRubberRef.current = scrollRubber;
+  const pauseSlotRef = useRef(0);
+  pauseSlotRef.current = pauseSlotPx;
+  const rubberPxRef = useRef({ fill: 0, opposite: 0 });
+  const readingIsLiveEdge = displayEdges && anchorEdge !== liveEdge;
+  const fillAmount = !displayEdges
+    ? (telegramRows.length > 0 ? FILL_RUBBER_PX : 0)
+    : Math.max(pauseSlotPx, scrollRubber === 'fill' ? FILL_RUBBER_PX : 0);
+  const oppositeAmount = !displayEdges
+    ? (telegramRows.length > 0 ? FILL_RUBBER_PX : 0)
+    : (scrollRubber === 'opposite' ? FILL_RUBBER_PX : 0);
   const displayPlan = displayEdges
     ? spacerVariantA({
-      viewportPx: viewportHeight,
-      rowPx: ROW_ESTIMATE,
       markerPx: END_MARKER_PX,
-      rubberPx: FILL_RUBBER_PX,
+      anchorRubberPx: readingIsLiveEdge ? oppositeAmount : fillAmount,
+      readingRubberPx: readingIsLiveEdge ? fillAmount : oppositeAmount,
       temporal: isTimeSort,
       hasRows: telegramRows.length > 0,
     })
@@ -1587,13 +1606,14 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const readingBlockPx = displayPlan ? displayPlan.markerPx + displayPlan.readingPx : 0;
   const liveFillRubberPx = displayPlan
     ? (readingIsLive ? displayPlan.readingRubberPx : displayPlan.anchorRubberPx)
-    : (telegramRows.length > 0 ? FILL_RUBBER_PX : 0);
+    : fillAmount;
   const liveFillPadPx = displayPlan
     ? (readingIsLive ? 0 : displayPlan.anchorRubberPx)
     : liveFillRubberPx;
 
-  // Opposite-edge spacer (DOM sibling): settle pad when the list is shorter than
-  // the viewport (keep ≥1 full row) + ½-row rubber overscroll.
+  // Opposite-edge spacer (DOM sibling): when the list is shorter than the
+  // viewport, only the unfilled remainder, plus a ½-row rubber overscroll.
+  // A longer list keeps the rubber alone, so the viewport stays full of rows.
   useLayoutEffect(() => {
     const el = parentRef.current;
     if (!el) return;
@@ -1654,14 +1674,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const oppositeSettlePadPx = displayPlan
     ? 0
     : viewportHeight > 0 && contentWithFill < viewportHeight
-      ? Math.max(0, viewportHeight - ROW_ESTIMATE)
+      ? Math.max(0, viewportHeight - contentWithFill)
       : 0;
   const oppositeRubberPx = displayPlan
     ? (readingIsLive ? displayPlan.anchorRubberPx : displayPlan.readingRubberPx)
     : (telegramRows.length > 0 ? FILL_RUBBER_PX : 0);
+  rubberPxRef.current = { fill: fillRubberPx, opposite: oppositeRubberPx };
   // Legacy: settle pad + rubber on the side opposite the newer edge.
-  // Display mode: that side is the reading block (marker + travel + rubber)
-  // when the anchor sits on the newer edge, otherwise just the anchor rubber.
+  // Display mode: that side is the anchor rubber, or the reading block
+  // (marker + rubber) when the anchor sits on the newer edge.
   const liveOppositeSpacerPx = displayPlan
     ? (readingIsLive ? displayPlan.anchorPx : readingBlockPx)
     : oppositeSettlePadPx + oppositeRubberPx;
@@ -1757,6 +1778,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   const keyScrollDeltaRef = useRef<(key: string) => number>(() => 0);
   const scheduleRubberBandRef = useRef(() => {});
   const unlockScrollGeometryIfSettledRef = useRef(() => {});
+  const releaseScrollRubberRef = useRef(() => {});
   const inFillRubberZoneRef = useRef<() => boolean>(() => false);
   const inOppositeRubberZoneRef = useRef<() => boolean>(() => false);
   // Thumb drag state: only the last pointer Y. Each move becomes an incremental
@@ -1775,6 +1797,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         scheduleRubberBandRef.current();
       } else {
         unlockScrollGeometryIfSettledRef.current();
+        releaseScrollRubberRef.current();
       }
       syncOverlayScrollbarRef.current();
     };
@@ -1927,24 +1950,64 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     return rr.bottom > cr.top && rr.top < cr.bottom;
   };
 
+  /**
+   * Scroll range that shows rows. Rubber insets apply only while that side's
+   * spacer is open (a scroll overscroll, or the pause fill slot).
+   */
+  const contentScrollRange = (el: HTMLElement) => {
+    const max = Math.max(0, el.scrollHeight - el.clientHeight);
+    const fill = rubberPxRef.current.fill;
+    const opposite = rubberPxRef.current.opposite;
+    const fillAtStart = liveEdge === 'top';
+    const lo = Math.min(max, fillAtStart ? fill : opposite);
+    const hi = Math.max(lo, max - (fillAtStart ? opposite : fill));
+    return { max, lo, hi };
+  };
+
   /** Settled live-edge scrollTop (edge telegram flush; not into the fill rubber). */
   const settledEdgeScrollTop = () => {
     const el = parentRef.current;
-    if (!el) return fillRubberPx;
-    if (liveEdge === 'top') return fillRubberPx;
+    const fill = rubberPxRef.current.fill;
+    if (!el) return fill;
+    if (liveEdge === 'top') return fill;
     const max = Math.max(0, el.scrollHeight - el.clientHeight);
-    return Math.max(0, max - fillRubberPx);
+    return Math.max(0, max - fill);
   };
 
-  /** Settled opposite-edge scrollTop (not into the opposite rubber overscroll). */
+  /**
+   * Settled opposite-edge scrollTop (not into the opposite rubber).
+   * Independent of the fill inset: on a short list the two rubbers overlap,
+   * and this edge can sit at 0 while the fill edge sits at the fill rubber.
+   */
   const settledOppositeScrollTop = () => {
     const el = parentRef.current;
+    const opposite = rubberPxRef.current.opposite;
     if (!el) return 0;
-    // Opposite spacer sits away from the live edge: bottom for newest-on-top,
-    // top for oldest-on-top.
-    if (liveEdge === 'bottom') return oppositeRubberPx;
+    if (liveEdge === 'bottom') return opposite;
     const max = Math.max(0, el.scrollHeight - el.clientHeight);
-    return Math.max(0, max - oppositeRubberPx);
+    return Math.max(0, max - opposite);
+  };
+
+  /**
+   * Drop a scroll-only rubber spacer and keep the same telegrams on screen.
+   * A leading spacer shifts the scroll origin; an end spacer does not.
+   */
+  const releaseScrollRubber = () => {
+    if (!displayEdges || scrollRubberRef.current == null) return;
+    const el = parentRef.current;
+    const side = scrollRubberRef.current;
+    const padBefore = side === 'fill' ? liveEdge === 'top' : liveEdge === 'bottom';
+    const nextTop = el
+      ? (padBefore ? Math.max(0, el.scrollTop - FILL_RUBBER_PX) : el.scrollTop)
+      : 0;
+    scrollRubberRef.current = null;
+    flushSync(() => {
+      setScrollRubber(null);
+      setFrozenGeom(null);
+    });
+    if (!el) return;
+    markProgrammatic();
+    el.scrollTop = nextTop;
   };
 
   /** True while overscrolled into the fill-axis rubber zone (outer fillRubber only). */
@@ -1985,10 +2048,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
    * fill spacer on screen.
    */
   const pinScrollBounds = (el: HTMLElement, action: boolean) => {
-    const max = Math.max(0, el.scrollHeight - el.clientHeight);
+    const { max, lo, hi } = contentScrollRange(el);
     const fillAtStart = liveEdge === 'top';
-    const lo = Math.min(max, fillAtStart ? fillRubberPx : oppositeRubberPx);
-    const hi = Math.max(lo, max - (fillAtStart ? oppositeRubberPx : fillRubberPx));
     const keepRaw = (inZone: boolean, fillSide: boolean) =>
       inZone && (!action || (fillSide && manualHoldActive()));
     return {
@@ -2131,6 +2192,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         rubberBandRafRef.current = null;
       }
       unlockScrollGeometryIfSettled();
+      releaseScrollRubber();
       onDone?.();
     };
     lockScrollGeometry();
@@ -2193,7 +2255,10 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
     if (inOppositeRubberZone()) {
       startRubberBandTo(settledOppositeScrollTop(), 'opposite');
+      return;
     }
+    // The gesture left the spacer before the retract ran. Drop it.
+    releaseScrollRubber();
   };
 
   const scheduleRubberBand = () => {
@@ -2219,6 +2284,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visiblePausedCount]);
   unlockScrollGeometryIfSettledRef.current = unlockScrollGeometryIfSettled;
+  releaseScrollRubberRef.current = releaseScrollRubber;
   inFillRubberZoneRef.current = inFillRubberBand;
   inOppositeRubberZoneRef.current = inOppositeRubberZone;
 
@@ -2465,6 +2531,37 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
   syncOverlayScrollbarRef.current = syncOverlayScrollbar;
 
   /**
+   * Open the half-row spacer when this gesture would cross a content edge.
+   * Runs before the scroll is applied, so the new range can absorb it.
+   * Display mode only — legacy geometry already reserves the rubber.
+   */
+  const armScrollRubber = (deltaY: number) => {
+    if (!displayEdges || deltaY === 0) return;
+    const el = parentRef.current;
+    if (!el || telegramRowsRef.current.length === 0) return;
+    const max = Math.max(0, el.scrollHeight - el.clientHeight);
+    const fill = rubberPxRef.current.fill;
+    const opposite = rubberPxRef.current.opposite;
+    const towardFill = liveEdge === 'top' ? deltaY < 0 : deltaY > 0;
+    const settled = towardFill
+      ? (liveEdge === 'top' ? fill : Math.max(0, max - fill))
+      : (liveEdge === 'bottom' ? opposite : Math.max(0, max - opposite));
+    const next = el.scrollTop + deltaY;
+    const into = towardFill
+      ? (liveEdge === 'top' ? next < settled - 0.5 : next > settled + 0.5)
+      : (liveEdge === 'bottom' ? next < settled - 0.5 : next > settled + 0.5);
+    if (!into) return;
+    const side = towardFill ? 'fill' as const : 'opposite' as const;
+    if (scrollRubberRef.current === side) return;
+    if (side === 'fill' && pauseSlotRef.current > 0) return;
+    scrollRubberRef.current = side;
+    flushSync(() => {
+      setFrozenGeom(null);
+      setScrollRubber(side);
+    });
+  };
+
+  /**
    * One user scroll gesture of `deltaY` px along the scroll axis — the single
    * entry for wheel and scrollbar-thumb drag. Runs BEFORE the actual scroll
    * (native for wheel, explicit for thumb) so the pause-buffer step arms its
@@ -2472,6 +2569,7 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
    */
   const handleScrollGesture = (deltaY: number, opts?: { pulseOnce?: boolean }) => {
     noteUserScroll();
+    armScrollRubber(deltaY);
     if (wheelTowardNewer(deltaY)) {
       engageLiveTowardNewer(deltaY);
       // Hard-stop overscroll: scrollTop may not change, so remount to
@@ -2487,12 +2585,15 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     }
     // While a backlog step is pending the geometry must stay live.
     if (flushPinRef.current) return;
-    if (inOppositeRubberZone() || inFillRubberBand()) {
+    // Refs: armScrollRubber may have flushed a new rubber size into them.
+    const inFill = inFillRubberZoneRef.current();
+    const inOpposite = inOppositeRubberZoneRef.current();
+    if (inOpposite || inFill) {
       lockScrollGeometry();
     } else {
-      unlockScrollGeometryIfSettled();
+      unlockScrollGeometryIfSettledRef.current();
     }
-    if (inFillRubberBand() || inOppositeRubberZone()) scheduleRubberBand();
+    if (inFill || inOpposite) scheduleRubberBandRef.current();
   };
 
   const handleScrollGestureRef = useRef(handleScrollGesture);
@@ -3056,24 +3157,30 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     });
   };
 
-  const scrollToEdge = () => {
+  /**
+   * Programmatic scroll onto a content edge. Drops a scroll rubber first so
+   * the landing is not inside a spacer. `live` is the newer edge; `anchor`
+   * is that edge, or the opposite one when the anchor sits there.
+   */
+  const scrollToContentEdge = (which: 'live' | 'anchor') => {
     cancelRubberBand();
-    markProgrammatic();
+    releaseScrollRubber();
     const el = parentRef.current;
     if (!el) return;
-    // Settled edge: edge telegram flush with the viewport — not into fill rubber.
-    el.scrollTop = settledEdgeScrollTop();
+    const top = which === 'anchor' && anchorEdge !== liveEdge
+      ? settledOppositeScrollTop()
+      : settledEdgeScrollTop();
+    markProgrammatic();
+    el.scrollTop = top;
   };
 
-  /** Settled anchor end: the anchor row flush, not into its half-row rubber. */
+  const scrollToEdge = () => {
+    scrollToContentEdge('live');
+  };
+
+  /** Settled anchor end: the anchor row flush, not into a scroll spacer. */
   const scrollToAnchor = () => {
-    cancelRubberBand();
-    markProgrammatic();
-    const el = parentRef.current;
-    if (!el) return;
-    const rubber = displayPlan?.anchorRubberPx ?? 0;
-    if (anchorEdge === 'top') el.scrollTop = rubber;
-    else el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - rubber);
+    scrollToContentEdge('anchor');
     atEdgeRef.current = false;
     detachedFromEdgeRef.current = true;
   };
@@ -3109,25 +3216,44 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
 
   // Scrolls to a specific row by index. A goto that lands inside the buffer
   // only scrolls (`preserveFollow`): direction, anchor and pause stay.
-  // Info-bar and mark jumps still leave live-follow.
+  // Info-bar and mark jumps still leave live-follow. The scroll spacer is not
+  // part of this jump — it exists only while the user is scrolling.
   const gotoIndex = (idx: number, opts?: { preserveFollow?: boolean }) => {
     if (idx < 0 || idx >= telegramRows.length) return;
-    atEdgeRef.current = false;
-    if (!opts?.preserveFollow) {
+    const preserveFollow = !!opts?.preserveFollow;
+    if (!preserveFollow) {
       detachedFromEdgeRef.current = true;
       setFollowingLive(false);
       onListFollowChange?.(false);
     }
-    // The old anchor is about to leave the rendered window on purpose.
     anchorRef.current = null;
+    cancelRubberBand();
+    releaseScrollRubber();
+    const settleInContent = () => {
+      const el = parentRef.current;
+      if (!el) return;
+      if (manualHoldActive() && inFillRubberZone()) return;
+      const { lo, hi } = contentScrollRange(el);
+      const next = Math.min(hi, Math.max(lo, el.scrollTop));
+      if (Math.abs(next - el.scrollTop) > 0.5) {
+        markProgrammatic();
+        el.scrollTop = next;
+      }
+      const onEdge = Math.abs(el.scrollTop - settledEdgeScrollTop()) <= 0.5;
+      atEdgeRef.current = preserveFollow && onEdge;
+      if (preserveFollow && onEdge) detachedFromEdgeRef.current = false;
+    };
     markProgrammatic();
     virtualizer.scrollToIndex(idx, { align: 'center' });
-    // Pin the row we land on once the virtualizer has settled the scroll (rows
-    // are dynamically measured, so give it two frames before capturing).
+    settleInContent();
+    // Rows are dynamically measured, so give the virtualizer two frames
+    // before the landing is captured. The clamp keeps a centered edge row
+    // out of a legacy rubber inset.
     requestAnimationFrame(() => requestAnimationFrame(() => {
+      settleInContent();
       captureAnchor();
-      atEdgeRef.current = false;
-      if (!opts?.preserveFollow) {
+      if (!preserveFollow) {
+        atEdgeRef.current = false;
         detachedFromEdgeRef.current = true;
         setFollowingLive(false);
         onListFollowChange?.(false);
@@ -3609,23 +3735,27 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
     if (directionGesture === 'chevron') return;
     const el = parentRef.current;
     if (!el) return;
-    cancelRubberBand();
-    markProgrammatic();
-    const rubber = displayPlan?.anchorRubberPx ?? 0;
-    if (anchorEdge === 'top') el.scrollTop = rubber;
-    else el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - rubber);
+    scrollToContentEdge('anchor');
     // displayPlan/anchorEdge belong to the direction that just changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [readDirection, directionGesture, displayEdges]);
 
-  // The reading spacer is sized from the viewport, which is 0 on the first
-  // render. A backward ascending follow (newest at the bottom) would otherwise
-  // settle before that spacer exists and stay on the older rows. Re-seat while
-  // still following once the edge geometry is known. A flush or a rubber band
-  // owns the scroll until it finishes.
+  // Settled follow depends on the measured viewport. A backward ascending
+  // follow (newest at the bottom) would otherwise settle while clientHeight is
+  // still 0 and stay on the older rows. Re-seat while still following once the
+  // edge geometry is known. A later spacer change (a short list growing) must
+  // not pull the viewport out of a rubber hold. A flush or a rubber band owns
+  // the scroll until it finishes.
+  const seatedForViewportRef = useRef<number | null>(null);
   useLayoutEffect(() => {
     if (!liveFollow || !isTimeSort || !atEdgeRef.current) return;
     if (rubberAnimRef.current || flushPinRef.current) return;
+    // A scroll gesture owns the spacer it just opened. Re-seating here would
+    // drop that rubber before the overscroll lands.
+    if (userScrolling() || scrollRubberRef.current) return;
+    const viewportKnown = seatedForViewportRef.current === viewportHeight;
+    seatedForViewportRef.current = viewportHeight;
+    if (viewportKnown && (inFillRubberZone() || inOppositeRubberZone())) return;
     scrollToEdge();
     // scrollToEdge reads the latest spacer sizes; the deps are that geometry.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3855,8 +3985,8 @@ export const TelegramTable: React.FC<TelegramTableProps> = ({
         return;
       }
     }
-    // Non-time sort: keep the topmost row still. Half-row spacers sit at both
-    // ends (variant A) and nothing follows the live edge.
+    // Non-time sort: keep the topmost row still. Resting spacers are clear
+    // and nothing follows the live edge.
     if (displayEdges && !isTimeSort) {
       const hold = fixedTopRef.current;
       const listGrew = prev.len > 0 && (rows.length !== prev.len || firstKey !== prev.firstKey);
@@ -6145,50 +6275,12 @@ style.textContent = `
   .goto-time-popover {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
-    padding: 0.4rem;
+    padding: 0.35rem 0.65rem;
     /* Opaque — --bg-panel is glassy/translucent and lets the list show through. */
     background: var(--bg-dark);
     border: 1px solid var(--border-color);
     border-radius: 8px;
     box-shadow: var(--shadow-lg);
-  }
-
-  .goto-time-input {
-    background: var(--bg-tag);
-    border: 1px solid var(--border-color);
-    border-radius: 5px;
-    padding: 0.25rem 0.45rem;
-    color: var(--text-main);
-    font-size: 0.75rem;
-    font-family: var(--font-mono, monospace);
-    outline: none;
-    transition: border-color 0.15s;
-  }
-
-  .goto-time-input:focus {
-    border-color: var(--accent-primary);
-  }
-
-  .goto-time-go {
-    background: var(--accent-primary);
-    border: none;
-    border-radius: 5px;
-    padding: 0.3rem 0.7rem;
-    color: white;
-    font-size: 0.72rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: filter 0.15s;
-  }
-
-  .goto-time-go:hover:not(:disabled) {
-    filter: brightness(1.08);
-  }
-
-  .goto-time-go:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 
   /* Column reordering: the dragged header dims, and a bar on the hovered

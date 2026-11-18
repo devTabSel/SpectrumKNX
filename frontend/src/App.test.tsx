@@ -819,7 +819,7 @@ test('fast-forward while playing stays live', async () => {
   expect(cacheCtl.loadRangeCalls).toContainEqual([DB_NEWEST_MS - 60 * 60_000, DB_NEWEST_MS]);
 });
 
-test('fast-forward during manual pause keeps the pause on the newest telegram', async () => {
+test('fast-forward during manual pause switches to auto, anchors and scrolls to the newest, and follows', async () => {
   stubDatabaseInfo();
   render(<App />);
   fireEvent.click(await screen.findByRole('button', { name: 'Playing' }));
@@ -828,11 +828,11 @@ test('fast-forward during manual pause keeps the pause on the newest telegram', 
     expect(readMonitorViewPref()).toMatchObject({
       direction: 'backward',
       anchorTs: DB_NEWEST_MS,
-      follow: false,
-      pauseMode: 'manual',
+      follow: true,
+      pauseMode: 'auto',
     });
   });
-  expect(screen.getByRole('button', { name: 'Paused manually' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Paused automatically' })).toBeInTheDocument();
 });
 
 test('fast-forward from auto-pause turns live and follow on', async () => {

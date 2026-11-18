@@ -6,7 +6,7 @@ import {
   isTextDptMain,
   parseDptKey,
 } from './knxSend';
-import { dptUnit } from './dpt';
+import { dptUnit, valueUnit } from './dpt';
 
 const RAW_OPTION_KEYS = new Set(RAW_DPT_OPTIONS.map(o => o.key));
 
@@ -116,9 +116,10 @@ export function enrichTelegramValueDisplay(
     && !Array.isArray(withHex.value_json)
     && (withHex.value_numeric != null || (withHex.value_formatted ?? '').trim())
   ) {
-    const unit = (withHex.unit ?? '').trim() || dptUnit(key);
+    const rawUnit = (withHex.unit ?? '').trim();
+    const unit = valueUnit(rawUnit) || dptUnit(key);
     return {
-      value: unit && !(withHex.unit ?? '').trim() ? { ...withHex, unit } : withHex,
+      value: unit === rawUnit ? withHex : { ...withHex, unit: unit || null },
       dptKey: key,
       allowDecoded: true,
     };
@@ -144,7 +145,7 @@ export function enrichTelegramValueDisplay(
     const n = decodeNumericWithDpt(bytes, key);
     if (n != null) {
       const text = formatDecodedNumber(n);
-      const unit = (withHex.unit ?? '').trim() || dptUnit(key);
+      const unit = valueUnit(withHex.unit) || dptUnit(key);
       return {
         value: {
           ...withHex,

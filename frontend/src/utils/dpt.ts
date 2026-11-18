@@ -187,5 +187,22 @@ export function dptDescriptionLabel(
 export function dptUnit(key: string, label?: string | null): string {
   const name = dptDesignation(key, label);
   const match = name.match(/\(([^)]+)\)\s*$/);
-  return match ? match[1] : '';
+  return match ? valueUnit(match[1]) : '';
+}
+
+/**
+ * Unit suffix for a decoded value. Empty when there is none.
+ * A charset or width note in the same slot (Latin-1, ASCII, 2-byte) is the
+ * DPT, not a unit, and is left off.
+ */
+export function valueUnit(unit: string | null | undefined): string {
+  const text = (unit ?? '').trim();
+  if (!text || isDptNote(text)) return '';
+  return text;
+}
+
+function isDptNote(text: string): boolean {
+  if (/^(ascii|latin-?1|utf-?8)$/i.test(text)) return true;
+  if (/\bbyte\b/i.test(text)) return true;
+  return false;
 }

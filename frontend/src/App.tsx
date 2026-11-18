@@ -2138,7 +2138,9 @@ function App() {
                         onLoadFromDbNewest={() => {
                           // Capture before the awaits: changeReadDirection may park a
                           // forward view on auto, and that must not hide what FF was
-                          // asked to do. Only FF turns live on from a non-live state.
+                          // asked to do. Manual becomes auto, anchored and scrolled
+                          // to the newest telegram, with live follow on. Every other
+                          // mode turns live on.
                           const priorPause = pauseMode;
                           void (async () => {
                             try {
@@ -2155,23 +2157,31 @@ function App() {
                               });
                               setActivePanel('list');
                               if (priorPause === 'manual') {
-                                // Stay paused on the newest telegram. No follow.
+                                // Manual latch becomes auto. The anchor and the
+                                // viewport land on the newest telegram, and live
+                                // follow stays on. preserveFollow keeps the goto
+                                // from turning follow back off.
                                 setMonitorView(v => ({
                                   ...v,
                                   direction: 'backward',
                                   anchorTs: ms,
-                                  follow: false,
-                                  pauseMode: 'manual',
+                                  follow: true,
+                                  pauseMode: 'auto',
                                 }));
                                 setBufferAnchor({ direction: 'backward', ts: ms });
                                 applyCachePause(true);
                                 listGotoSeq.current += 1;
-                                setListGoto({ id: listGotoSeq.current, targetMs: ms });
+                                setListGoto({
+                                  id: listGotoSeq.current,
+                                  targetMs: ms,
+                                  preserveFollow: true,
+                                  allowFill: false,
+                                });
                               } else {
                                 // Auto, off, or already playing: live edge, follow on.
                                 // Playing simply continues; auto and off enter live here.
-                                // No list-goto: that jump unfollows and pins the anchor
-                                // again, which would leave live. Follow sits on the edge.
+                                // Scroll to that telegram without leaving follow: a plain
+                                // list-goto would unfollow and pin the anchor again.
                                 setMonitorView(v => ({
                                   ...v,
                                   direction: 'backward',
@@ -2181,6 +2191,13 @@ function App() {
                                 }));
                                 setBufferAnchor({ direction: 'backward', ts: null });
                                 applyCachePause(false);
+                                listGotoSeq.current += 1;
+                                setListGoto({
+                                  id: listGotoSeq.current,
+                                  targetMs: ms,
+                                  preserveFollow: true,
+                                  allowFill: false,
+                                });
                               }
                             } catch {
                               // spinner / loadError cover failures

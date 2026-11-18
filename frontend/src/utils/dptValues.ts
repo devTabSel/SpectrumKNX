@@ -6,6 +6,7 @@
  */
 
 import { isTextDptMain, textDptCharWidth } from './knxSend';
+import { valueUnit } from './dpt';
 
 export type BusPayload =
   | boolean
@@ -463,6 +464,6 @@ export function formatBusValueForDpt(
     const width = textDptCharWidth(parsed?.main);
     if (width != null) text = text.padEnd(width, ' ').slice(0, width);
   }
-  const unit = text === '—' ? '' : (value.unit ?? '').trim();
+  const unit = text === '—' ? '' : valueUnit(value.unit);
   return { text, unit };
 }

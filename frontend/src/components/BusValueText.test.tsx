@@ -84,6 +84,26 @@ test('className / rawClassName overrides replace defaults', () => {
   expect(el.querySelector(`.${TT.rawBadge}`)).toBeNull();
 });
 
+test('hex mode stripes each byte', () => {
+  render(
+    <BusValueText
+      value={{ value_formatted: '21.5', value_numeric: 21.5, raw_hex: '0x0C65' }}
+      dpt="9.001"
+    />,
+  );
+  const el = screen.getByRole('button', { name: '21.5' });
+  fireEvent.click(el);
+  const bytes = el.querySelectorAll('.tt-hex-byte');
+  expect(bytes).toHaveLength(2);
+  expect(bytes[0]).toHaveTextContent('0C');
+  expect(bytes[0].classList.contains('tt-hex-byte-alt')).toBe(true);
+  expect(bytes[1]).toHaveTextContent('65');
+  expect(bytes[1].classList.contains('tt-hex-byte-alt')).toBe(false);
+  const hexLayer = el.querySelector(`.${TT.rawBadge}`);
+  expect(hexLayer?.textContent).toBe('0x0C65');
+  expect(hexLayer?.querySelector('.tt-radix-prefix')).toBeNull();
+});
+
 test('defaultShowHex starts in hex mode and cycles onward', () => {
   render(
     <BusValueText

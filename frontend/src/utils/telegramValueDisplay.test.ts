@@ -117,6 +117,20 @@ describe('payloadFitsDpt / enrichTelegramValueDisplay', () => {
       '16.001',
     );
     expect(dpt16.value.value_formatted).toBe('Ä'.padEnd(14, ' '));
+    expect(dpt16.value.unit).toBeNull();
+    expect(
+      buildValueDisplayModes(dpt16.value, '16.001', { allowDecoded: true })
+        .find(m => m.mode === 'decoded')?.unit,
+    ).toBeUndefined();
+
+    const noted = enrichTelegramValueDisplay(
+      { value_formatted: 'Hallo', value_numeric: null, unit: 'latin-1' },
+      '16.001',
+    );
+    expect(noted.value.unit).toBeNull();
+    expect(
+      buildValueDisplayModes(noted.value, '16.001').find(m => m.mode === 'decoded')?.unit,
+    ).toBeUndefined();
 
     const utf8 = Array.from(new TextEncoder().encode('Café'));
     const dpt28 = enrichTelegramValueDisplay(

@@ -335,7 +335,7 @@ function HistoryReadTable({
 
 const READ_QUICK: QuickPatterns = { type: { top: 'Read', bottom: '' } };
 
-test('an active side panel paints a vertical bar and leaves the quick-filter edge alone', () => {
+test('an active side panel paints a vertical bar the full height of the table', () => {
   const { container, rerender } = renderTable([historyRead]);
   expect(container.querySelector('[data-sp-active="false"]')).toBeInTheDocument();
   rerender(
@@ -353,12 +353,12 @@ test('an active side panel paints a vertical bar and leaves the quick-filter edg
   const marked = container.querySelector('[data-sp-active="true"]');
   expect(marked).toBeInTheDocument();
   expect(marked).toHaveClass('tt-sp-active');
-  const body = marked!.querySelector('[data-tt-body]');
-  const spBar = body!.querySelector('[data-tt-sp-bar]') as HTMLElement;
-  expect(body).toBeInTheDocument();
-  expect(spBar).toBeInTheDocument();
+  const spBar = marked!.querySelector('[data-tt-sp-bar]') as HTMLElement;
+  expect(spBar.parentElement).toBe(marked);
+  expect(spBar.style.top).toBe('0px');
   expect(spBar.style.bottom).toBe('0px');
   expect(marked!.querySelector('[data-tt-chrome] [data-tt-sp-bar]')).toBeNull();
+  expect(marked!.querySelector('[data-tt-body] [data-tt-sp-bar]')).toBeNull();
   expect((marked as HTMLElement).style.boxShadow).toBe('');
 });
 
@@ -377,7 +377,8 @@ test('the side-panel bar grows through the quick filter when it is open', () => 
     />,
   );
   const root = container.querySelector('[data-telegram-table]')!;
-  expect(root.querySelector('[data-tt-body] [data-tt-sp-bar]')).toBeInTheDocument();
+  const bar = root.querySelector('[data-tt-sp-bar]');
+  expect(bar?.parentElement).toBe(root);
   expect(root.querySelector('[data-tt-chrome] .quick-filter-bar')).toBeInTheDocument();
 });
 
@@ -2271,7 +2272,7 @@ test('dragging a column header onto another reorders header and rows, and is rem
   localStorage.removeItem('spectrum-knx.columnOrder');
 });
 
-test('short list N>1 gets spacer travel so the live edge can be left', () => {
+test('short list spacer is only the unfilled remainder, so every row stays on screen', () => {
   scrollBlockSize = 800;
   try {
     const { container } = render(
@@ -2286,18 +2287,8 @@ test('short list N>1 gets spacer travel so the live edge can be left', () => {
       />,
     );
     const port = container.querySelector('.custom-scrollbar') as HTMLElement;
-    // Settle pad keeps ≥1 row; opposite rubber adds another LIVE_EDGE_TOP overscroll.
-    const rowsHeight = 3 * 85;
-    expect(port.scrollHeight).toBeGreaterThan(port.clientHeight);
-    expect(port.scrollHeight - port.clientHeight).toBe(
-      LIVE_EDGE_TOP + rowsHeight - 85 + LIVE_EDGE_TOP,
-    );
-    // Settled travel away from the live edge (excluding opposite rubber).
-    expect(port.scrollHeight - port.clientHeight - 2 * LIVE_EDGE_TOP).toBe(rowsHeight - 85);
-
-    port.scrollTop = LIVE_EDGE_TOP + 85;
-    fireEvent.scroll(port);
-    expect(port.scrollTop).toBe(LIVE_EDGE_TOP + 85);
+    // Remainder fills the viewport; the only scroll past that is the opposite rubber.
+    expect(port.scrollHeight - port.clientHeight).toBe(LIVE_EDGE_TOP);
   } finally {
     scrollBlockSize = 800;
   }
@@ -2532,7 +2523,7 @@ test('short list: stepwise along-fill scroll does not re-follow until at live ed
   try {
     const { container, rerender } = render(
       <TelegramTable
-        telegrams={makeList(4, 3)}
+        telegrams={makeList(16, 15)}
         visibleColumns={visibleColumns}
         sortConfig={sortConfig}
         onSort={vi.fn()}
@@ -2549,7 +2540,7 @@ test('short list: stepwise along-fill scroll does not re-follow until at live ed
 
     rerender(
       <TelegramTable
-        telegrams={makeList(4, 3)}
+        telegrams={makeList(16, 15)}
         visibleColumns={visibleColumns}
         sortConfig={sortConfig}
         onSort={vi.fn()}
@@ -2564,7 +2555,7 @@ test('short list: stepwise along-fill scroll does not re-follow until at live ed
     const maxAway = port.scrollHeight - port.clientHeight - LIVE_EDGE_TOP;
     expect(maxAway).toBeGreaterThanOrEqual(85);
 
-    // Leave the settled live edge using against-fill travel into the spacer.
+    // Leave the settled live edge. The viewport stays full of other rows.
     port.scrollTop = LIVE_EDGE_TOP + 85;
     fireEvent.scroll(port);
     port.scrollTop = LIVE_EDGE_TOP + maxAway;
@@ -2851,7 +2842,10 @@ test('live prepend during opposite rubber keeps spacer and finishes at opposite 
       const spacerAfter = oppositeSpacerEl(port);
       expect(Number.parseFloat(spacerAfter!.style.height)).toBe(spacerHeightBefore);
       expect(Math.abs(port.scrollTop - mid)).toBeLessThan(2);
-      expect(port.scrollTop).not.toBe(LIVE_EDGE_TOP);
+      // A short list's only travel is the rubber, so this overscroll sits on
+      // the same coordinate as the settled live edge. It must not jump to the
+      // opposite settle before the animation finishes.
+      expect(port.scrollTop).toBeGreaterThan(settledOpposite);
 
       await act(async () => {
         vi.advanceTimersByTime(180);
@@ -4012,7 +4006,8 @@ test('after the slot fill, a wheel that would run into the fill slot continues t
   const h = meteredHandlers();
   try {
     // Edge row sits one row in (the slot row above it), still a backlog.
-    const { container, rerender } = render(meteredProps(makeList(7, 6), true, 3, h));
+    // Enough rows that this scroll stays inside the list, not in the end spacer.
+    const { container, rerender } = render(meteredProps(makeList(16, 15), true, 3, h));
     const port = container.querySelector('.custom-scrollbar') as HTMLElement;
     port.scrollTop = ROW;
     fireEvent.scroll(port);
@@ -4027,7 +4022,7 @@ test('after the slot fill, a wheel that would run into the fill slot continues t
 
     // Pin simulated by the prepended height; the full delta is then applied.
     port.scrollTop = ROW + 3 * ROW;
-    rerender(meteredProps(makeList(10, 9), true, 0, h));
+    rerender(meteredProps(makeList(19, 18), true, 0, h));
     expect(port.scrollTop).toBe(ROW + 3 * ROW + deltaY);
     expect(h.onListFollowChange).not.toHaveBeenCalledWith(true);
   } finally {

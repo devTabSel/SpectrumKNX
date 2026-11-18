@@ -490,6 +490,12 @@ button[data-bus-pulse="Outgoing"] {
   border: var(--tt-raw-border);
 }
 
+.tt-hex-byte-alt {
+  color: var(--text-main);
+  background: color-mix(in srgb, var(--accent-primary) 28%, transparent);
+  border-radius: 2px;
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 8px;

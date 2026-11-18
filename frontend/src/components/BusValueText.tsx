@@ -55,6 +55,23 @@ const MODE_TITLE: Record<ValueDisplayMode, string> = {
   bin: 'Show binary',
 };
 
+/** Plain `0x`, then one span per byte. Even bytes carry the zebra stripe. */
+function HexBytes({ label }: { label: string }) {
+  const match = /^(0x)([0-9a-fA-F]*)$/i.exec(label.trim());
+  if (!match) return <>{label}</>;
+  const digits = match[2];
+  const bytes: string[] = [];
+  for (let i = 0; i < digits.length; i += 2) bytes.push(digits.slice(i, i + 2));
+  return (
+    <>
+      {match[1]}
+      {bytes.map((byte, i) => (
+        <span key={i} className={i % 2 === 1 ? 'tt-hex-byte' : 'tt-hex-byte tt-hex-byte-alt'}>{byte}</span>
+      ))}
+    </>
+  );
+}
+
 /**
  * Reusable bus-value display: click cycles decoded → decimal (if different) →
  * hex → binary (≤4-bit DPT). All modes stay stacked so layout does not shift.
@@ -117,7 +134,7 @@ export function BusValueText({
         {opt.label}
         <span className={TT.valueUnit}>{` ${opt.unit}`}</span>
       </>
-    ) : opt.label;
+    ) : opt.mode === 'hex' ? <HexBytes label={opt.label} /> : opt.label;
 
     return (
       <span
@@ -136,12 +153,14 @@ export function BusValueText({
 
   if (!canCycle || !active) {
     const opt = modes[0] ?? { mode: 'decoded' as const, label: '—', unit: undefined };
-    const body = opt.unit ? (
-      <>
-        {opt.label}
-        <span className={TT.valueUnit}>{` ${opt.unit}`}</span>
-      </>
-    ) : opt.label;
+    const body = opt.mode === 'hex'
+      ? <HexBytes label={opt.label} />
+      : opt.unit ? (
+        <>
+          {opt.label}
+          <span className={TT.valueUnit}>{` ${opt.unit}`}</span>
+        </>
+      ) : opt.label;
     return (
       <Tag key={pulseKey ?? undefined} className={decodedClass} style={textStyle} {...pulseProps}>
         {body}

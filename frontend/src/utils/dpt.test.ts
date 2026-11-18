@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { buildWriteDptOptions, COMMON_DPTS } from './dpt';
+import { buildWriteDptOptions, COMMON_DPTS, dptUnit } from './dpt';
 
 describe('buildWriteDptOptions', () => {
   test('seeds common subtypes and bare main types when the catalog is empty', () => {
@@ -32,5 +32,20 @@ describe('buildWriteDptOptions', () => {
     const options = buildWriteDptOptions([], [{ main: 9, sub: 20 }]);
     expect(options.some(o => o.key === '9.020')).toBe(true);
     expect(options.some(o => o.key === '9')).toBe(true);
+  });
+});
+
+describe('dptUnit', () => {
+  test('keeps a real unit and drops a DPT note in the same parentheses', () => {
+    expect(dptUnit('9.001')).toBe('°C');
+    expect(dptUnit('9.004')).toBe('lx');
+    expect(dptUnit('5.001')).toBe('%');
+    expect(dptUnit('14.056')).toBe('W');
+    expect(dptUnit('16.001')).toBe('');
+    expect(dptUnit('16.000')).toBe('');
+    expect(dptUnit('4.002')).toBe('');
+    expect(dptUnit('4.001')).toBe('');
+    expect(dptUnit('7.001')).toBe('');
+    expect(dptUnit('1.001')).toBe('');
   });
 });
